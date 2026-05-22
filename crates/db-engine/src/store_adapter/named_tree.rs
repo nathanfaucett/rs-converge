@@ -77,7 +77,7 @@ where
   }
 }
 
-impl<T> super::EngineStoreTransaction for NamedTreeEngineTransaction<T>
+impl<T> super::EngineStoreReadTransaction for NamedTreeEngineTransaction<T>
 where
   T: NamedTreeTransaction<EngineKey, Vec<u8>> + 'static,
 {
@@ -95,6 +95,61 @@ where
     }
   }
 
+  fn range_table_rows<'a>(
+    &'a self,
+    table_name: &'a str,
+  ) -> impl Stream<Item = Result<(PrimaryKey, EngineRow), EngineError>> + 'a {
+    let tree = row_tree(table_name).to_string();
+    let stream = self.range_bytes(tree);
+    stream! {
+      pin_mut!(stream);
+      while let Some(item) = stream.next().await {
+        yield item
+          .and_then(|(key, row_bytes)| {
+            let row = decode_row_bytes(&row_bytes)?;
+            primary_key_from_engine_key(&key).map(|pk| (pk, row))
+          });
+      }
+    }
+  }
+
+  fn load_catalog<'a>(
+    &'a mut self,
+  ) -> impl Future<Output = Result<(Vec<TableSchema>, Vec<IndexSchema>), EngineError>> + 'a {
+    async move {
+      let table_rows = collect_tree_rows(&self.inner, TABLE_SCHEMA_TREE).await?;
+      let index_rows = collect_tree_rows(&self.inner, INDEX_SCHEMA_TREE).await?;
+      let tables = decode_table_schema_rows(table_rows).map_err(schema_decode_error)?;
+      let indexes = decode_index_schema_rows(index_rows).map_err(schema_decode_error)?;
+      Ok((tables, indexes))
+    }
+  }
+
+  fn range_index_entries<'a>(
+    &'a self,
+    index: &'a IndexSchema,
+  ) -> impl Stream<Item = Result<(EngineKey, PrimaryKey), EngineError>> + 'a {
+    let tree = index_tree(&index.name).to_string();
+    let stream = self.range_bytes(tree);
+    stream! {
+      pin_mut!(stream);
+      while let Some(item) = stream.next().await {
+        yield item.and_then(|(composite, _)| {
+          index.split_entry_key(&composite)
+            .map_err(|_e| EngineError::SchemaMismatch("failed to split entry key".into()))
+            .and_then(|(index_key, row_pk_key)| {
+              primary_key_from_engine_key(&row_pk_key).map(|row_pk| (index_key, row_pk))
+            })
+        });
+      }
+    }
+  }
+}
+
+impl<T> super::EngineStoreTransaction for NamedTreeEngineTransaction<T>
+where
+  T: NamedTreeTransaction<EngineKey, Vec<u8>> + 'static,
+{
   fn insert_table_row<'a>(
     &'a mut self,
     table_name: &'a str,
@@ -121,24 +176,6 @@ where
         .remove_bytes(&row_tree(table_name), &storage_key)
         .await
         .and_then(|row| row.map(|bytes| decode_row_bytes(&bytes)).transpose())
-    }
-  }
-
-  fn range_table_rows<'a>(
-    &'a self,
-    table_name: &'a str,
-  ) -> impl Stream<Item = Result<(PrimaryKey, EngineRow), EngineError>> + 'a {
-    let tree = row_tree(table_name).to_string();
-    let stream = self.range_bytes(tree);
-    stream! {
-      pin_mut!(stream);
-      while let Some(item) = stream.next().await {
-        yield item
-          .and_then(|(key, row_bytes)| {
-            let row = decode_row_bytes(&row_bytes)?;
-            primary_key_from_engine_key(&key).map(|pk| (pk, row))
-          });
-      }
     }
   }
 
@@ -186,18 +223,6 @@ where
     }
   }
 
-  fn load_catalog<'a>(
-    &'a mut self,
-  ) -> impl Future<Output = Result<(Vec<TableSchema>, Vec<IndexSchema>), EngineError>> + 'a {
-    async move {
-      let table_rows = collect_tree_rows(&self.inner, TABLE_SCHEMA_TREE).await?;
-      let index_rows = collect_tree_rows(&self.inner, INDEX_SCHEMA_TREE).await?;
-      let tables = decode_table_schema_rows(table_rows).map_err(schema_decode_error)?;
-      let indexes = decode_index_schema_rows(index_rows).map_err(schema_decode_error)?;
-      Ok((tables, indexes))
-    }
-  }
-
   fn insert_index_entry<'a>(
     &'a mut self,
     index: &'a IndexSchema,
@@ -226,26 +251,6 @@ where
         .remove_bytes(&index_tree(&index.name), &composite)
         .await?;
       Ok(())
-    }
-  }
-
-  fn range_index_entries<'a>(
-    &'a self,
-    index: &'a IndexSchema,
-  ) -> impl Stream<Item = Result<(EngineKey, PrimaryKey), EngineError>> + 'a {
-    let tree = index_tree(&index.name).to_string();
-    let stream = self.range_bytes(tree);
-    stream! {
-      pin_mut!(stream);
-      while let Some(item) = stream.next().await {
-        yield item.and_then(|(composite, _)| {
-          index.split_entry_key(&composite)
-            .map_err(|_e| EngineError::SchemaMismatch("failed to split entry key".into()))
-            .and_then(|(index_key, row_pk_key)| {
-              primary_key_from_engine_key(&row_pk_key).map(|row_pk| (index_key, row_pk))
-            })
-        });
-      }
     }
   }
 

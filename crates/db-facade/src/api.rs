@@ -36,7 +36,9 @@ use super::types::RedbAutomergeStore;
 use super::types::RedbEngineStore;
 #[cfg(feature = "automerge")]
 use super::types::{AutomergeSyncMetrics, InMemoryAutomergeStore};
-use super::types::{Database, DatabaseError, FacadeStore, InMemoryEngineStore, Row, Transaction};
+use super::types::{
+  Database, DatabaseError, FacadeStore, InMemoryEngineStore, ReadTransaction, Row, Transaction,
+};
 #[cfg(all(feature = "automerge", feature = "redb"))]
 use super::types::{FacadeDocumentChangeKeyCodec, FacadeVecBytesCodec};
 
@@ -335,6 +337,11 @@ where
     }
   }
 
+  /// Open a read-only transaction.
+  pub fn read_transaction(&self) -> ReadTransaction<'_, S> {
+    ReadTransaction { db: self }
+  }
+
   /// Subscribe to an `EngineQuery` with optional scope.
   pub async fn subscribe_query(
     &self,
@@ -546,5 +553,54 @@ where
   pub async fn rollback(self) -> Result<(), DatabaseError> {
     self.inner.rollback().await?;
     Ok(())
+  }
+}
+
+impl<'db, S> ReadTransaction<'db, S>
+where
+  S: FacadeStore,
+{
+  /// Execute a SQL string inside this read-only transaction.
+  /// Only SELECT statements are supported.
+  pub async fn execute_sql(
+    &self,
+    resolver: &dyn SchemaResolver,
+    sql: &str,
+  ) -> Result<EngineResult, DatabaseError> {
+    let query =
+      parse_and_translate(sql, resolver).map_err(|e| DatabaseError::Other(format!("{e}")))?;
+    match query {
+      EngineQuery::Select { .. } => self.db.execute_query(query).await,
+      _ => Err(DatabaseError::Other(
+        "read transaction supports only SELECT statements".into(),
+      )),
+    }
+  }
+
+  /// Execute a SQL string inside this read-only transaction with bound parameters.
+  /// Only SELECT statements are supported.
+  pub async fn execute_sql_with_params(
+    &self,
+    resolver: &dyn SchemaResolver,
+    sql: &str,
+    params: &SqlParams,
+  ) -> Result<EngineResult, DatabaseError> {
+    let query = parse_and_translate_with_params(sql, resolver, params)
+      .map_err(|e| DatabaseError::Other(format!("{e}")))?;
+    match query {
+      EngineQuery::Select { .. } => self.db.execute_query(query).await,
+      _ => Err(DatabaseError::Other(
+        "read transaction supports only SELECT statements".into(),
+      )),
+    }
+  }
+
+  pub async fn execute_query(&self, query: EngineQuery) -> Result<EngineResult, DatabaseError> {
+    match query {
+      EngineQuery::Select { .. } => self.db.execute_query(query).await,
+      _ => Err(DatabaseError::Other(
+        "read transaction supports only SELECT queries".into(),
+      )),
+    }
   }
 }

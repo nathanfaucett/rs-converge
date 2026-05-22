@@ -84,4 +84,10 @@ pub trait BTree<K, V>: BTreeExecutor<K, V> {
   fn transaction<'a>(
     &'a self,
   ) -> impl MaybeSendFuture<Output = BTreeResult<Self::Transaction>> + 'a;
+
+  fn read_transaction<'a>(
+    &'a self,
+  ) -> impl MaybeSendFuture<Output = BTreeResult<Self::Transaction>> + 'a {
+    self.transaction()
+  }
 }

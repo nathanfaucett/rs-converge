@@ -88,6 +88,14 @@ where
   pub(crate) inner: db_engine::EngineTransaction<'db, NamedTreeEngineStore<S>>,
 }
 
+/// Read-only transaction wrapper delegating to engine query execution.
+pub struct ReadTransaction<'db, S>
+where
+  S: FacadeStore,
+{
+  pub(crate) db: &'db Database<S>,
+}
+
 #[cfg(feature = "automerge")]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FacadeDocumentChangeKeyCodec;

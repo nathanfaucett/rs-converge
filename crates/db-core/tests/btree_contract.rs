@@ -107,6 +107,46 @@ fn redb_transaction_commit_and_rollback_contract() {
   });
 }
 
+async fn read_transaction_observes_committed_state<S>(mut store: S)
+where
+  S: BTree<u64, u64>,
+{
+  store.insert(1, 100).await.expect("insert initial value");
+
+  let tx = store.read_transaction().await.expect("start read tx");
+  assert_eq!(tx.get(&1).await.expect("get value"), Some(100));
+
+  let mut rows = Vec::new();
+  let stream = tx.range(0..10);
+  pin_mut!(stream);
+  while let Some(item) = stream.next().await {
+    let (k, v) = item.expect("range item failed");
+    rows.push((k, v));
+  }
+
+  assert_eq!(rows, vec![(1u64, 100u64)]);
+}
+
+#[test]
+fn inmemory_read_transaction_observes_committed_state() {
+  block_on(async {
+    let store = db_in_memory::InMemoryBTree::<u64, u64>::new();
+    read_transaction_observes_committed_state(store).await;
+  });
+}
+
+#[test]
+fn redb_read_transaction_observes_committed_state() {
+  block_on(async {
+    let path = redb_contract_path();
+    let store = db_redb::REDBBTree::<u64, u64>::open(&path, "contract_table").expect("open redb");
+    let _ = std::fs::remove_file(&path);
+    read_transaction_observes_committed_state(store).await;
+
+    let _ = std::fs::remove_file(path);
+  });
+}
+
 #[test]
 fn redb_transaction_range_merges_contract() {
   block_on(async {

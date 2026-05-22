@@ -75,4 +75,10 @@ pub trait NamedTreeProvider<K, V>: Clone + MaybeSend + MaybeSync {
 
   fn begin_transaction(&self)
   -> impl MaybeSendFuture<Output = BTreeResult<Self::Transaction>> + '_;
+
+  fn begin_read_transaction(
+    &self,
+  ) -> impl MaybeSendFuture<Output = BTreeResult<Self::Transaction>> + '_ {
+    self.begin_transaction()
+  }
 }

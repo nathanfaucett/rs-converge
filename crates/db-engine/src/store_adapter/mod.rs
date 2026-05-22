@@ -21,7 +21,7 @@ pub(crate) use helpers::{
 };
 pub use helpers::{fetch_rows_by_primary_keys, lookup_primary_keys_by_index_predicate};
 use named_tree::NamedTreeEngineTransaction;
-pub use transaction::EngineStoreTransaction;
+pub use transaction::{EngineStoreReadTransaction, EngineStoreTransaction};
 
 async fn collect_tree_rows<T>(tx: &T, tree_name: &str) -> Result<Vec<EngineRow>, EngineError>
 where
@@ -42,6 +42,12 @@ pub trait EngineStore: Clone + MaybeSend + MaybeSync + 'static {
   type Transaction: EngineStoreTransaction + MaybeSend + 'static;
 
   fn engine_transaction(&self) -> impl Future<Output = Result<Self::Transaction, EngineError>>;
+
+  fn engine_read_transaction(
+    &self,
+  ) -> impl Future<Output = Result<Self::Transaction, EngineError>> {
+    self.engine_transaction()
+  }
 
   /// Return the transactional contract this backend honors.
   /// Must be consistent across all calls and implementations.
@@ -106,6 +112,19 @@ where
     async move {
       inner
         .begin_transaction()
+        .await
+        .map(NamedTreeEngineTransaction::new)
+        .map_err(EngineError::from)
+    }
+  }
+
+  fn engine_read_transaction(
+    &self,
+  ) -> impl Future<Output = Result<Self::Transaction, EngineError>> {
+    let inner = &self.inner;
+    async move {
+      inner
+        .begin_read_transaction()
         .await
         .map(NamedTreeEngineTransaction::new)
         .map_err(EngineError::from)

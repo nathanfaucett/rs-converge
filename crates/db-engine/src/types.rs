@@ -34,6 +34,9 @@ pub enum EngineError {
   #[error("query limit exceeded: {0}")]
   QueryLimitExceeded(String),
 
+  #[error("query not supported: {0}")]
+  QueryNotSupported(String),
+
   #[error("primary key missing")]
   PrimaryKeyMissing,
 

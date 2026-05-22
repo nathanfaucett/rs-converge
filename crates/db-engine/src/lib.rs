@@ -21,7 +21,7 @@ mod types;
 pub use access_control::SyncScope;
 pub use change_event::{ChangeEvent, ChangeListener};
 pub use db_types::schema::{ColumnSchema, IndexSchema, TableSchema};
-pub use engine::{EngineDatabase, EngineTransaction};
+pub use engine::{EngineDatabase, EngineReadTransaction, EngineTransaction};
 pub use from_row::FromRow;
 pub use json_ops::{json_extract, json_merge, json_valid};
 pub use query::{
@@ -33,8 +33,9 @@ pub use query::{EngineQuery, EngineResult, ResultColumn};
 pub use row_deserialize_error::RowDeserializeError;
 pub use schema_resolver::SchemaResolver;
 pub use store_adapter::{
-  BackendCapability, EngineStore, EngineStoreTransaction, NamedTreeEngineStore,
-  TransactionContract, fetch_rows_by_primary_keys, lookup_primary_keys_by_index_predicate,
+  BackendCapability, EngineStore, EngineStoreReadTransaction, EngineStoreTransaction,
+  NamedTreeEngineStore, TransactionContract, fetch_rows_by_primary_keys,
+  lookup_primary_keys_by_index_predicate,
 };
 pub use subscriptions::{Subscriber, SubscriptionId};
 pub use types::{EngineError, EngineKey, EngineRow, EngineType, EngineValue, PrimaryKey};

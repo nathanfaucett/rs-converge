@@ -173,11 +173,3 @@ where
     })
   }
 }
-
-// Mark the mock as a storage port for engine tests.
-impl<K, V> crate::port::StoragePort<K, V> for MockBTree<K, V>
-where
-  K: Clone + Ord + Send + Sync + 'static,
-  V: Clone + Send + Sync + 'static,
-{
-}

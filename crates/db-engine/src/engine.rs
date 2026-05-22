@@ -130,6 +130,10 @@ where
     }
   }
 
+  pub fn read_transaction(&self) -> EngineReadTransaction<'_, S> {
+    EngineReadTransaction { db: self }
+  }
+
   pub fn describe_table(&self, table_name: &str) -> Option<TableSchema> {
     self.kernel.table(table_name).ok().cloned()
   }
@@ -335,6 +339,36 @@ where
   }
 }
 
+pub struct EngineReadTransaction<'db, S>
+where
+  S: EngineStore,
+{
+  db: &'db EngineDatabase<S>,
+}
+
+impl<'db, S> EngineReadTransaction<'db, S>
+where
+  S: EngineStore,
+{
+  pub async fn execute(&self, query: EngineQuery) -> Result<EngineResult, EngineError> {
+    match query {
+      EngineQuery::Select { .. } => self.db.execute(query).await,
+      _ => Err(EngineError::QueryNotSupported(
+        "read transaction supports only SELECT queries".into(),
+      )),
+    }
+  }
+
+  pub async fn select(
+    &self,
+    table_name: &str,
+    projection: &[usize],
+    predicate: Option<QualifiedPredicate>,
+  ) -> Result<EngineResult, EngineError> {
+    self.db.select(table_name, projection, predicate).await
+  }
+}
+
 pub struct EngineTransaction<'db, S>
 where
   S: EngineStore,
@@ -519,6 +553,65 @@ mod tests {
         .as_nanos()
     ));
     path
+  }
+
+  #[test]
+  fn engine_read_transaction_supports_select_only() {
+    block_on(async {
+      let store: InMemoryNamedBTree<EngineKey, Vec<u8>> = InMemoryNamedBTree::new();
+      let mut db = EngineDatabase::new(NamedTreeEngineStore::new(store));
+
+      db.register_table(
+        TableSchema {
+          name: "users".into(),
+          columns: vec![
+            ColumnSchema {
+              name: "id".into(),
+              data_type: EngineType::Uuid,
+            },
+            ColumnSchema {
+              name: "name".into(),
+              data_type: EngineType::Text,
+            },
+          ],
+          primary_key: vec![0],
+        },
+        false,
+      )
+      .await
+      .expect("register users");
+
+      db.execute(EngineQuery::Insert {
+        table: "users".into(),
+        row: vec![
+          EngineValue::Uuid([0; 16]),
+          EngineValue::Text("Alice".into()),
+        ],
+        returning: None,
+      })
+      .await
+      .expect("insert row");
+
+      let tx = db.read_transaction();
+      let result = tx
+        .execute(EngineQuery::select_simple("users".into(), vec![0, 1], None))
+        .await
+        .expect("select query");
+      assert_eq!(result.rows.len(), 1);
+
+      let error = tx
+        .execute(EngineQuery::Insert {
+          table: "users".into(),
+          row: vec![EngineValue::Uuid([1; 16]), EngineValue::Text("Bob".into())],
+          returning: None,
+        })
+        .await
+        .expect_err("insert in read transaction should fail");
+      assert!(matches!(
+        error,
+        EngineError::SchemaMismatch(_) | EngineError::QueryNotSupported(_)
+      ));
+    });
   }
 
   fn eq_pred(table: &str, column_index: usize, value: EngineValue) -> QualifiedPredicate {

@@ -23,10 +23,9 @@ where
     options: &SelectOptions,
   ) -> Result<EngineResult, EngineError> {
     let output_columns = self.output_columns_for_select(projection, options)?;
-    let mut writer = self.writer();
-    let tx = writer.transaction().await?;
+    let mut tx = self.store().engine_read_transaction().await?;
     match execute_select_pipeline::<S, _, _>(
-      tx,
+      &mut tx,
       base_table,
       projection,
       predicate,

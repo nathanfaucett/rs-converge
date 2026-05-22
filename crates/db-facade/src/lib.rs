@@ -12,7 +12,9 @@ pub use types::InMemoryAutomergeStore;
 pub use types::RedbAutomergeStore;
 #[cfg(feature = "redb")]
 pub use types::RedbEngineStore;
-pub use types::{Database, DatabaseError, FacadeStore, InMemoryEngineStore, Row, Transaction};
+pub use types::{
+  Database, DatabaseError, FacadeStore, InMemoryEngineStore, ReadTransaction, Row, Transaction,
+};
 
 // Re-export subscription types from db_engine for convenience
 pub use db_engine::{Subscriber, SubscriptionId, SyncScope};
