@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::store_adapter::{
   EngineStore, SchemaStore, TransactionControl, remove_index_entries, remove_table_rows,
 };
-use crate::{EngineError, EngineRow, IndexSchema, TableSchema};
+use crate::{EngineError, IndexSchema, TableSchema};
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct EngineCatalog {
@@ -46,36 +46,6 @@ impl EngineCatalog {
       .filter(|index| index.table_name == table_name)
       .cloned()
       .collect()
-  }
-
-  pub(crate) fn find_index_for_predicate(
-    &self,
-    table_name: &str,
-    predicate: &crate::query::QualifiedPredicate,
-  ) -> Option<IndexSchema> {
-    self
-      .indexes_for_table(table_name)
-      .into_iter()
-      .find(|index| predicate.index_key_for(index).is_some())
-  }
-
-  pub(crate) fn project_row(
-    &self,
-    row: &EngineRow,
-    projection: &[usize],
-  ) -> Result<EngineRow, EngineError> {
-    if projection.is_empty() {
-      return Ok(row.clone());
-    }
-
-    let mut projected = Vec::with_capacity(projection.len());
-    for index in projection {
-      projected.push(row.get(*index).cloned().ok_or_else(|| {
-        EngineError::SchemaMismatch(format!("projection index {} is out of bounds", index))
-      })?);
-    }
-
-    Ok(projected)
   }
 
   pub(crate) async fn load_from_store<S>(&mut self, store: &S) -> Result<(), EngineError>

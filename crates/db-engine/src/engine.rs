@@ -124,97 +124,11 @@ where
   }
 
   pub async fn execute(&self, query: EngineQuery) -> Result<EngineResult, EngineError> {
-    match query {
-      EngineQuery::Insert {
-        table,
-        row,
-        returning,
-      } => {
-        let mut writer = self.kernel.writer();
-        let returning_columns = match &returning {
-          Some(columns) => Some(self.returning_columns(&table, columns)?),
-          None => None,
-        };
-        match writer.insert_returning(&table, row, returning).await {
-          Ok(rows) => {
-            let events = writer.commit().await?;
-            self.recompute_batched_subscriptions(&events).await?;
-            Ok(match returning_columns {
-              Some(columns) => EngineResult::new_with_columns(rows, columns),
-              None => EngineResult::new(rows),
-            })
-          }
-          Err(error) => {
-            let _ = writer.rollback().await;
-            Err(error)
-          }
-        }
-      }
-      EngineQuery::Update {
-        table,
-        assignments,
-        predicate,
-        joins,
-        from_tables,
-        returning,
-      } => {
-        let mut writer = self.kernel.writer();
-        let returning_columns = match &returning {
-          Some(columns) => Some(self.returning_columns(&table, columns)?),
-          None => None,
-        };
-        match writer
-          .update(
-            &table,
-            assignments,
-            predicate,
-            joins,
-            from_tables,
-            returning,
-          )
-          .await
-        {
-          Ok(rows) => {
-            let events = writer.commit().await?;
-            self.recompute_batched_subscriptions(&events).await?;
-            Ok(match returning_columns {
-              Some(columns) => EngineResult::new_with_columns(rows, columns),
-              None => EngineResult::new(rows),
-            })
-          }
-          Err(error) => {
-            let _ = writer.rollback().await;
-            Err(error)
-          }
-        }
-      }
-      EngineQuery::Delete {
-        table,
-        predicate,
-        returning,
-      } => {
-        let mut writer = self.kernel.writer();
-        let returning_columns = match &returning {
-          Some(columns) => Some(self.returning_columns(&table, columns)?),
-          None => None,
-        };
-        match writer.delete(&table, predicate, returning).await {
-          Ok(rows) => {
-            let events = writer.commit().await?;
-            self.recompute_batched_subscriptions(&events).await?;
-            Ok(match returning_columns {
-              Some(columns) => EngineResult::new_with_columns(rows, columns),
-              None => EngineResult::new(rows),
-            })
-          }
-          Err(error) => {
-            let _ = writer.rollback().await;
-            Err(error)
-          }
-        }
-      }
-      other => self.kernel.run(other).await,
+    let (result, events) = self.kernel.run_with_events(query).await?;
+    if !events.is_empty() {
+      self.recompute_batched_subscriptions(&events).await?;
     }
+    Ok(result)
   }
 
   pub async fn select(
@@ -223,7 +137,22 @@ where
     projection: &[usize],
     predicate: Option<QualifiedPredicate>,
   ) -> Result<EngineResult, EngineError> {
-    self.kernel.read(table_name, projection, predicate).await
+    let projection = projection
+      .iter()
+      .map(|column_index| crate::query::QualifiedColumn {
+        table: table_name.to_string(),
+        column_index: *column_index,
+      })
+      .collect();
+
+    self
+      .execute(EngineQuery::Select {
+        table: table_name.to_string(),
+        projection,
+        predicate,
+        options: Box::new(crate::query::SelectOptions::default()),
+      })
+      .await
   }
 
   /// Subscribe to a query with optional access control scope.

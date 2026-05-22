@@ -1,9 +1,12 @@
 mod catalog;
 mod executor;
 mod join_builder;
+mod mutation_execution;
 mod operators;
 mod plan;
 mod planner;
+mod query_execution;
+mod select_execution;
 mod select_orchestrator;
 mod select_pipeline;
 mod transaction_lifecycle;

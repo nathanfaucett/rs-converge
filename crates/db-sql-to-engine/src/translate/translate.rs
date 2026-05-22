@@ -1529,11 +1529,6 @@ fn parse_projection_item(
         projection_qc.push(qc);
       }
     },
-    _ => {
-      return Err(TranslateError::UnsupportedFeature(
-        "unsupported projection item".into(),
-      ));
-    }
   }
   Ok(())
 }

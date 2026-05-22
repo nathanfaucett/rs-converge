@@ -1,19 +1,11 @@
-use futures::future::FutureExt;
-
-use crate::store_adapter::{
-  EngineStore, collect_table_rows, lookup_index_row_pks, materialize_rows_by_primary_keys,
-};
+use crate::store_adapter::EngineStore;
 use crate::{
-  EngineError, IndexSchema, TableSchema, query::Aggregate, query::EngineQuery, query::EngineResult,
-  query::QualifiedColumn, query::QualifiedPredicate, query::ResultColumn, query::SelectOptions,
-  query::UpdateValueExpr,
+  EngineError, IndexSchema, TableSchema, query::Aggregate, query::QualifiedColumn,
+  query::ResultColumn, query::SelectOptions,
 };
 
 use super::catalog::EngineCatalog;
 use super::executor::EngineWriteTxn;
-use super::select_orchestrator::{
-  SelectStageOutput, execute_select_pipeline, finalize_grouped_result,
-};
 use super::transaction_lifecycle::TransactionLifecycle;
 use crate::ChangeListenerRegistry;
 use std::sync::Arc;
@@ -29,7 +21,7 @@ impl<S> EngineKernel<S>
 where
   S: EngineStore,
 {
-  fn dedupe_result_column_names(columns: &mut [ResultColumn]) {
+  pub(super) fn dedupe_result_column_names(columns: &mut [ResultColumn]) {
     use std::collections::HashMap;
 
     let mut counts: HashMap<String, usize> = HashMap::new();
@@ -53,42 +45,6 @@ where
       }
       *entry += 1;
     }
-  }
-
-  fn projection_columns_for_table(
-    &self,
-    table_name: &str,
-    projection: &[usize],
-  ) -> Result<Vec<ResultColumn>, EngineError> {
-    let schema = self.table(table_name)?;
-    let mut columns = Vec::new();
-
-    if projection.is_empty() {
-      for (column_index, column) in schema.columns.iter().enumerate() {
-        columns.push(ResultColumn::new(
-          column.name.clone(),
-          Some(table_name.to_string()),
-          Some(column_index),
-        ));
-      }
-    } else {
-      for column_index in projection {
-        let column = schema.columns.get(*column_index).ok_or_else(|| {
-          EngineError::SchemaMismatch(format!(
-            "projection index {} is out of bounds",
-            column_index
-          ))
-        })?;
-        columns.push(ResultColumn::new(
-          column.name.clone(),
-          Some(table_name.to_string()),
-          Some(*column_index),
-        ));
-      }
-    }
-
-    Self::dedupe_result_column_names(&mut columns);
-    Ok(columns)
   }
 
   fn projection_columns_for_qualified(
@@ -129,7 +85,7 @@ where
     }
   }
 
-  fn output_columns_for_select(
+  pub(super) fn output_columns_for_select(
     &self,
     projection: &[QualifiedColumn],
     options: &SelectOptions,
@@ -164,47 +120,6 @@ where
         None,
         None,
       ));
-    }
-
-    Self::dedupe_result_column_names(&mut columns);
-    Ok(columns)
-  }
-
-  fn output_columns_for_returning(
-    &self,
-    table_name: &str,
-    returning: &[UpdateValueExpr],
-  ) -> Result<Vec<ResultColumn>, EngineError> {
-    let schema = self.table(table_name)?;
-    let mut columns = Vec::with_capacity(returning.len());
-
-    for (index, expression) in returning.iter().enumerate() {
-      match expression {
-        UpdateValueExpr::Column(column_ref) => {
-          if column_ref.table != table_name {
-            return Err(EngineError::SchemaMismatch(format!(
-              "RETURNING column {} must reference target table {}",
-              column_ref.table, table_name
-            )));
-          }
-
-          let column = schema.columns.get(column_ref.column_index).ok_or_else(|| {
-            EngineError::SchemaMismatch(format!(
-              "RETURNING index {} is out of bounds for table {}",
-              column_ref.column_index, table_name
-            ))
-          })?;
-
-          columns.push(ResultColumn::new(
-            column.name.clone(),
-            Some(table_name.to_string()),
-            Some(column_ref.column_index),
-          ));
-        }
-        _ => {
-          columns.push(ResultColumn::new(format!("expr_{}", index + 1), None, None));
-        }
-      }
     }
 
     Self::dedupe_result_column_names(&mut columns);
@@ -277,174 +192,6 @@ where
       lifecycle: TransactionLifecycle::new(),
       change_listener_registry: self.change_listener_registry.clone(),
       pending_events: Vec::new(),
-    }
-  }
-
-  pub(crate) async fn read(
-    &self,
-    table_name: &str,
-    projection: &[usize],
-    predicate: Option<QualifiedPredicate>,
-  ) -> Result<EngineResult, EngineError> {
-    self.table(table_name)?;
-    let columns = self.projection_columns_for_table(table_name, projection)?;
-
-    let mut writer = self.writer();
-    let tx = writer.transaction().await?;
-
-    if let Some(predicate) = &predicate
-      && let Some(index) = self.catalog.find_index_for_predicate(table_name, predicate)
-    {
-      let row_pks = lookup_index_row_pks(tx, &index, predicate).await?;
-      let rows = materialize_rows_by_primary_keys(tx, table_name, row_pks).await?;
-
-      if !rows.is_empty() {
-        return Ok(EngineResult::new_with_columns(
-          rows
-            .into_iter()
-            .map(|row| self.catalog.project_row(&row, projection))
-            .collect::<Result<Vec<_>, _>>()?,
-          columns.clone(),
-        ));
-      }
-    }
-
-    let rows = collect_table_rows(tx, table_name, predicate).await?;
-    Ok(EngineResult::new_with_columns(
-      rows
-        .into_iter()
-        .map(|(_primary_key, row)| self.catalog.project_row(&row, projection))
-        .collect::<Result<Vec<_>, _>>()?,
-      columns,
-    ))
-  }
-
-  pub(crate) async fn read_extended(
-    &self,
-    base_table: &str,
-    projection: &[QualifiedColumn],
-    predicate: Option<QualifiedPredicate>,
-    options: &SelectOptions,
-  ) -> Result<EngineResult, EngineError> {
-    let output_columns = self.output_columns_for_select(projection, options)?;
-    let mut writer = self.writer();
-    let tx = writer.transaction().await?;
-    match execute_select_pipeline::<S, _, _>(
-      tx,
-      base_table,
-      projection,
-      predicate,
-      options,
-      output_columns.clone(),
-      |q| self.run(q),
-    )
-    .await?
-    {
-      SelectStageOutput::Final(result) => Ok(result),
-      SelectStageOutput::Joined(partial_results) => {
-        finalize_grouped_result(partial_results, options, output_columns)
-      }
-    }
-  }
-
-  pub(crate) async fn run(&self, query: EngineQuery) -> Result<EngineResult, EngineError> {
-    match query {
-      EngineQuery::Insert {
-        table,
-        row,
-        returning,
-      } => {
-        let mut writer = self.writer();
-        let returning_columns = match &returning {
-          Some(columns) => Some(self.output_columns_for_returning(&table, columns)?),
-          None => None,
-        };
-        match writer.insert_returning(&table, row, returning).await {
-          Ok(rows) => {
-            let _ = writer.commit().await?;
-            Ok(match returning_columns {
-              Some(columns) => EngineResult::new_with_columns(rows, columns),
-              None => EngineResult::new(rows),
-            })
-          }
-          Err(error) => {
-            let _ = writer.rollback().await;
-            Err(error)
-          }
-        }
-      }
-      EngineQuery::Select {
-        table,
-        projection,
-        predicate,
-        options,
-      } => {
-        return self
-          .read_extended(&table, &projection, predicate, &options)
-          .boxed_local()
-          .await;
-      }
-      EngineQuery::Update {
-        table,
-        assignments,
-        predicate,
-        joins,
-        from_tables,
-        returning,
-      } => {
-        let mut writer = self.writer();
-        let returning_columns = match &returning {
-          Some(columns) => Some(self.output_columns_for_returning(&table, columns)?),
-          None => None,
-        };
-        match writer
-          .update(
-            &table,
-            assignments,
-            predicate,
-            joins,
-            from_tables,
-            returning,
-          )
-          .await
-        {
-          Ok(rows) => {
-            let _ = writer.commit().await?;
-            Ok(match returning_columns {
-              Some(columns) => EngineResult::new_with_columns(rows, columns),
-              None => EngineResult::new(rows),
-            })
-          }
-          Err(error) => {
-            let _ = writer.rollback().await;
-            Err(error)
-          }
-        }
-      }
-      EngineQuery::Delete {
-        table,
-        predicate,
-        returning,
-      } => {
-        let mut writer = self.writer();
-        let returning_columns = match &returning {
-          Some(columns) => Some(self.output_columns_for_returning(&table, columns)?),
-          None => None,
-        };
-        match writer.delete(&table, predicate, returning).await {
-          Ok(rows) => {
-            let _ = writer.commit().await?;
-            Ok(match returning_columns {
-              Some(columns) => EngineResult::new_with_columns(rows, columns),
-              None => EngineResult::new(rows),
-            })
-          }
-          Err(error) => {
-            let _ = writer.rollback().await;
-            Err(error)
-          }
-        }
-      }
     }
   }
 }

@@ -18,8 +18,8 @@ mod transaction;
 
 pub use backend_contract::{BackendCapability, TransactionContract};
 pub(crate) use helpers::{
-  collect_table_rows, delete_row, find_conflicting_index_entry, lookup_index_row_pks,
-  materialize_rows_by_primary_keys, remove_index_entries, remove_table_rows,
+  collect_table_rows, delete_row, find_conflicting_index_entry, remove_index_entries,
+  remove_table_rows,
 };
 pub use helpers::{fetch_rows_by_primary_keys, lookup_primary_keys_by_index_predicate};
 pub use transaction::{
@@ -436,12 +436,14 @@ mod tests {
         }),
         crate::query::QualifiedOperand::Value(EngineValue::Text("Alice".into())),
       );
-      let row_pks = lookup_index_row_pks(&mut tx2, &index_schema, &predicate)
-        .await
-        .expect("lookup pks");
-      let rows = materialize_rows_by_primary_keys(&mut tx2, "users", row_pks)
-        .await
-        .expect("materialize rows");
+      let row_pks =
+        crate::store_adapter::helpers::lookup_index_row_pks(&mut tx2, &index_schema, &predicate)
+          .await
+          .expect("lookup pks");
+      let rows =
+        crate::store_adapter::helpers::materialize_rows_by_primary_keys(&mut tx2, "users", row_pks)
+          .await
+          .expect("materialize rows");
 
       assert_eq!(rows, vec![row]);
     });
