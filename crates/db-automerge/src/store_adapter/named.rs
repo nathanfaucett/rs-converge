@@ -14,13 +14,13 @@ use db_core::{
 };
 use db_types::{
   EngineKey, EngineValue,
-  key_encoding::{DefaultEncoding, KeyEncoding},
+  key_encoding::{DefaultEncoding, KeyEncoding, RowEncoding},
 };
 
 use super::AutomergeEngineStore;
 use super::snapshot::{
   EngineSnapshotAdapter, encode_snapshot_base64, find_entry, key_in_range, parse_entries,
-  set_entry, snapshot_bytes, snapshot_doc,
+  read_row_columns, set_entry, set_row_columns, snapshot_bytes, snapshot_doc,
 };
 
 fn parse_named_snapshot(buf: &[u8]) -> Result<Vec<(EngineKey, Vec<u8>)>, BTreeError> {
@@ -58,12 +58,12 @@ fn key_uuid(key: &EngineKey) -> Result<Uuid, BTreeError> {
   }
 }
 
-fn encode_row_snapshot(row: &[u8]) -> Vec<u8> {
-  row.to_vec()
+fn decode_row_bytes(row: &[u8]) -> Result<Vec<EngineValue>, BTreeError> {
+  <DefaultEncoding as RowEncoding>::decode_values(row).map_err(BTreeError::other)
 }
 
-fn decode_row_snapshot(buf: &[u8]) -> Result<Vec<u8>, BTreeError> {
-  Ok(buf.to_vec())
+fn encode_row_bytes(row: &[EngineValue]) -> Vec<u8> {
+  <DefaultEncoding as RowEncoding>::encode_values(row)
 }
 
 fn row_key_from_doc_id(doc_id: Uuid) -> EngineKey {
@@ -176,16 +176,18 @@ where
     let Some(doc) = self.inner.get(&doc_id).await? else {
       return Ok(None);
     };
-    let Some(bytes) = snapshot_bytes(&doc)? else {
-      return Ok(None);
-    };
     if is_row_tree(tree) {
-      if bytes.is_empty() {
-        Ok(None)
-      } else {
-        decode_row_snapshot(&bytes).map(Some)
-      }
+      Ok(read_row_columns(&doc)?.and_then(|row| {
+        if row.is_empty() {
+          None
+        } else {
+          Some(encode_row_bytes(&row))
+        }
+      }))
     } else {
+      let Some(bytes) = snapshot_bytes(&doc)? else {
+        return Ok(None);
+      };
       find_in_named_snapshot(&bytes, key)
     }
   }
@@ -201,8 +203,13 @@ where
   {
     let doc_id = doc_id_for_tree_key(tree, &key)?;
     let existing = self.inner.get(&doc_id).await?;
-    let new_snapshot = if is_row_tree(tree) {
-      encode_row_snapshot(&value)
+    let row_values = if is_row_tree(tree) {
+      Some(decode_row_bytes(&value)?)
+    } else {
+      None
+    };
+    let new_snapshot = if row_values.is_some() {
+      Vec::new()
     } else {
       let existing_bytes = match &existing {
         Some(doc) => snapshot_bytes(doc)?,
@@ -213,20 +220,31 @@ where
 
     let new_doc = if let Some(doc) = existing {
       let mut updated = doc;
-      updated
-        .put(
-          &automerge::ROOT,
-          "snapshot",
-          encode_snapshot_base64(&new_snapshot),
-        )
-        .map_err(BTreeError::other)?;
+      if let Some(row) = row_values.as_ref() {
+        set_row_columns(&mut updated, row)?;
+      } else {
+        updated
+          .put(
+            &automerge::ROOT,
+            "snapshot",
+            encode_snapshot_base64(&new_snapshot),
+          )
+          .map_err(BTreeError::other)?;
+      }
       if is_row_tree(tree) {
         set_doc_tree(updated, tree)?
       } else {
         updated
       }
     } else {
-      let created = snapshot_doc(&new_snapshot)?;
+      let mut created = if row_values.is_some() {
+        AutoCommit::new()
+      } else {
+        snapshot_doc(&new_snapshot)?
+      };
+      if let Some(row) = row_values.as_ref() {
+        set_row_columns(&mut created, row)?;
+      }
       if is_row_tree(tree) {
         set_doc_tree(created, tree)?
       } else {
@@ -248,27 +266,33 @@ where
     let Some(existing) = self.inner.get(&doc_id).await? else {
       return Ok(None);
     };
-    let bytes = snapshot_bytes(&existing)?;
-    let removed = if let Some(ref b) = bytes {
-      if is_row_tree(tree) {
-        if b.is_empty() {
+    let removed = if is_row_tree(tree) {
+      read_row_columns(&existing)?.and_then(|row| {
+        if row.is_empty() {
           None
         } else {
-          Some(decode_row_snapshot(b)?)
+          Some(encode_row_bytes(&row))
         }
-      } else {
-        find_in_named_snapshot(b, key)?
-      }
+      })
     } else {
-      None
+      let bytes = snapshot_bytes(&existing)?;
+      if let Some(ref b) = bytes {
+        find_in_named_snapshot(b, key)?
+      } else {
+        None
+      }
     };
     if removed.is_some() {
-      // Tombstone: update the snapshot to empty so the delete is recorded as
-      // an Automerge operation and propagates causally to peers on sync.
       let mut tombstone = existing;
-      tombstone
-        .put(&automerge::ROOT, "snapshot", encode_snapshot_base64(&[]))
-        .map_err(BTreeError::other)?;
+      if is_row_tree(tree) {
+        set_row_columns(&mut tombstone, &[])?;
+      } else {
+        // Tombstone: update the snapshot to empty so the delete is recorded as
+        // an Automerge operation and propagates causally to peers on sync.
+        tombstone
+          .put(&automerge::ROOT, "snapshot", encode_snapshot_base64(&[]))
+          .map_err(BTreeError::other)?;
+      }
       if is_row_tree(tree) {
         tombstone = set_doc_tree(tombstone, tree)?;
       }
@@ -305,21 +329,22 @@ where
           continue;
         }
 
-        let bytes = match snapshot_bytes(&doc) {
-          Ok(Some(b)) => b,
-          Ok(None) => continue,
-          Err(e) => { yield Err(e); return; }
-        };
-
         if row_tree {
-          if bytes.is_empty() {
+          let row = match read_row_columns(&doc) {
+            Ok(Some(row)) => row,
+            Ok(None) => continue,
+            Err(e) => { yield Err(e); return; }
+          };
+          if row.is_empty() {
             continue;
           }
-          match decode_row_snapshot(&bytes) {
-            Ok(row) => entries.push((row_key_from_doc_id(doc_id), row)),
-            Err(e) => { yield Err(e); return; }
-          }
+          entries.push((row_key_from_doc_id(doc_id), encode_row_bytes(&row)));
         } else {
+          let bytes = match snapshot_bytes(&doc) {
+            Ok(Some(b)) => b,
+            Ok(None) => continue,
+            Err(e) => { yield Err(e); return; }
+          };
           match parse_named_snapshot(&bytes) {
             Ok(pairs) => entries.extend(pairs),
             Err(e) => { yield Err(e); return; }
@@ -427,16 +452,18 @@ where
     let Some(doc) = self.inner.inner.get(&doc_id).await? else {
       return Ok(None);
     };
-    let Some(bytes) = snapshot_bytes(&doc)? else {
-      return Ok(None);
-    };
     if is_row_tree(&self.name) {
-      if bytes.is_empty() {
-        Ok(None)
-      } else {
-        decode_row_snapshot(&bytes).map(Some)
-      }
+      Ok(read_row_columns(&doc)?.and_then(|row| {
+        if row.is_empty() {
+          None
+        } else {
+          Some(encode_row_bytes(&row))
+        }
+      }))
     } else {
+      let Some(bytes) = snapshot_bytes(&doc)? else {
+        return Ok(None);
+      };
       find_in_named_snapshot(&bytes, key.borrow())
     }
   }

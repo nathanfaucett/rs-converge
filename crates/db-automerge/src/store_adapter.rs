@@ -18,7 +18,8 @@ mod snapshot;
 pub use named::{AutomergeNamedTransaction, AutomergeNamedTree, AutomergeNamedTreeTransaction};
 use snapshot::{
   StoreSnapshotAdapter, encode_entries, encode_snapshot_base64, find_entry, key_in_range,
-  parse_entries, set_entry, snapshot_bytes, snapshot_doc,
+  parse_entries, read_row_columns, read_store_key_metadata, set_entry, set_row_columns,
+  set_store_key_metadata, snapshot_bytes, snapshot_doc,
 };
 
 /// Automerge-backed engine store: each logical collection (table/index/schema)
@@ -80,6 +81,10 @@ fn doc_id_for_key(key: &StoreKey) -> Uuid {
     StoreKey::TableSchema { table_name } => make_doc_id("table:schema:", table_name),
     StoreKey::IndexSchema { index_name } => make_doc_id("index:schema:", index_name),
   }
+}
+
+fn is_table_row_key(key: &StoreKey) -> bool {
+  matches!(key, StoreKey::TableRow { .. })
 }
 
 fn parse_snapshot(buf: &[u8]) -> Result<Vec<(StoreKey, StoreValue)>, BTreeError> {
@@ -150,6 +155,17 @@ fn doc_with_snapshot(
   }
 }
 
+fn doc_with_row(
+  existing: Option<AutoCommit>,
+  key: &StoreKey,
+  row: &[db_types::EngineValue],
+) -> Result<AutoCommit, BTreeError> {
+  let mut doc = existing.unwrap_or_default();
+  set_store_key_metadata(&mut doc, key)?;
+  set_row_columns(&mut doc, row)?;
+  Ok(doc)
+}
+
 pub struct AutomergeEngineStoreTransaction<B>
 where
   B: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
@@ -175,10 +191,21 @@ where
       let doc_id = doc_id_for_key(&key);
       match inner.get(&doc_id).await? {
         None => Ok(None),
-        Some(doc) => match snapshot_bytes(&doc)? {
-          Some(bytes) => find_in_snapshot(&bytes, &key),
-          None => Ok(None),
-        },
+        Some(doc) => {
+          if is_table_row_key(&key) {
+            return Ok(read_row_columns(&doc)?.and_then(|row| {
+              if row.is_empty() {
+                None
+              } else {
+                Some(StoreValue::Row(row))
+              }
+            }));
+          }
+          match snapshot_bytes(&doc)? {
+            Some(bytes) => find_in_snapshot(&bytes, &key),
+            None => Ok(None),
+          }
+        }
       }
     }
   }
@@ -195,12 +222,19 @@ where
     async move {
       let doc_id = doc_id_for_key(&key);
       let existing = inner.get(&doc_id).await?;
-      let existing_buf = match &existing {
-        Some(doc) => snapshot_bytes(doc)?,
-        None => None,
+      let next_doc = if is_table_row_key(&key) {
+        match &value {
+          StoreValue::Row(row) => doc_with_row(existing, &key, row)?,
+          _ => return Err(BTreeError::UnsupportedOperation),
+        }
+      } else {
+        let existing_buf = match &existing {
+          Some(doc) => snapshot_bytes(doc)?,
+          None => None,
+        };
+        let new_buf = set_in_snapshot(existing_buf.as_deref(), &key, &value)?;
+        doc_with_snapshot(existing, &new_buf)?
       };
-      let new_buf = set_in_snapshot(existing_buf.as_deref(), &key, &value)?;
-      let next_doc = doc_with_snapshot(existing, &new_buf)?;
       inner.insert(doc_id, next_doc).await
     }
   }
@@ -222,6 +256,18 @@ where
         return Ok(None);
       }
       let doc = existing.expect("checked is_some");
+      if is_table_row_key(&key) {
+        let prev = read_row_columns(&doc)?;
+        if prev.as_ref().is_none_or(|row| row.is_empty()) {
+          return Ok(None);
+        }
+        let mut next_doc = doc;
+        set_store_key_metadata(&mut next_doc, &key)?;
+        set_row_columns(&mut next_doc, &[])?;
+        inner.insert(doc_id, next_doc).await?;
+        return Ok(prev.map(StoreValue::Row));
+      }
+
       let buf_opt = snapshot_bytes(&doc)?;
       let (prev, updated) = remove_from_snapshot(buf_opt.as_deref(), &key)?;
       if prev.is_none() {
@@ -251,6 +297,17 @@ where
       pin_mut!(doc_stream);
       while let Some(item) = doc_stream.next().await {
         let (_doc_id, doc) = item?;
+        if let Some(row) = read_row_columns(&doc)? {
+          if row.is_empty() {
+            continue;
+          }
+          if let Some(key) = read_store_key_metadata(&doc)? {
+            if key_in_range(&key, &range) {
+              yield Ok((key, StoreValue::Row(row)));
+            }
+          }
+          continue;
+        }
         if let Some(bytes) = snapshot_bytes(&doc)? {
           match parse_snapshot(&bytes) {
             Ok(pairs) => {
@@ -302,10 +359,21 @@ where
       let guard = automerge.read().await;
       match guard.get(&doc_id).await? {
         None => Ok(None),
-        Some(doc) => match snapshot_bytes(&doc)? {
-          Some(bytes) => find_in_snapshot(&bytes, &k),
-          None => Ok(None),
-        },
+        Some(doc) => {
+          if is_table_row_key(&k) {
+            return Ok(read_row_columns(&doc)?.and_then(|row| {
+              if row.is_empty() {
+                None
+              } else {
+                Some(StoreValue::Row(row))
+              }
+            }));
+          }
+          match snapshot_bytes(&doc)? {
+            Some(bytes) => find_in_snapshot(&bytes, &k),
+            None => Ok(None),
+          }
+        }
       }
     }
   }
@@ -324,12 +392,19 @@ where
       let guard = automerge.read().await;
       let mut tx = guard.transaction().await?;
       let existing = tx.get(&doc_id).await?;
-      let existing_buf = match &existing {
-        Some(doc) => snapshot_bytes(doc)?,
-        None => None,
+      let next_doc = if is_table_row_key(&key) {
+        match &value {
+          StoreValue::Row(row) => doc_with_row(existing, &key, row)?,
+          _ => return Err(BTreeError::UnsupportedOperation),
+        }
+      } else {
+        let existing_buf = match &existing {
+          Some(doc) => snapshot_bytes(doc)?,
+          None => None,
+        };
+        let new_buf = set_in_snapshot(existing_buf.as_deref(), &key, &value)?;
+        doc_with_snapshot(existing, &new_buf)?
       };
-      let new_buf = set_in_snapshot(existing_buf.as_deref(), &key, &value)?;
-      let next_doc = doc_with_snapshot(existing, &new_buf)?;
       tx.insert(doc_id, next_doc).await?;
       tx.commit().await
     }
@@ -354,6 +429,19 @@ where
         return Ok(None);
       }
       let doc = existing.expect("checked is_some");
+      if is_table_row_key(&key) {
+        let prev = read_row_columns(&doc)?;
+        if prev.as_ref().is_none_or(|row| row.is_empty()) {
+          tx.commit().await?;
+          return Ok(None);
+        }
+        let mut next_doc = doc;
+        set_store_key_metadata(&mut next_doc, &key)?;
+        set_row_columns(&mut next_doc, &[])?;
+        tx.insert(doc_id, next_doc).await?;
+        tx.commit().await?;
+        return Ok(prev.map(StoreValue::Row));
+      }
       let buf_opt = snapshot_bytes(&doc)?;
       let (prev, updated) = remove_from_snapshot(buf_opt.as_deref(), &key)?;
       if prev.is_none() {
@@ -384,6 +472,17 @@ where
       pin_mut!(doc_stream);
       while let Some(item) = doc_stream.next().await {
         let (_doc_id, doc) = item?;
+        if let Some(row) = read_row_columns(&doc)? {
+          if row.is_empty() {
+            continue;
+          }
+          if let Some(key) = read_store_key_metadata(&doc)? {
+            if key_in_range(&key, &range) {
+              yield Ok((key, StoreValue::Row(row)));
+            }
+          }
+          continue;
+        }
         if let Some(bytes) = snapshot_bytes(&doc)? {
           match parse_snapshot(&bytes) {
             Ok(pairs) => {

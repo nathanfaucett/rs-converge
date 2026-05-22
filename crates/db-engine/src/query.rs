@@ -146,6 +146,7 @@ pub struct OrderBy {
 pub enum QualifiedOperand {
   Column(QualifiedColumn),
   Value(crate::EngineValue),
+  Lower(Box<QualifiedOperand>),
 }
 
 #[derive(Debug, Clone)]
@@ -171,6 +172,11 @@ pub enum QualifiedPredicate {
   InSubquery {
     expr: QualifiedColumn,
     subquery: Box<crate::EngineQuery>,
+    negated: bool,
+  },
+  Like {
+    expr: QualifiedOperand,
+    pattern: QualifiedOperand,
     negated: bool,
   },
   And(Box<QualifiedPredicate>, Box<QualifiedPredicate>),

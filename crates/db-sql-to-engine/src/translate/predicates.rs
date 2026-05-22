@@ -2,9 +2,27 @@
 use alloc::{boxed::Box, format, string::String, vec::Vec};
 
 use hashbrown::HashMap;
-use sqlparser::ast::{BinaryOperator, Expr as SqlExpr, UnaryOperator};
+use sqlparser::ast::{
+  BinaryOperator, Expr as SqlExpr, FunctionArg, FunctionArgExpr, FunctionArguments, UnaryOperator,
+};
 
 use super::TranslateError;
+
+fn extract_single_function_arg(
+  func: &sqlparser::ast::Function,
+) -> Result<&SqlExpr, TranslateError> {
+  match &func.args {
+    FunctionArguments::List(list) if list.args.len() == 1 => match &list.args[0] {
+      FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => Ok(expr),
+      _ => Err(TranslateError::UnsupportedFeature(
+        "function argument must be a simple expression".into(),
+      )),
+    },
+    _ => Err(TranslateError::UnsupportedFeature(
+      "function must have exactly one argument".into(),
+    )),
+  }
+}
 
 fn resolve_operand(
   expr: &SqlExpr,
@@ -18,9 +36,36 @@ fn resolve_operand(
         crate::translate::helpers::resolve_column_local(expr, alias_map, table_schemas)?,
       ))
     }
-    _ if matches!(expr, SqlExpr::Value(_) | SqlExpr::Cast { .. }) => Ok(
-      db_engine::QualifiedOperand::Value(mapper.map_sql_value(expr)?),
-    ),
+    SqlExpr::Value(_) => Ok(db_engine::QualifiedOperand::Value(
+      mapper.map_sql_value(expr)?,
+    )),
+    SqlExpr::Cast { expr: inner, .. } => {
+      // Resolve through CAST — treat as pass-through for column operands.
+      // Literal-value casts (e.g. UUID::text) fall back to the mapper.
+      if matches!(
+        inner.as_ref(),
+        SqlExpr::Identifier(_) | SqlExpr::CompoundIdentifier(_)
+      ) {
+        resolve_operand(inner, alias_map, table_schemas, mapper)
+      } else {
+        Ok(db_engine::QualifiedOperand::Value(
+          mapper.map_sql_value(expr)?,
+        ))
+      }
+    }
+    SqlExpr::Function(func) => {
+      let name = func.name.to_string().to_lowercase();
+      if name == "lower" {
+        let inner = extract_single_function_arg(func)?;
+        let operand = resolve_operand(inner, alias_map, table_schemas, mapper)?;
+        Ok(db_engine::QualifiedOperand::Lower(Box::new(operand)))
+      } else {
+        Err(TranslateError::UnsupportedFeature(format!(
+          "unsupported function in operand: {}",
+          name
+        )))
+      }
+    }
     _ => Err(TranslateError::UnsupportedFeature(
       "unsupported operand in comparison".into(),
     )),
@@ -162,6 +207,34 @@ pub fn expr_to_qualified_predicate(
     SqlExpr::IsNotNull(inner) => Ok(db_engine::QualifiedPredicate::IsNotNull(resolve_qc_local(
       inner,
     )?)),
+    SqlExpr::Like {
+      negated,
+      expr,
+      pattern,
+      ..
+    } => {
+      let expr_op = resolve_operand(expr, alias_map, table_schemas, mapper)?;
+      let pattern_op = resolve_operand(pattern, alias_map, table_schemas, mapper)?;
+      Ok(db_engine::QualifiedPredicate::Like {
+        expr: expr_op,
+        pattern: pattern_op,
+        negated: *negated,
+      })
+    }
+    SqlExpr::ILike {
+      negated,
+      expr,
+      pattern,
+      ..
+    } => {
+      let expr_op = resolve_operand(expr, alias_map, table_schemas, mapper)?;
+      let pattern_op = resolve_operand(pattern, alias_map, table_schemas, mapper)?;
+      Ok(db_engine::QualifiedPredicate::Like {
+        expr: db_engine::QualifiedOperand::Lower(Box::new(expr_op)),
+        pattern: db_engine::QualifiedOperand::Lower(Box::new(pattern_op)),
+        negated: *negated,
+      })
+    }
     _ => Err(TranslateError::UnsupportedFeature(
       "unsupported WHERE expression".into(),
     )),

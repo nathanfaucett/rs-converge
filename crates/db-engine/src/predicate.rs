@@ -72,6 +72,25 @@ fn resolve_operand(op: &QualifiedOperand, ctx: &dyn RowContext) -> Option<Engine
   match op {
     QualifiedOperand::Value(v) => Some(v.clone()),
     QualifiedOperand::Column(qc) => ctx.get_value(&qc.table, qc.column_index).cloned(),
+    QualifiedOperand::Lower(inner) => match resolve_operand(inner, ctx) {
+      Some(EngineValue::Text(s)) => Some(EngineValue::Text(s.to_lowercase())),
+      other => other,
+    },
+  }
+}
+
+fn like_matches(text: &str, pattern: &str) -> bool {
+  let text: Vec<char> = text.chars().collect();
+  let pat: Vec<char> = pattern.chars().collect();
+  like_match_inner(&text, &pat)
+}
+
+fn like_match_inner(text: &[char], pat: &[char]) -> bool {
+  match pat.first() {
+    None => text.is_empty(),
+    Some('%') => (0..=text.len()).any(|i| like_match_inner(&text[i..], &pat[1..])),
+    Some('_') => !text.is_empty() && like_match_inner(&text[1..], &pat[1..]),
+    Some(&c) => !text.is_empty() && text[0] == c && like_match_inner(&text[1..], &pat[1..]),
   }
 }
 
@@ -179,6 +198,24 @@ pub fn eval_predicate(
       eval_predicate(l, ctx, eval_ctx) || eval_predicate(r, ctx, eval_ctx)
     }
     QualifiedPredicate::Not(p) => !eval_predicate(p, ctx, eval_ctx),
+    QualifiedPredicate::Like {
+      expr,
+      pattern,
+      negated,
+    } => {
+      let text = match resolve_operand(expr, ctx) {
+        Some(EngineValue::Text(s)) => s,
+        Some(EngineValue::Null) | None => return false,
+        Some(v) => format!("{:?}", v),
+      };
+      let pat = match resolve_operand(pattern, ctx) {
+        Some(EngineValue::Text(s)) => s,
+        Some(EngineValue::Null) | None => return false,
+        Some(v) => format!("{:?}", v),
+      };
+      let matched = like_matches(&text, &pat);
+      if *negated { !matched } else { matched }
+    }
   }
 }
 
