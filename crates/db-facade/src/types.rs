@@ -62,14 +62,21 @@ pub struct AutomergeSyncMetrics {
   pub total_document_bytes: usize,
 }
 
-pub trait FacadeStore:
-  Clone + NamedTreeProvider<EngineKey, Vec<u8>> + MaybeSend + MaybeSync + 'static
-{
+pub trait FacadeStore: Clone + MaybeSend + MaybeSync + 'static {
+  type EngineStore: db_engine::EngineStore;
+
+  fn into_engine_store(self) -> Self::EngineStore;
 }
 
-impl<T> FacadeStore for T where
-  T: Clone + NamedTreeProvider<EngineKey, Vec<u8>> + MaybeSend + MaybeSync + 'static
+impl<T> FacadeStore for T
+where
+  T: Clone + NamedTreeProvider<EngineKey, Vec<u8>> + MaybeSend + MaybeSync + 'static,
 {
+  type EngineStore = NamedTreeEngineStore<Self>;
+
+  fn into_engine_store(self) -> Self::EngineStore {
+    NamedTreeEngineStore::new(self)
+  }
 }
 
 /// Opaque database handle.
@@ -77,7 +84,7 @@ pub struct Database<S>
 where
   S: FacadeStore,
 {
-  pub(crate) engine: EngineDatabase<NamedTreeEngineStore<S>>,
+  pub(crate) engine: EngineDatabase<S::EngineStore>,
 }
 
 /// Transaction wrapper delegating to EngineTransaction.
@@ -85,7 +92,7 @@ pub struct Transaction<'db, S>
 where
   S: FacadeStore,
 {
-  pub(crate) inner: db_engine::EngineTransaction<'db, NamedTreeEngineStore<S>>,
+  pub(crate) inner: db_engine::EngineTransaction<'db, S::EngineStore>,
 }
 
 /// Read-only transaction wrapper delegating to engine query execution.

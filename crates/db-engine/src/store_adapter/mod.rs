@@ -1,12 +1,12 @@
 #![allow(clippy::manual_async_fn)]
 
 use crate::{EngineError, EngineKey, EngineRow};
-use core::future::Future;
-use db_core::{MaybeSend, MaybeSync, NamedTreeProvider, NamedTreeTransaction};
+use db_core::NamedTreeTransaction;
 use futures::{StreamExt, pin_mut};
 
 mod backend_contract;
 mod contract;
+mod engine_store;
 mod helpers;
 mod named_tree;
 mod transaction;
@@ -15,12 +15,12 @@ pub use backend_contract::{BackendCapability, TransactionContract};
 pub(crate) use contract::{
   decode_row_bytes, encode_row_bytes, primary_key_from_engine_key, schema_decode_error,
 };
+pub use engine_store::{EngineStore, NamedTreeEngineStore};
 pub(crate) use helpers::{
   collect_table_rows, delete_row, find_conflicting_index_entry, remove_index_entries,
   remove_table_rows,
 };
 pub use helpers::{fetch_rows_by_primary_keys, lookup_primary_keys_by_index_predicate};
-use named_tree::NamedTreeEngineTransaction;
 pub use transaction::{EngineStoreReadTransaction, EngineStoreTransaction};
 
 async fn collect_tree_rows<T>(tx: &T, tree_name: &str) -> Result<Vec<EngineRow>, EngineError>
@@ -36,100 +36,6 @@ where
     rows.push(decode_row_bytes(&row_bytes)?);
   }
   Ok(rows)
-}
-
-pub trait EngineStore: Clone + MaybeSend + MaybeSync + 'static {
-  type Transaction: EngineStoreTransaction + MaybeSend + 'static;
-
-  fn engine_transaction(&self) -> impl Future<Output = Result<Self::Transaction, EngineError>>;
-
-  fn engine_read_transaction(
-    &self,
-  ) -> impl Future<Output = Result<Self::Transaction, EngineError>> {
-    self.engine_transaction()
-  }
-
-  /// Return the transactional contract this backend honors.
-  /// Must be consistent across all calls and implementations.
-  fn transaction_contract(&self) -> TransactionContract {
-    // Default: assume coupled multi-tree atomicity (safest assumption).
-    TransactionContract::coupled_multi_tree()
-  }
-}
-
-/// Explicit adapter for named-tree backends.
-///
-/// This is the engine-level wrapper that maps raw named-tree storage into the
-/// engine store contract.
-pub struct NamedTreeEngineStore<T>
-where
-  T: Clone + NamedTreeProvider<EngineKey, Vec<u8>> + MaybeSend + MaybeSync + 'static,
-{
-  inner: T,
-}
-
-impl<T> NamedTreeEngineStore<T>
-where
-  T: Clone + NamedTreeProvider<EngineKey, Vec<u8>> + MaybeSend + MaybeSync + 'static,
-{
-  pub fn new(inner: T) -> Self {
-    Self { inner }
-  }
-
-  pub fn inner(&self) -> &T {
-    &self.inner
-  }
-}
-
-impl<T> Clone for NamedTreeEngineStore<T>
-where
-  T: Clone + NamedTreeProvider<EngineKey, Vec<u8>> + MaybeSend + MaybeSync + 'static,
-{
-  fn clone(&self) -> Self {
-    Self {
-      inner: self.inner.clone(),
-    }
-  }
-}
-
-impl<T> From<T> for NamedTreeEngineStore<T>
-where
-  T: Clone + NamedTreeProvider<EngineKey, Vec<u8>> + MaybeSend + MaybeSync + 'static,
-{
-  fn from(inner: T) -> Self {
-    NamedTreeEngineStore::new(inner)
-  }
-}
-
-impl<T> EngineStore for NamedTreeEngineStore<T>
-where
-  T: Clone + NamedTreeProvider<EngineKey, Vec<u8>> + MaybeSend + MaybeSync + 'static,
-{
-  type Transaction = NamedTreeEngineTransaction<T::Transaction>;
-
-  fn engine_transaction(&self) -> impl Future<Output = Result<Self::Transaction, EngineError>> {
-    let inner = &self.inner;
-    async move {
-      inner
-        .begin_transaction()
-        .await
-        .map(NamedTreeEngineTransaction::new)
-        .map_err(EngineError::from)
-    }
-  }
-
-  fn engine_read_transaction(
-    &self,
-  ) -> impl Future<Output = Result<Self::Transaction, EngineError>> {
-    let inner = &self.inner;
-    async move {
-      inner
-        .begin_read_transaction()
-        .await
-        .map(NamedTreeEngineTransaction::new)
-        .map_err(EngineError::from)
-    }
-  }
 }
 
 #[cfg(test)]
