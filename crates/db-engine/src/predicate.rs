@@ -68,6 +68,30 @@ impl EvalContext {
   }
 }
 
+pub struct PredicateEvaluator<'a> {
+  eval_ctx: &'a EvalContext,
+}
+
+impl<'a> PredicateEvaluator<'a> {
+  pub fn new(eval_ctx: &'a EvalContext) -> Self {
+    Self { eval_ctx }
+  }
+
+  pub fn matches_row(&self, pred: &QualifiedPredicate, table: &str, row: &EngineRow) -> bool {
+    let ctx = SingleRowContext { table, row };
+    eval_predicate(pred, &ctx, self.eval_ctx)
+  }
+
+  pub fn matches_joined_row(
+    &self,
+    pred: &QualifiedPredicate,
+    partial: &HashMap<String, Option<EngineRow>>,
+  ) -> bool {
+    let ctx = JoinedRowContext { partial };
+    eval_predicate(pred, &ctx, self.eval_ctx)
+  }
+}
+
 fn resolve_operand(op: &QualifiedOperand, ctx: &dyn RowContext) -> Option<EngineValue> {
   match op {
     QualifiedOperand::Value(v) => Some(v.clone()),
@@ -257,12 +281,19 @@ pub fn eval_having_predicate(h: &HavingPredicate, ctx: &GroupRowContext<'_>) -> 
 
 impl QualifiedPredicate {
   pub fn matches_row(&self, table: &str, row: &EngineRow) -> bool {
-    self.matches_row_with_ctx(table, row, &EvalContext::empty())
+    PredicateEvaluator::new(&EvalContext::empty()).matches_row(self, table, row)
   }
 
   pub fn matches_row_with_ctx(&self, table: &str, row: &EngineRow, eval_ctx: &EvalContext) -> bool {
-    let ctx = SingleRowContext { table, row };
-    eval_predicate(self, &ctx, eval_ctx)
+    PredicateEvaluator::new(eval_ctx).matches_row(self, table, row)
+  }
+
+  pub fn matches_joined_row(
+    &self,
+    partial: &HashMap<String, Option<EngineRow>>,
+    eval_ctx: &EvalContext,
+  ) -> bool {
+    PredicateEvaluator::new(eval_ctx).matches_joined_row(self, partial)
   }
 
   pub fn index_key_for(&self, index: &IndexSchema) -> Option<EngineKey> {

@@ -1,6 +1,9 @@
 use futures::{Stream, StreamExt, pin_mut};
 
-use crate::{EngineError, EngineKey, EngineRow, IndexSchema, PrimaryKey};
+use crate::{
+  EngineError, EngineKey, EngineRow, IndexSchema, PrimaryKey,
+  predicate::{EvalContext, PredicateEvaluator},
+};
 
 use super::transaction::{IndexStore, RowStore};
 
@@ -25,10 +28,12 @@ where
   S: Stream<Item = Result<(PrimaryKey, EngineRow), EngineError>>,
 {
   let rows = try_collect(stream).await?;
+  let eval_ctx = EvalContext::empty();
+  let evaluator = PredicateEvaluator::new(&eval_ctx);
   Ok(
     rows
       .into_iter()
-      .filter(|(_, row)| predicate.is_none_or(|p| p.matches_row(table_name, row)))
+      .filter(|(_, row)| predicate.is_none_or(|p| evaluator.matches_row(p, table_name, row)))
       .collect(),
   )
 }

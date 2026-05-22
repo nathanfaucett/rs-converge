@@ -3,7 +3,6 @@ mod executor;
 mod join_builder;
 mod mutation_execution;
 mod operators;
-mod plan;
 mod planner;
 mod query_execution;
 mod select_execution;

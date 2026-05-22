@@ -4,7 +4,7 @@ use super::join_builder::{
   expand_with_from_tables, seed_joined_row_states,
 };
 use super::transaction_lifecycle::TransactionLifecycle;
-use crate::predicate::{EvalContext, JoinedRowContext, eval_predicate};
+use crate::predicate::{EvalContext, PredicateEvaluator};
 use crate::store_adapter::{
   EngineStore, EngineStoreTransaction, RowStore, TransactionControl, collect_table_rows,
   delete_row, find_conflicting_index_entry,
@@ -424,10 +424,8 @@ where
 
     if let Some(pred) = predicate {
       let eval_ctx = EvalContext::empty();
-      partial_results.retain(|partial| {
-        let ctx = JoinedRowContext { partial };
-        eval_predicate(pred, &ctx, &eval_ctx)
-      });
+      let evaluator = PredicateEvaluator::new(&eval_ctx);
+      partial_results.retain(|partial| evaluator.matches_joined_row(pred, partial));
     }
 
     let mut matched: HashMap<PrimaryKey, (EngineRow, JoinedRowState)> = HashMap::new();

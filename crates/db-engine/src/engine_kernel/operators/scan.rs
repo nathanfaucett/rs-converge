@@ -1,6 +1,6 @@
 use crate::{
   EngineError, EngineRow, EngineValue,
-  predicate::EvalContext,
+  predicate::{EvalContext, PredicateEvaluator},
   query::{QualifiedColumn, QualifiedPredicate},
 };
 
@@ -67,10 +67,9 @@ impl Scan {
   }
 
   fn matches_row(&self, row: &EngineRow) -> bool {
-    self
-      .predicate
-      .as_ref()
-      .is_none_or(|pred| pred.matches_row_with_ctx(&self.table, row, &self.eval_ctx))
+    self.predicate.as_ref().is_none_or(|pred| {
+      PredicateEvaluator::new(&self.eval_ctx).matches_row(pred, &self.table, row)
+    })
   }
 }
 

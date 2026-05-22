@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 
-use crate::predicate::{JoinedRowContext, eval_predicate};
+use crate::predicate::PredicateEvaluator;
 use crate::store_adapter::EngineStore;
 use crate::{
   EngineError, EngineRow, EngineValue,
@@ -125,9 +125,7 @@ where
   }
 
   let eval_ctx = crate::predicate::EvalContext::with_cache(subquery_cache);
-  partial_results.retain(|partial| {
-    let ctx = JoinedRowContext { partial };
-    eval_predicate(predicate, &ctx, &eval_ctx)
-  });
+  let evaluator = PredicateEvaluator::new(&eval_ctx);
+  partial_results.retain(|partial| evaluator.matches_joined_row(predicate, partial));
   Ok(())
 }
