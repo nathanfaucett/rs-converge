@@ -4,7 +4,6 @@ use crate::{EngineError, EngineKey, EngineRow, IndexSchema, PrimaryKey, TableSch
 use async_stream::stream;
 use core::future::Future;
 use db_core::{MaybeSend, MaybeSync, NamedTreeProvider, NamedTreeTransaction};
-use db_types::key_encoding::{DefaultEncoding, RowEncoding};
 use db_types::persistence::{
   INDEX_SCHEMA_TREE, TABLE_SCHEMA_TREE, decode_index_schema_rows, decode_table_schema_rows,
   encode_index_schema, encode_table_schema, index_schema_entry_key, index_tree, row_tree,
@@ -13,10 +12,14 @@ use db_types::persistence::{
 use futures::{Stream, StreamExt, pin_mut};
 
 mod backend_contract;
+mod contract;
 mod helpers;
 mod transaction;
 
 pub use backend_contract::{BackendCapability, TransactionContract};
+pub(crate) use contract::{
+  decode_row_bytes, encode_row_bytes, primary_key_from_engine_key, schema_decode_error,
+};
 pub(crate) use helpers::{
   collect_table_rows, delete_row, find_conflicting_index_entry, remove_index_entries,
   remove_table_rows,
@@ -25,39 +28,6 @@ pub use helpers::{fetch_rows_by_primary_keys, lookup_primary_keys_by_index_predi
 pub use transaction::{
   EngineStoreTransaction, IndexStore, RowStore, SchemaStore, TransactionControl,
 };
-
-fn schema_decode_error(error: db_core::DecodeError) -> EngineError {
-  EngineError::SchemaMismatch(error.to_string())
-}
-
-fn encode_row_bytes(row: &EngineRow) -> Vec<u8> {
-  <DefaultEncoding as RowEncoding>::encode_values(row)
-}
-
-fn decode_row_bytes(bytes: &[u8]) -> Result<EngineRow, EngineError> {
-  <DefaultEncoding as RowEncoding>::decode_values(bytes)
-    .map_err(|error| EngineError::SchemaMismatch(format!("row decode error: {}", error)))
-}
-
-fn primary_key_from_engine_key(key: EngineKey) -> Result<PrimaryKey, EngineError> {
-  use db_types::key_encoding::{DefaultEncoding, KeyEncoding};
-
-  let values = <DefaultEncoding as KeyEncoding>::decode_values(&key)
-    .map_err(|e| EngineError::SchemaMismatch(format!("decode key error: {}", e)))?;
-
-  if values.len() != 1 {
-    return Err(EngineError::SchemaMismatch(
-      "row primary key must be single UUID value".into(),
-    ));
-  }
-
-  match &values[0] {
-    db_types::EngineValue::Uuid(bytes) => Ok(PrimaryKey::new(*bytes)),
-    _ => Err(EngineError::SchemaMismatch(
-      "row primary key must be UUID".into(),
-    )),
-  }
-}
 
 async fn collect_tree_rows<T>(tx: &T, tree_name: &str) -> Result<Vec<EngineRow>, EngineError>
 where
@@ -172,7 +142,7 @@ where
           .map_err(EngineError::from)
           .and_then(|(key, row_bytes)| {
             let row = decode_row_bytes(&row_bytes)?;
-            primary_key_from_engine_key(key).map(|pk| (pk, row))
+            primary_key_from_engine_key(&key).map(|pk| (pk, row))
           });
       }
     }
@@ -309,7 +279,7 @@ where
           index.split_entry_key(&composite)
             .map_err(|_e| EngineError::SchemaMismatch("failed to split entry key".into()))
             .and_then(|(index_key, row_pk_key)| {
-              primary_key_from_engine_key(row_pk_key).map(|row_pk| (index_key, row_pk))
+              primary_key_from_engine_key(&row_pk_key).map(|row_pk| (index_key, row_pk))
             })
         });
       }
