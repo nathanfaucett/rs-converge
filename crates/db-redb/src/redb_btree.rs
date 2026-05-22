@@ -359,6 +359,23 @@ where
 // declared port implementation for the engine. The impl is empty since the
 // required methods are provided by the existing `BTree` implementation.
 
+impl<K, V, KC, VC> REDBBTreeTransaction<K, V, KC, VC>
+where
+  K: Debug + Clone + Ord + Send + Sync + 'static,
+  V: Debug + Clone + Send + Sync + 'static,
+  KC: KeyCodec<K>,
+  VC: ValueCodec<V>,
+{
+  fn open_table(
+    &self,
+  ) -> Result<redb::Table<'_, EncodedKey<K, KC>, EncodedValue<V, VC>>, BTreeError> {
+    self
+      .write_tx
+      .open_table(self.table_definition)
+      .map_err(BTreeError::other)
+  }
+}
+
 impl<K, V, KC, VC> BTreeExecutor<K, V> for REDBBTreeTransaction<K, V, KC, VC>
 where
   K: Debug + Clone + Ord + Send + Sync + 'static,
@@ -371,10 +388,7 @@ where
     K: Ord,
     Q: Borrow<K> + MaybeSend + 'a,
   {
-    let table = self
-      .write_tx
-      .open_table(self.table_definition)
-      .map_err(BTreeError::other)?;
+    let table = self.open_table()?;
     let guard = table.get(key).ok().flatten();
     Ok(guard.map(|g| g.value()))
   }
@@ -383,13 +397,8 @@ where
   where
     K: Ord,
   {
-    let mut table = self
-      .write_tx
-      .open_table(self.table_definition)
-      .map_err(BTreeError::other)?;
-
+    let mut table = self.open_table()?;
     table.insert(key, value).map_err(BTreeError::other)?;
-
     Ok(())
   }
 
@@ -398,10 +407,7 @@ where
     K: Ord,
     Q: Borrow<K> + MaybeSend + 'a,
   {
-    let mut table = self
-      .write_tx
-      .open_table(self.table_definition)
-      .map_err(BTreeError::other)?;
+    let mut table = self.open_table()?;
     let guard = table.remove(key).ok().flatten();
     Ok(guard.map(|g| g.value()))
   }
@@ -411,11 +417,8 @@ where
     K: Ord + Clone,
     R: RangeBounds<K> + MaybeSend + 'a,
   {
-    let table_definition = self.table_definition;
-    let write_tx = &self.write_tx;
-
     stream! {
-      let table = match write_tx.open_table(table_definition) {
+      let table = match self.open_table() {
         Ok(table) => table,
         Err(e) => { yield Err(BTreeError::other(e)); return; },
       };

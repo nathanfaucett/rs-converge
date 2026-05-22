@@ -1,14 +1,17 @@
 // Join example: registers two tables and performs an INNER JOIN with a projection.
 use futures::executor::block_on;
 
-use db_engine::{ColumnSchema, EngineDatabase, EngineQuery, EngineType, EngineValue, TableSchema};
+use db_engine::{
+  ColumnSchema, EngineDatabase, EngineQuery, EngineType, EngineValue, NamedTreeEngineStore,
+  TableSchema,
+};
 use db_engine::{JoinClause, JoinKind, JoinOn, QualifiedColumn, SelectOptions};
 use db_in_memory::InMemoryNamedBTree;
 
 fn main() {
   block_on(async {
     let store: InMemoryNamedBTree<_, _> = InMemoryNamedBTree::new();
-    let mut db = EngineDatabase::new(store);
+    let mut db = EngineDatabase::new(NamedTreeEngineStore::new(store));
 
     let users = TableSchema {
       name: "users".into(),

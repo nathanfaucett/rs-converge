@@ -11,8 +11,8 @@ use db_automerge::{AutomergeEngineStore, AutomergeEntry, DocumentChangeKey};
 #[cfg(feature = "redb")]
 use db_engine::EngineKey;
 use db_engine::{
-  EngineDatabase, EngineQuery, EngineResult, FromRow, IndexSchema, Subscriber, SubscriptionId,
-  SyncScope, TableSchema,
+  EngineDatabase, EngineQuery, EngineResult, FromRow, IndexSchema, NamedTreeEngineStore,
+  Subscriber, SubscriptionId, SyncScope, TableSchema,
 };
 #[cfg(feature = "automerge")]
 use db_in_memory::InMemoryBTree;
@@ -52,7 +52,7 @@ where
 impl Database<InMemoryEngineStore> {
   pub fn open_in_memory_sync() -> Self {
     let store = InMemoryNamedBTree::new();
-    let engine = EngineDatabase::new(store);
+    let engine = EngineDatabase::new(NamedTreeEngineStore::new(store));
     Self { engine }
   }
 
@@ -68,13 +68,13 @@ impl Database<InMemoryAutomergeStore> {
   pub async fn open_automerge_in_memory() -> Result<Self, DatabaseError> {
     let backend = InMemoryBTree::<DocumentChangeKey, AutomergeEntry>::new();
     let store = AutomergeEngineStore::new_with_backend(backend);
-    let engine = EngineDatabase::new(store);
+    let engine = EngineDatabase::new(NamedTreeEngineStore::new(store));
     Ok(Self { engine })
   }
 
   /// Merge Automerge documents from each peer and reload schema on both sides.
   pub async fn sync_with(&mut self, other: &mut Self) -> Result<(), DatabaseError> {
-    db_automerge::sync_automerge_stores(self.engine.store(), other.engine.store())
+    db_automerge::sync_automerge_stores(self.engine.store().inner(), other.engine.store().inner())
       .await
       .map_err(|e| DatabaseError::Engine(format!("{e}")))?;
     self.engine.reload_schema().await?;
@@ -83,7 +83,7 @@ impl Database<InMemoryAutomergeStore> {
   }
 
   pub async fn automerge_sync_metrics(&self) -> Result<AutomergeSyncMetrics, DatabaseError> {
-    let docs = db_automerge::collect_documents(self.engine.store())
+    let docs = db_automerge::collect_documents(self.engine.store().inner())
       .await
       .map_err(|e| DatabaseError::Engine(format!("{e}")))?;
     let (document_count, total_document_bytes) = db_automerge::automerge_metrics(&docs);
@@ -108,13 +108,13 @@ impl Database<RedbAutomergeStore> {
     >::open_with_codecs(path, table_name)
     .map_err(|e| DatabaseError::Engine(format!("{e}")))?;
     let store = AutomergeEngineStore::new_with_backend(backend);
-    let engine = EngineDatabase::new(store);
+    let engine = EngineDatabase::new(NamedTreeEngineStore::new(store));
     Ok(Self { engine })
   }
 
   /// Merge Automerge documents from each peer and reload schema on both sides.
   pub async fn sync_with(&mut self, other: &mut Self) -> Result<(), DatabaseError> {
-    db_automerge::sync_automerge_stores(self.engine.store(), other.engine.store())
+    db_automerge::sync_automerge_stores(self.engine.store().inner(), other.engine.store().inner())
       .await
       .map_err(|e| DatabaseError::Engine(format!("{e}")))?;
     self.engine.reload_schema().await?;
@@ -123,7 +123,7 @@ impl Database<RedbAutomergeStore> {
   }
 
   pub async fn automerge_sync_metrics(&self) -> Result<AutomergeSyncMetrics, DatabaseError> {
-    let docs = db_automerge::collect_documents(self.engine.store())
+    let docs = db_automerge::collect_documents(self.engine.store().inner())
       .await
       .map_err(|e| DatabaseError::Engine(format!("{e}")))?;
     let (document_count, total_document_bytes) = db_automerge::automerge_metrics(&docs);
@@ -142,7 +142,7 @@ impl Database<RedbEngineStore> {
   ) -> Result<Self, DatabaseError> {
     let store = REDBNamedBTree::<EngineKey, Vec<u8>, EngineKeyCodec>::open_with_codecs(path)
       .map_err(|e| DatabaseError::Engine(format!("{e}")))?;
-    let engine = EngineDatabase::new(store);
+    let engine = EngineDatabase::new(NamedTreeEngineStore::new(store));
     Ok(Self { engine })
   }
 }
@@ -152,12 +152,12 @@ where
   S: FacadeStore,
 {
   pub fn from_store(store: S) -> Self {
-    let engine = EngineDatabase::new(store);
+    let engine = EngineDatabase::new(NamedTreeEngineStore::new(store));
     Self { engine }
   }
 
   pub async fn open_with_store(store: S) -> Result<Self, DatabaseError> {
-    let engine = EngineDatabase::open(store).await?;
+    let engine = EngineDatabase::open(NamedTreeEngineStore::new(store)).await?;
     Ok(Self { engine })
   }
 

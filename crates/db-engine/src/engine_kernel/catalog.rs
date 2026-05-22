@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::store_adapter::{
-  EngineStore, SchemaStore, TransactionControl, remove_index_entries, remove_table_rows,
+  EngineStore, EngineStoreTransaction, remove_index_entries, remove_table_rows,
 };
 use crate::{EngineError, IndexSchema, TableSchema};
 

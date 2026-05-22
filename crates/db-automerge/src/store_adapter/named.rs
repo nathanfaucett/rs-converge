@@ -160,15 +160,11 @@ where
   inner: <AutomergeBTree<B> as BTree<Uuid, AutoCommit>>::Transaction,
 }
 
-impl<B> NamedTreeTransaction<EngineKey, Vec<u8>> for AutomergeNamedTransaction<B>
+impl<B> AutomergeNamedTransaction<B>
 where
   B: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
 {
-  async fn get<'a>(
-    &'a mut self,
-    tree: &'a str,
-    key: &'a EngineKey,
-  ) -> Result<Option<Vec<u8>>, BTreeError>
+  async fn get_named(&self, tree: &str, key: &EngineKey) -> Result<Option<Vec<u8>>, BTreeError>
   where
     EngineKey: Ord,
   {
@@ -190,6 +186,22 @@ where
       };
       find_in_named_snapshot(&bytes, key)
     }
+  }
+}
+
+impl<B> NamedTreeTransaction<EngineKey, Vec<u8>> for AutomergeNamedTransaction<B>
+where
+  B: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
+{
+  async fn get<'a>(
+    &'a mut self,
+    tree: &'a str,
+    key: &'a EngineKey,
+  ) -> Result<Option<Vec<u8>>, BTreeError>
+  where
+    EngineKey: Ord,
+  {
+    self.get_named(tree, key).await
   }
 
   async fn insert<'a>(
@@ -378,16 +390,16 @@ where
     EngineKey: Ord,
     Q: Borrow<EngineKey> + Send + 'a,
   {
-    let mut tx = self.store.begin_transaction().await?;
-    tx.get(&self.name, key.borrow()).await
+    let tx = self.transaction().await?;
+    tx.get(key.borrow()).await
   }
 
   async fn insert(&mut self, key: EngineKey, value: Vec<u8>) -> Result<(), BTreeError>
   where
     EngineKey: Ord,
   {
-    let mut tx = self.store.begin_transaction().await?;
-    tx.insert(&self.name, key, value).await?;
+    let mut tx = self.transaction().await?;
+    tx.insert(key, value).await?;
     tx.commit().await
   }
 
@@ -396,8 +408,8 @@ where
     EngineKey: Ord,
     Q: Borrow<EngineKey> + Send + 'a,
   {
-    let mut tx = self.store.begin_transaction().await?;
-    let removed = tx.remove(&self.name, key.borrow()).await?;
+    let mut tx = self.transaction().await?;
+    let removed = tx.remove(key.borrow()).await?;
     tx.commit().await?;
     Ok(removed)
   }
@@ -410,14 +422,12 @@ where
     EngineKey: Ord + Clone,
     R: core::ops::RangeBounds<EngineKey> + Send + 'a,
   {
-    let store = self.store.clone();
-    let name = self.name.clone();
     stream! {
-      let tx = match store.begin_transaction().await {
+      let tx = match self.transaction().await {
         Ok(tx) => tx,
         Err(e) => { yield Err(e); return; }
       };
-      let range_stream = tx.range(&name, range);
+      let range_stream = tx.range(range);
       pin_mut!(range_stream);
       while let Some(item) = range_stream.next().await {
         yield item;
@@ -448,24 +458,7 @@ where
     EngineKey: Ord,
     Q: Borrow<EngineKey> + Send + 'a,
   {
-    let doc_id = doc_id_for_tree_key(&self.name, key.borrow())?;
-    let Some(doc) = self.inner.inner.get(&doc_id).await? else {
-      return Ok(None);
-    };
-    if is_row_tree(&self.name) {
-      Ok(read_row_columns(&doc)?.and_then(|row| {
-        if row.is_empty() {
-          None
-        } else {
-          Some(encode_row_bytes(&row))
-        }
-      }))
-    } else {
-      let Some(bytes) = snapshot_bytes(&doc)? else {
-        return Ok(None);
-      };
-      find_in_named_snapshot(&bytes, key.borrow())
-    }
+    self.inner.get_named(&self.name, key.borrow()).await
   }
 
   async fn insert(&mut self, key: EngineKey, value: Vec<u8>) -> Result<(), BTreeError>

@@ -5,7 +5,7 @@ use crate::{
   predicate::{EvalContext, PredicateEvaluator},
 };
 
-use super::transaction::{IndexStore, RowStore};
+use super::transaction::EngineStoreTransaction;
 
 async fn try_collect<T, S>(stream: S) -> Result<Vec<T>, EngineError>
 where
@@ -60,7 +60,7 @@ pub(crate) async fn collect_table_rows<TX>(
   predicate: Option<crate::QualifiedPredicate>,
 ) -> Result<Vec<(PrimaryKey, EngineRow)>, EngineError>
 where
-  TX: RowStore,
+  TX: EngineStoreTransaction,
 {
   collect_matching_table_rows(
     tx.range_table_rows(table_name),
@@ -78,7 +78,7 @@ pub(crate) async fn delete_row<TX>(
   indexes: &[IndexSchema],
 ) -> Result<(), EngineError>
 where
-  TX: RowStore + IndexStore,
+  TX: EngineStoreTransaction,
 {
   tx.remove_table_row(table_name, primary_key).await?;
   for index in indexes {
@@ -91,7 +91,7 @@ where
 
 pub(crate) async fn remove_table_rows<TX>(tx: &mut TX, table_name: &str) -> Result<(), EngineError>
 where
-  TX: RowStore,
+  TX: EngineStoreTransaction,
 {
   let keys = try_collect(
     tx.range_table_rows(table_name)
@@ -109,7 +109,7 @@ pub(crate) async fn remove_index_entries<TX>(
   index: &IndexSchema,
 ) -> Result<(), EngineError>
 where
-  TX: IndexStore,
+  TX: EngineStoreTransaction,
 {
   let keys = try_collect(tx.range_index_entries(index)).await?;
   for (idx_key, row_pk) in keys {
@@ -125,7 +125,7 @@ pub(crate) async fn find_conflicting_index_entry<TX>(
   row_pk: &PrimaryKey,
 ) -> Result<Option<PrimaryKey>, EngineError>
 where
-  TX: IndexStore,
+  TX: EngineStoreTransaction,
 {
   let stream = tx.range_index_entries(index);
   pin_mut!(stream);
@@ -144,7 +144,7 @@ pub(crate) async fn lookup_index_row_pks<TX>(
   predicate: &crate::query::QualifiedPredicate,
 ) -> Result<Vec<PrimaryKey>, EngineError>
 where
-  TX: IndexStore,
+  TX: EngineStoreTransaction,
 {
   let index_key = predicate
     .index_key_for(index)
@@ -163,7 +163,7 @@ pub async fn lookup_primary_keys_by_index_predicate<TX>(
   predicate: &crate::query::QualifiedPredicate,
 ) -> Result<Vec<PrimaryKey>, EngineError>
 where
-  TX: IndexStore,
+  TX: EngineStoreTransaction,
 {
   lookup_index_row_pks(tx, index, predicate).await
 }
@@ -174,7 +174,7 @@ pub(crate) async fn materialize_rows_by_primary_keys<TX>(
   row_pks: Vec<PrimaryKey>,
 ) -> Result<Vec<EngineRow>, EngineError>
 where
-  TX: RowStore,
+  TX: EngineStoreTransaction,
 {
   let mut rows = Vec::new();
   for pk in row_pks {
@@ -192,7 +192,7 @@ pub async fn fetch_rows_by_primary_keys<TX>(
   row_pks: Vec<PrimaryKey>,
 ) -> Result<Vec<EngineRow>, EngineError>
 where
-  TX: RowStore,
+  TX: EngineStoreTransaction,
 {
   materialize_rows_by_primary_keys(tx, table_name, row_pks).await
 }

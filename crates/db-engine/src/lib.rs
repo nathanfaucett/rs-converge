@@ -33,9 +33,8 @@ pub use query::{EngineQuery, EngineResult, ResultColumn};
 pub use row_deserialize_error::RowDeserializeError;
 pub use schema_resolver::SchemaResolver;
 pub use store_adapter::{
-  BackendCapability, EngineStore, EngineStoreTransaction, IndexStore, RowStore, SchemaStore,
-  TransactionContract, TransactionControl, fetch_rows_by_primary_keys,
-  lookup_primary_keys_by_index_predicate,
+  BackendCapability, EngineStore, EngineStoreTransaction, NamedTreeEngineStore,
+  TransactionContract, fetch_rows_by_primary_keys, lookup_primary_keys_by_index_predicate,
 };
 pub use subscriptions::{Subscriber, SubscriptionId};
 pub use types::{EngineError, EngineKey, EngineRow, EngineType, EngineValue, PrimaryKey};

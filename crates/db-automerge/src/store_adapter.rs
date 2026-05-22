@@ -430,29 +430,10 @@ where
     StoreKey: Ord,
     Q: Borrow<StoreKey> + Send + 'a,
   {
-    let automerge = self.automerge.clone();
+    let key = key.borrow().clone();
     async move {
-      let k = key.borrow().clone();
-      let doc_id = doc_id_for_key(&k);
-      let guard = automerge.read().await;
-      match guard.get(&doc_id).await? {
-        None => Ok(None),
-        Some(doc) => {
-          if is_table_row_key(&k) {
-            return Ok(read_row_columns(&doc)?.and_then(|row| {
-              if row.is_empty() {
-                None
-              } else {
-                Some(StoreValue::Row(row))
-              }
-            }));
-          }
-          match snapshot_bytes(&doc)? {
-            Some(bytes) => find_in_snapshot(&bytes, &k),
-            None => Ok(None),
-          }
-        }
-      }
+      let tx = self.transaction().await?;
+      tx.get(key).await
     }
   }
 
@@ -464,26 +445,9 @@ where
   where
     StoreKey: Ord,
   {
-    let automerge = self.automerge.clone();
     async move {
-      let doc_id = doc_id_for_key(&key);
-      let guard = automerge.read().await;
-      let mut tx = guard.transaction().await?;
-      let existing = tx.get(&doc_id).await?;
-      let next_doc = if is_table_row_key(&key) {
-        match &value {
-          StoreValue::Row(row) => doc_with_row(existing, &key, row)?,
-          _ => return Err(BTreeError::UnsupportedOperation),
-        }
-      } else {
-        let existing_buf = match &existing {
-          Some(doc) => snapshot_bytes(doc)?,
-          None => None,
-        };
-        let new_buf = set_in_snapshot(existing_buf.as_deref(), &key, &value)?;
-        doc_with_snapshot(existing, &new_buf)?
-      };
-      tx.insert(doc_id, next_doc).await?;
+      let mut tx = self.transaction().await?;
+      tx.insert(key, value).await?;
       tx.commit().await
     }
   }
@@ -496,42 +460,12 @@ where
     StoreKey: Ord,
     Q: Borrow<StoreKey> + Send + 'a,
   {
-    let automerge = self.automerge.clone();
     let key = key.borrow().clone();
     async move {
-      let doc_id = doc_id_for_key(&key);
-      let guard = automerge.read().await;
-      let mut tx = guard.transaction().await?;
-      let existing = tx.get(&doc_id).await?;
-      if existing.is_none() {
-        return Ok(None);
-      }
-      let doc = existing.expect("checked is_some");
-      if is_table_row_key(&key) {
-        let prev = read_row_columns(&doc)?;
-        if prev.as_ref().is_none_or(|row| row.is_empty()) {
-          tx.commit().await?;
-          return Ok(None);
-        }
-        let mut next_doc = doc;
-        set_store_key_metadata(&mut next_doc, &key)?;
-        set_row_columns(&mut next_doc, &[])?;
-        tx.insert(doc_id, next_doc).await?;
-        tx.commit().await?;
-        return Ok(prev.map(StoreValue::Row));
-      }
-      let buf_opt = snapshot_bytes(&doc)?;
-      let (prev, updated) = remove_from_snapshot(buf_opt.as_deref(), &key)?;
-      if prev.is_none() {
-        tx.commit().await?;
-        return Ok(None);
-      }
-
-      let next = updated.unwrap_or_default();
-      let next_doc = doc_with_snapshot(Some(doc), &next)?;
-      tx.insert(doc_id, next_doc).await?;
+      let mut tx = self.transaction().await?;
+      let result = tx.remove(&key).await?;
       tx.commit().await?;
-      Ok(prev)
+      Ok(result)
     }
   }
 
@@ -543,36 +477,12 @@ where
     StoreKey: Ord + Clone,
     R: core::ops::RangeBounds<StoreKey> + Send + 'a,
   {
-    let automerge = self.automerge.clone();
     stream! {
-      let guard = automerge.read().await;
-      let doc_stream = guard.range(Uuid::from_u128(0)..=Uuid::from_u128(u128::MAX));
-      pin_mut!(doc_stream);
-      while let Some(item) = doc_stream.next().await {
-        let (_doc_id, doc) = item?;
-        if let Some(row) = read_row_columns(&doc)? {
-          if row.is_empty() {
-            continue;
-          }
-          if let Some(key) = read_store_key_metadata(&doc)? {
-            if key_in_range(&key, &range) {
-              yield Ok((key, StoreValue::Row(row)));
-            }
-          }
-          continue;
-        }
-        if let Some(bytes) = snapshot_bytes(&doc)? {
-          match parse_snapshot(&bytes) {
-            Ok(pairs) => {
-              for (k, v) in pairs.into_iter() {
-                if key_in_range(&k, &range) {
-                  yield Ok((k, v));
-                }
-              }
-            }
-            Err(e) => yield Err(e),
-          }
-        }
+      let tx = self.transaction().await?;
+      let rows = tx.range(range);
+      pin_mut!(rows);
+      while let Some(item) = rows.next().await {
+        yield item;
       }
     }
   }

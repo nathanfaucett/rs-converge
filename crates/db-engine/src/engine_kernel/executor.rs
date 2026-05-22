@@ -6,8 +6,7 @@ use super::join_builder::{
 use super::transaction_lifecycle::TransactionLifecycle;
 use crate::predicate::{EvalContext, PredicateEvaluator};
 use crate::store_adapter::{
-  EngineStore, EngineStoreTransaction, RowStore, TransactionControl, collect_table_rows,
-  delete_row, find_conflicting_index_entry,
+  EngineStore, EngineStoreTransaction, collect_table_rows, delete_row, find_conflicting_index_entry,
 };
 use crate::{
   ChangeEvent, ChangeListenerRegistry, EngineError, EngineRow, EngineValue, IndexSchema,

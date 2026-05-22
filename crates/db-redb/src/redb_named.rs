@@ -46,6 +46,23 @@ where
   _phantom: PhantomData<(K, V, KC, VC)>,
 }
 
+impl<K, V, KC, VC> REDBNamedTransaction<K, V, KC, VC>
+where
+  K: Debug + Clone + Ord + Send + Sync + 'static,
+  V: Debug + Clone + Send + Sync + 'static,
+  KC: KeyCodec<K> + Default + Send + Sync + 'static,
+  VC: ValueCodec<V> + Default + Send + Sync + 'static,
+{
+  fn open_table<'a>(
+    &'a self,
+    tree: &'a str,
+  ) -> Result<redb::Table<'a, EncodedKey<K, KC>, EncodedValue<V, VC>>, BTreeError> {
+    let name = intern(tree);
+    let def: TableDefinition<EncodedKey<K, KC>, EncodedValue<V, VC>> = TableDefinition::new(name);
+    self.write_tx.open_table(def).map_err(BTreeError::other)
+  }
+}
+
 impl<K, V, KC, VC> NamedTreeTransaction<K, V> for REDBNamedTransaction<K, V, KC, VC>
 where
   K: Debug + Clone + Ord + Send + Sync + 'static,
@@ -57,9 +74,7 @@ where
   where
     K: Ord,
   {
-    let name = intern(tree);
-    let def: TableDefinition<EncodedKey<K, KC>, EncodedValue<V, VC>> = TableDefinition::new(name);
-    let table = self.write_tx.open_table(def).map_err(BTreeError::other)?;
+    let table = self.open_table(tree)?;
     let guard = table.get(key).map_err(BTreeError::other)?;
     Ok(guard.map(|g| g.value()))
   }
@@ -68,9 +83,7 @@ where
   where
     K: Ord,
   {
-    let name = intern(tree);
-    let def: TableDefinition<EncodedKey<K, KC>, EncodedValue<V, VC>> = TableDefinition::new(name);
-    let mut table = self.write_tx.open_table(def).map_err(BTreeError::other)?;
+    let mut table = self.open_table(tree)?;
     table.insert(key, value).map_err(BTreeError::other)?;
     Ok(())
   }
@@ -79,9 +92,7 @@ where
   where
     K: Ord,
   {
-    let name = intern(tree);
-    let def: TableDefinition<EncodedKey<K, KC>, EncodedValue<V, VC>> = TableDefinition::new(name);
-    let mut table = self.write_tx.open_table(def).map_err(BTreeError::other)?;
+    let mut table = self.open_table(tree)?;
     let guard = table.remove(key).map_err(BTreeError::other)?;
     Ok(guard.map(|g| g.value()))
   }
@@ -91,13 +102,10 @@ where
     K: Ord,
     R: core::ops::RangeBounds<K> + MaybeSend + 'a,
   {
-    let write_tx = &self.write_tx;
     stream! {
-      let name = intern(tree);
-      let def: TableDefinition<EncodedKey<K, KC>, EncodedValue<V, VC>> = TableDefinition::new(name);
-      let table = match write_tx.open_table(def) {
+      let table = match self.open_table(tree) {
         Ok(t) => t,
-        Err(e) => { yield Err(BTreeError::other(e)); return; }
+        Err(e) => { yield Err(e); return; }
       };
       let range_iter = match table.range(range) {
         Ok(r) => r,

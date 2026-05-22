@@ -28,9 +28,56 @@ where
   pub fn new(inner: T) -> Self {
     Self { inner }
   }
+
+  async fn get_bytes<'a>(
+    &'a mut self,
+    tree: &'a str,
+    key: &'a EngineKey,
+  ) -> Result<Option<Vec<u8>>, EngineError> {
+    self.inner.get(tree, key).await.map_err(EngineError::from)
+  }
+
+  async fn insert_bytes<'a>(
+    &'a mut self,
+    tree: &'a str,
+    key: EngineKey,
+    value: Vec<u8>,
+  ) -> Result<(), EngineError> {
+    self
+      .inner
+      .insert(tree, key, value)
+      .await
+      .map_err(EngineError::from)
+  }
+
+  async fn remove_bytes<'a>(
+    &'a mut self,
+    tree: &'a str,
+    key: &'a EngineKey,
+  ) -> Result<Option<Vec<u8>>, EngineError> {
+    self
+      .inner
+      .remove(tree, key)
+      .await
+      .map_err(EngineError::from)
+  }
+
+  fn range_bytes(
+    &self,
+    tree: String,
+  ) -> impl Stream<Item = Result<(EngineKey, Vec<u8>), EngineError>> + '_ {
+    let inner = &self.inner;
+    stream! {
+      let s = inner.range(&tree, ..);
+      pin_mut!(s);
+      while let Some(item) = s.next().await {
+        yield item.map_err(EngineError::from);
+      }
+    }
+  }
 }
 
-impl<T> super::RowStore for NamedTreeEngineTransaction<T>
+impl<T> super::EngineStoreTransaction for NamedTreeEngineTransaction<T>
 where
   T: NamedTreeTransaction<EngineKey, Vec<u8>> + 'static,
 {
@@ -42,10 +89,8 @@ where
     async move {
       let storage_key = primary_key.to_engine_key();
       self
-        .inner
-        .get(&row_tree(table_name), &storage_key)
+        .get_bytes(&row_tree(table_name), &storage_key)
         .await
-        .map_err(EngineError::from)
         .and_then(|row| row.map(|bytes| decode_row_bytes(&bytes)).transpose())
     }
   }
@@ -60,10 +105,8 @@ where
       let storage_key = primary_key.to_engine_key();
       let row_bytes = encode_row_bytes(&row);
       self
-        .inner
-        .insert(&row_tree(table_name), storage_key, row_bytes)
+        .insert_bytes(&row_tree(table_name), storage_key, row_bytes)
         .await
-        .map_err(EngineError::from)
     }
   }
 
@@ -75,10 +118,8 @@ where
     async move {
       let storage_key = primary_key.to_engine_key();
       self
-        .inner
-        .remove(&row_tree(table_name), &storage_key)
+        .remove_bytes(&row_tree(table_name), &storage_key)
         .await
-        .map_err(EngineError::from)
         .and_then(|row| row.map(|bytes| decode_row_bytes(&bytes)).transpose())
     }
   }
@@ -87,14 +128,12 @@ where
     &'a self,
     table_name: &'a str,
   ) -> impl Stream<Item = Result<(PrimaryKey, EngineRow), EngineError>> + 'a {
-    let tree = row_tree(table_name);
-    let inner = &self.inner;
+    let tree = row_tree(table_name).to_string();
+    let stream = self.range_bytes(tree);
     stream! {
-      let s = inner.range(&tree, ..);
-      pin_mut!(s);
-      while let Some(item) = s.next().await {
+      pin_mut!(stream);
+      while let Some(item) = stream.next().await {
         yield item
-          .map_err(EngineError::from)
           .and_then(|(key, row_bytes)| {
             let row = decode_row_bytes(&row_bytes)?;
             primary_key_from_engine_key(&key).map(|pk| (pk, row))
@@ -102,12 +141,7 @@ where
       }
     }
   }
-}
 
-impl<T> super::SchemaStore for NamedTreeEngineTransaction<T>
-where
-  T: NamedTreeTransaction<EngineKey, Vec<u8>> + 'static,
-{
   fn insert_table_schema<'a>(
     &'a mut self,
     schema: TableSchema,
@@ -115,11 +149,7 @@ where
     async move {
       let key = table_schema_entry_key(schema.name.clone());
       let value = encode_row_bytes(&encode_table_schema(&schema));
-      self
-        .inner
-        .insert(TABLE_SCHEMA_TREE, key, value)
-        .await
-        .map_err(EngineError::from)
+      self.insert_bytes(TABLE_SCHEMA_TREE, key, value).await
     }
   }
 
@@ -129,11 +159,7 @@ where
   ) -> impl Future<Output = Result<(), EngineError>> + 'a {
     async move {
       let key = table_schema_entry_key(table_name);
-      self
-        .inner
-        .remove(TABLE_SCHEMA_TREE, &key)
-        .await
-        .map_err(EngineError::from)?;
+      self.remove_bytes(TABLE_SCHEMA_TREE, &key).await?;
       Ok(())
     }
   }
@@ -145,11 +171,7 @@ where
     async move {
       let key = index_schema_entry_key(schema.name.clone());
       let value = encode_row_bytes(&encode_index_schema(&schema));
-      self
-        .inner
-        .insert(INDEX_SCHEMA_TREE, key, value)
-        .await
-        .map_err(EngineError::from)
+      self.insert_bytes(INDEX_SCHEMA_TREE, key, value).await
     }
   }
 
@@ -159,11 +181,7 @@ where
   ) -> impl Future<Output = Result<(), EngineError>> + 'a {
     async move {
       let key = index_schema_entry_key(index_name);
-      self
-        .inner
-        .remove(INDEX_SCHEMA_TREE, &key)
-        .await
-        .map_err(EngineError::from)?;
+      self.remove_bytes(INDEX_SCHEMA_TREE, &key).await?;
       Ok(())
     }
   }
@@ -179,12 +197,7 @@ where
       Ok((tables, indexes))
     }
   }
-}
 
-impl<T> super::IndexStore for NamedTreeEngineTransaction<T>
-where
-  T: NamedTreeTransaction<EngineKey, Vec<u8>> + 'static,
-{
   fn insert_index_entry<'a>(
     &'a mut self,
     index: &'a IndexSchema,
@@ -195,10 +208,8 @@ where
       let row_pk_key = row_pk.to_engine_key();
       let composite = index.make_entry_key(index_key, &row_pk_key);
       self
-        .inner
-        .insert(&index_tree(&index.name), composite, Vec::new())
+        .insert_bytes(&index_tree(&index.name), composite, Vec::new())
         .await
-        .map_err(EngineError::from)
     }
   }
 
@@ -212,10 +223,8 @@ where
       let row_pk_key = row_pk.to_engine_key();
       let composite = index.make_entry_key(index_key, &row_pk_key);
       self
-        .inner
-        .remove(&index_tree(&index.name), &composite)
-        .await
-        .map_err(EngineError::from)?;
+        .remove_bytes(&index_tree(&index.name), &composite)
+        .await?;
       Ok(())
     }
   }
@@ -224,13 +233,12 @@ where
     &'a self,
     index: &'a IndexSchema,
   ) -> impl Stream<Item = Result<(EngineKey, PrimaryKey), EngineError>> + 'a {
-    let tree = index_tree(&index.name);
-    let inner = &self.inner;
+    let tree = index_tree(&index.name).to_string();
+    let stream = self.range_bytes(tree);
     stream! {
-      let s = inner.range(&tree, ..);
-      pin_mut!(s);
-      while let Some(item) = s.next().await {
-        yield item.map_err(EngineError::from).and_then(|(composite, _)| {
+      pin_mut!(stream);
+      while let Some(item) = stream.next().await {
+        yield item.and_then(|(composite, _)| {
           index.split_entry_key(&composite)
             .map_err(|_e| EngineError::SchemaMismatch("failed to split entry key".into()))
             .and_then(|(index_key, row_pk_key)| {
@@ -240,12 +248,7 @@ where
       }
     }
   }
-}
 
-impl<T> super::TransactionControl for NamedTreeEngineTransaction<T>
-where
-  T: NamedTreeTransaction<EngineKey, Vec<u8>> + 'static,
-{
   fn commit(self) -> impl Future<Output = Result<(), EngineError>> {
     async move { self.inner.commit().await.map_err(EngineError::from) }
   }

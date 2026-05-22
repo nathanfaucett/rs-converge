@@ -22,6 +22,13 @@ use std::{collections::BTreeMap, string::String, sync::Arc};
 
 type Inner<K, V> = Arc<RwLock<BTreeMap<String, BTreeMap<K, V>>>>;
 
+macro_rules! tree_or_empty {
+  ($result:ident, $guard:expr, $name:expr) => {
+    let empty = BTreeMap::new();
+    let $result = $guard.get($name).unwrap_or(&empty);
+  };
+}
+
 /// A named-tree provider backed by in-memory storage.
 ///
 /// Each distinct name maps to an independent sub-tree. Trees are created
@@ -158,8 +165,7 @@ where
     Q: Borrow<K> + MaybeSend + 'a,
   {
     let guard = self.inner.read().await;
-    let empty = BTreeMap::new();
-    let tree = guard.get(&self.name).unwrap_or(&empty);
+    tree_or_empty!(tree, guard, &self.name);
     Ok(get_from_patch_then_map(&self.patch, tree, key.borrow()))
   }
 
@@ -177,8 +183,7 @@ where
     Q: Borrow<K> + MaybeSend + 'a,
   {
     let guard = self.inner.read().await;
-    let empty = BTreeMap::new();
-    let tree = guard.get(&self.name).unwrap_or(&empty);
+    tree_or_empty!(tree, guard, &self.name);
     Ok(remove_from_patch_then_map(
       &mut self.patch,
       tree,
@@ -197,8 +202,7 @@ where
 
     stream! {
       let guard = inner.read().await;
-      let empty = BTreeMap::new();
-      let tree = guard.get(&name).unwrap_or(&empty);
+      tree_or_empty!(tree, guard, &name);
       let merged = merge_patch_range(&patch, tree, range);
       for (key, value) in merged {
         yield Ok((key, value));
@@ -265,8 +269,7 @@ where
     }
 
     let guard = self.inner.read().await;
-    let empty = BTreeMap::new();
-    let sub_map = guard.get(tree).unwrap_or(&empty);
+    tree_or_empty!(sub_map, guard, tree);
     let patch = self.patches.entry(tree_owned).or_default();
     Ok(remove_from_patch_then_map(patch, sub_map, key))
   }
@@ -282,8 +285,7 @@ where
 
     stream! {
       let guard = inner.read().await;
-      let empty = BTreeMap::new();
-      let sub_map = guard.get(&tree).unwrap_or(&empty);
+      tree_or_empty!(sub_map, guard, &tree);
       let merged = merge_patch_range(&patch, sub_map, range);
       for (k, v) in merged {
         yield Ok((k, v));

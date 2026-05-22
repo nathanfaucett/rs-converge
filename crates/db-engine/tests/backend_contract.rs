@@ -2,12 +2,13 @@
 /// Verifies that backends honor their declared transactional guarantees.
 use db_engine::{
   BackendCapability, ColumnSchema, EngineDatabase, EngineQuery, EngineStore, EngineType,
-  EngineValue, SyncScope, TableSchema, UpdateAssignment,
+  EngineValue, NamedTreeEngineStore, SyncScope, TableSchema, UpdateAssignment,
 };
 use db_in_memory::InMemoryNamedBTree;
 use futures::executor::block_on;
 
-type TestDb = EngineDatabase<InMemoryNamedBTree<db_engine::EngineKey, Vec<u8>>>;
+type TestDb =
+  EngineDatabase<NamedTreeEngineStore<InMemoryNamedBTree<db_engine::EngineKey, Vec<u8>>>>;
 
 fn uuid_value(id: u128) -> EngineValue {
   EngineValue::Uuid(id.to_be_bytes())
@@ -15,17 +16,17 @@ fn uuid_value(id: u128) -> EngineValue {
 
 fn make_test_db() -> TestDb {
   let store: InMemoryNamedBTree<db_engine::EngineKey, Vec<u8>> = InMemoryNamedBTree::new();
-  EngineDatabase::new(store)
+  EngineDatabase::new(NamedTreeEngineStore::new(store))
 }
 
 #[derive(Clone)]
 struct InvalidContractStore {
-  inner: InMemoryNamedBTree<db_engine::EngineKey, Vec<u8>>,
+  inner: NamedTreeEngineStore<InMemoryNamedBTree<db_engine::EngineKey, Vec<u8>>>,
 }
 
 impl EngineStore for InvalidContractStore {
   type Transaction =
-    <InMemoryNamedBTree<db_engine::EngineKey, Vec<u8>> as EngineStore>::Transaction;
+    <NamedTreeEngineStore<InMemoryNamedBTree<db_engine::EngineKey, Vec<u8>>> as EngineStore>::Transaction;
 
   fn engine_transaction(
     &self,
@@ -57,7 +58,7 @@ fn transaction_contract_defaults_to_multi_tree_atomicity() {
 fn invalid_store_contract_fails_checked_new() {
   block_on(async {
     let store = InvalidContractStore {
-      inner: InMemoryNamedBTree::new(),
+      inner: NamedTreeEngineStore::new(InMemoryNamedBTree::new()),
     };
 
     let result = EngineDatabase::new_checked(store);
@@ -69,7 +70,7 @@ fn invalid_store_contract_fails_checked_new() {
 fn invalid_store_contract_fails_open() {
   block_on(async {
     let store = InvalidContractStore {
-      inner: InMemoryNamedBTree::new(),
+      inner: NamedTreeEngineStore::new(InMemoryNamedBTree::new()),
     };
 
     let result = EngineDatabase::open(store).await;

@@ -10,7 +10,7 @@ use db_automerge::{AutomergeEngineStore, AutomergeEntry, DocumentChangeKey, Docu
 #[cfg(feature = "automerge")]
 use db_core::BufferSink;
 use db_core::{MaybeSend, MaybeSync, NamedTreeProvider};
-use db_engine::{EngineDatabase, EngineKey, EngineValue};
+use db_engine::{EngineDatabase, EngineKey, EngineValue, NamedTreeEngineStore};
 #[cfg(feature = "automerge")]
 use db_in_memory::InMemoryBTree;
 use db_in_memory::InMemoryNamedBTree;
@@ -77,7 +77,7 @@ pub struct Database<S>
 where
   S: FacadeStore,
 {
-  pub(crate) engine: EngineDatabase<S>,
+  pub(crate) engine: EngineDatabase<NamedTreeEngineStore<S>>,
 }
 
 /// Transaction wrapper delegating to EngineTransaction.
@@ -85,7 +85,7 @@ pub struct Transaction<'db, S>
 where
   S: FacadeStore,
 {
-  pub(crate) inner: db_engine::EngineTransaction<'db, S>,
+  pub(crate) inner: db_engine::EngineTransaction<'db, NamedTreeEngineStore<S>>,
 }
 
 #[cfg(feature = "automerge")]
