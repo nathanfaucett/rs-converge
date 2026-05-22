@@ -2,7 +2,7 @@
 /// Verifies that backends honor their declared transactional guarantees.
 use db_engine::{
   BackendCapability, ColumnSchema, EngineDatabase, EngineQuery, EngineStore, EngineType,
-  EngineValue, TableSchema, UpdateAssignment,
+  EngineValue, SyncScope, TableSchema, UpdateAssignment,
 };
 use db_in_memory::InMemoryNamedBTree;
 use futures::executor::block_on;
@@ -18,6 +18,30 @@ fn make_test_db() -> TestDb {
   EngineDatabase::new(store)
 }
 
+#[derive(Clone)]
+struct InvalidContractStore {
+  inner: InMemoryNamedBTree<db_engine::EngineKey, Vec<u8>>,
+}
+
+impl EngineStore for InvalidContractStore {
+  type Transaction =
+    <InMemoryNamedBTree<db_engine::EngineKey, Vec<u8>> as EngineStore>::Transaction;
+
+  fn engine_transaction(
+    &self,
+  ) -> impl std::future::Future<Output = Result<Self::Transaction, db_engine::EngineError>> {
+    async move { self.inner.engine_transaction().await }
+  }
+
+  fn transaction_contract(&self) -> db_engine::TransactionContract {
+    db_engine::TransactionContract {
+      atomicity: db_engine::BackendCapability::MultiTreeAtomicity,
+      multi_tree_write_atomicity: false,
+      schema_mutation_atomicity: true,
+    }
+  }
+}
+
 #[test]
 fn transaction_contract_defaults_to_multi_tree_atomicity() {
   block_on(async {
@@ -26,6 +50,134 @@ fn transaction_contract_defaults_to_multi_tree_atomicity() {
     assert_eq!(contract.atomicity, BackendCapability::MultiTreeAtomicity);
     assert!(contract.multi_tree_write_atomicity);
     assert!(contract.validate().is_ok());
+  });
+}
+
+#[test]
+fn invalid_store_contract_fails_checked_new() {
+  block_on(async {
+    let store = InvalidContractStore {
+      inner: InMemoryNamedBTree::new(),
+    };
+
+    let result = EngineDatabase::new_checked(store);
+    assert!(result.is_err());
+  });
+}
+
+#[test]
+fn invalid_store_contract_fails_open() {
+  block_on(async {
+    let store = InvalidContractStore {
+      inner: InMemoryNamedBTree::new(),
+    };
+
+    let result = EngineDatabase::open(store).await;
+    assert!(result.is_err());
+  });
+}
+
+#[test]
+fn execute_with_scope_rejects_disallowed_tables() {
+  block_on(async {
+    let mut db = make_test_db();
+
+    db.register_table(
+      TableSchema {
+        name: "users".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Uuid,
+          },
+          ColumnSchema {
+            name: "name".into(),
+            data_type: EngineType::Text,
+          },
+        ],
+        primary_key: vec![0],
+      },
+      false,
+    )
+    .await
+    .expect("register users");
+
+    let query = EngineQuery::select_simple("users".into(), vec![0, 1], None);
+    let scope = SyncScope::new(vec!["other".to_string()].into_iter().collect());
+
+    let result = db.execute_with_scope(query, &scope).await;
+    assert!(result.is_err());
+  });
+}
+
+#[test]
+fn execute_with_scope_applies_main_table_filter() {
+  block_on(async {
+    let mut db = make_test_db();
+
+    db.register_table(
+      TableSchema {
+        name: "users".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Uuid,
+          },
+          ColumnSchema {
+            name: "name".into(),
+            data_type: EngineType::Text,
+          },
+        ],
+        primary_key: vec![0],
+      },
+      false,
+    )
+    .await
+    .expect("register users");
+
+    db.execute(EngineQuery::Insert {
+      table: "users".into(),
+      row: vec![
+        EngineValue::Uuid([0; 16]),
+        EngineValue::Text("Alice".into()),
+      ],
+      returning: None,
+    })
+    .await
+    .expect("insert alice");
+
+    db.execute(EngineQuery::Insert {
+      table: "users".into(),
+      row: vec![EngineValue::Uuid([1; 16]), EngineValue::Text("Bob".into())],
+      returning: None,
+    })
+    .await
+    .expect("insert bob");
+
+    let query = EngineQuery::select_simple("users".into(), vec![0, 1], None);
+    let scope = SyncScope::new(vec!["users".to_string()].into_iter().collect()).add_filter(
+      "users".to_string(),
+      db_engine::QualifiedPredicate::Equals(
+        db_engine::QualifiedOperand::Column(db_engine::QualifiedColumn {
+          table: "users".into(),
+          column_index: 1,
+        }),
+        db_engine::QualifiedOperand::Value(EngineValue::Text("Alice".into())),
+      ),
+    );
+
+    let result = db
+      .execute_with_scope(query, &scope)
+      .await
+      .expect("execute with scope");
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(
+      result.rows[0],
+      vec![
+        EngineValue::Uuid([0; 16]),
+        EngineValue::Text("Alice".into())
+      ]
+    );
   });
 }
 

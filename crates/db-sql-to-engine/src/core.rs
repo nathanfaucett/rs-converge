@@ -1,6 +1,4 @@
-use crate::translate::{
-  SchemaResolver, TranslateError, parse_and_translate, parse_and_translate_to_ir,
-};
+use crate::translate::{SchemaResolver, TranslateError, parse_and_translate_to_ir};
 
 /// Lightweight translator facade and helpers.
 pub struct Translator {}
@@ -22,7 +20,7 @@ impl Translator {
     sql: &str,
     resolver: &dyn SchemaResolver,
   ) -> Result<db_engine::EngineQuery, TranslateError> {
-    parse_and_translate(sql, resolver)
+    self.sql_to_adapter(sql, resolver, &crate::engine_adapter::DbEngineAdapter)
   }
 
   /// Parse SQL and lower the canonical IR using the provided `EngineAdapter`.

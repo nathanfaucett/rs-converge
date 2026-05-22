@@ -54,17 +54,14 @@ mod tests {
 
       // Create query
       let query = EngineQuery::select_simple("items".to_string(), vec![0, 1], None);
-      let scope = SyncScope::default();
 
       // Subscribe both
       let id1 = db
-        .engine
-        .subscribe(query.clone(), &scope, sub1_arc.clone())
+        .subscribe_query(query.clone(), sub1_arc.clone(), None)
         .await
         .expect("subscribe sub1");
       let id2 = db
-        .engine
-        .subscribe(query.clone(), &scope, sub2_arc.clone())
+        .subscribe_query(query.clone(), sub2_arc.clone(), None)
         .await
         .expect("subscribe sub2");
 
@@ -73,10 +70,10 @@ mod tests {
       assert_eq!(sub2.get_call_count(), 1);
 
       // Unsubscribe first one
-      db.engine.unsubscribe(id1).await.expect("unsubscribe");
+      db.unsubscribe(id1).await.expect("unsubscribe");
 
       // Unsubscribe second one
-      db.engine.unsubscribe(id2).await.expect("unsubscribe");
+      db.unsubscribe(id2).await.expect("unsubscribe");
 
       println!("✓ Multiple subscriptions work");
     });
@@ -101,8 +98,7 @@ mod tests {
 
       // Subscribe should work
       let _id = db
-        .engine
-        .subscribe(query.clone(), &scope, subscriber_arc.clone())
+        .subscribe_query(query.clone(), subscriber_arc.clone(), Some(scope))
         .await
         .expect("subscribe with scope");
 
@@ -148,12 +144,10 @@ mod tests {
       let subscriber_arc = Arc::new(subscriber.clone());
 
       let query = EngineQuery::select_simple("logs".to_string(), vec![0, 1], None);
-      let scope = SyncScope::default();
 
       // Subscribe to empty table
       let _id = db
-        .engine
-        .subscribe(query, &scope, subscriber_arc.clone())
+        .subscribe_query(query, subscriber_arc.clone(), None)
         .await
         .expect("subscribe");
 

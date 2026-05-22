@@ -7,9 +7,7 @@ use alloc::{format, vec::Vec};
 use std::vec::Vec;
 
 #[cfg(feature = "automerge")]
-use db_automerge::{AutoCommit, AutomergeEngineStore, AutomergeEntry, DocumentChangeKey};
-#[cfg(feature = "automerge")]
-use db_core::{BTree, BTreeExecutor, BTreeTransaction};
+use db_automerge::{AutomergeEngineStore, AutomergeEntry, DocumentChangeKey};
 #[cfg(feature = "redb")]
 use db_engine::EngineKey;
 use db_engine::{
@@ -23,15 +21,8 @@ use db_in_memory::InMemoryNamedBTree;
 use db_redb::{REDBBTree, REDBNamedBTree};
 #[cfg(feature = "redb")]
 use db_types::EngineKeyCodec;
-#[cfg(feature = "automerge")]
-use std::collections::BTreeMap;
 #[cfg(feature = "redb")]
 use std::path::Path;
-
-#[cfg(feature = "automerge")]
-use futures::StreamExt;
-#[cfg(feature = "automerge")]
-use uuid::Uuid;
 
 use db_sql_to_engine::{
   CanonicalStatement, DdlOp, SchemaResolver, SqlParams, parse_and_translate,
@@ -72,102 +63,6 @@ impl Database<InMemoryEngineStore> {
 }
 
 #[cfg(feature = "automerge")]
-async fn collect_documents<B>(
-  store: &AutomergeEngineStore<B>,
-) -> Result<BTreeMap<Uuid, AutoCommit>, DatabaseError>
-where
-  B: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
-{
-  let guard = store.automerge.read().await;
-  let stream = guard.range(Uuid::from_u128(0)..=Uuid::from_u128(u128::MAX));
-  futures::pin_mut!(stream);
-
-  let mut docs = BTreeMap::new();
-  while let Some(item) = stream.next().await {
-    let (doc_id, doc) = match item {
-      Ok(pair) => pair,
-      Err(_) if docs.is_empty() => return Ok(docs),
-      Err(err) => return Err(DatabaseError::Engine(format!("{err}"))),
-    };
-    docs.insert(doc_id, doc);
-  }
-
-  Ok(docs)
-}
-
-#[cfg(feature = "automerge")]
-async fn apply_documents<B>(
-  store: &AutomergeEngineStore<B>,
-  docs: &BTreeMap<Uuid, AutoCommit>,
-) -> Result<(), DatabaseError>
-where
-  B: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
-{
-  let guard = store.automerge.read().await;
-  let mut tx = guard
-    .transaction()
-    .await
-    .map_err(|e| DatabaseError::Engine(format!("{e}")))?;
-
-  for (doc_id, doc) in docs {
-    tx.insert(*doc_id, doc.clone())
-      .await
-      .map_err(|e| DatabaseError::Engine(format!("{e}")))?;
-  }
-
-  tx.commit()
-    .await
-    .map_err(|e| DatabaseError::Engine(format!("{e}")))?;
-
-  Ok(())
-}
-
-#[cfg(feature = "automerge")]
-async fn sync_automerge_stores<B>(
-  left: &AutomergeEngineStore<B>,
-  right: &AutomergeEngineStore<B>,
-) -> Result<(), DatabaseError>
-where
-  B: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
-{
-  let left_docs = collect_documents(left).await?;
-  let right_docs = collect_documents(right).await?;
-
-  let mut merged_docs = left_docs;
-  for (doc_id, mut right_doc) in right_docs {
-    if let Some(left_doc) = merged_docs.get_mut(&doc_id) {
-      left_doc
-        .merge(&mut right_doc)
-        .map_err(|e| DatabaseError::Engine(format!("{e}")))?;
-    } else {
-      merged_docs.insert(doc_id, right_doc);
-    }
-  }
-
-  apply_documents(left, &merged_docs).await?;
-  apply_documents(right, &merged_docs).await?;
-
-  Ok(())
-}
-
-#[cfg(feature = "automerge")]
-fn automerge_metrics(docs: &BTreeMap<Uuid, AutoCommit>) -> AutomergeSyncMetrics {
-  let document_count = docs.len();
-  let total_document_bytes = docs
-    .values()
-    .map(|doc| {
-      let mut copy = doc.clone();
-      copy.save().len()
-    })
-    .sum();
-
-  AutomergeSyncMetrics {
-    document_count,
-    total_document_bytes,
-  }
-}
-
-#[cfg(feature = "automerge")]
 impl Database<InMemoryAutomergeStore> {
   /// Open an Automerge-backed database (feature-gated).
   pub async fn open_automerge_in_memory() -> Result<Self, DatabaseError> {
@@ -179,15 +74,23 @@ impl Database<InMemoryAutomergeStore> {
 
   /// Merge Automerge documents from each peer and reload schema on both sides.
   pub async fn sync_with(&mut self, other: &mut Self) -> Result<(), DatabaseError> {
-    sync_automerge_stores(self.engine.store(), other.engine.store()).await?;
+    db_automerge::sync_automerge_stores(self.engine.store(), other.engine.store())
+      .await
+      .map_err(|e| DatabaseError::Engine(format!("{e}")))?;
     self.engine.reload_schema().await?;
     other.engine.reload_schema().await?;
     Ok(())
   }
 
   pub async fn automerge_sync_metrics(&self) -> Result<AutomergeSyncMetrics, DatabaseError> {
-    let docs = collect_documents(self.engine.store()).await?;
-    Ok(automerge_metrics(&docs))
+    let docs = db_automerge::collect_documents(self.engine.store())
+      .await
+      .map_err(|e| DatabaseError::Engine(format!("{e}")))?;
+    let (document_count, total_document_bytes) = db_automerge::automerge_metrics(&docs);
+    Ok(AutomergeSyncMetrics {
+      document_count,
+      total_document_bytes,
+    })
   }
 }
 
@@ -211,15 +114,23 @@ impl Database<RedbAutomergeStore> {
 
   /// Merge Automerge documents from each peer and reload schema on both sides.
   pub async fn sync_with(&mut self, other: &mut Self) -> Result<(), DatabaseError> {
-    sync_automerge_stores(self.engine.store(), other.engine.store()).await?;
+    db_automerge::sync_automerge_stores(self.engine.store(), other.engine.store())
+      .await
+      .map_err(|e| DatabaseError::Engine(format!("{e}")))?;
     self.engine.reload_schema().await?;
     other.engine.reload_schema().await?;
     Ok(())
   }
 
   pub async fn automerge_sync_metrics(&self) -> Result<AutomergeSyncMetrics, DatabaseError> {
-    let docs = collect_documents(self.engine.store()).await?;
-    Ok(automerge_metrics(&docs))
+    let docs = db_automerge::collect_documents(self.engine.store())
+      .await
+      .map_err(|e| DatabaseError::Engine(format!("{e}")))?;
+    let (document_count, total_document_bytes) = db_automerge::automerge_metrics(&docs);
+    Ok(AutomergeSyncMetrics {
+      document_count,
+      total_document_bytes,
+    })
   }
 }
 

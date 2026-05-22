@@ -67,6 +67,8 @@ where
   }
 
   pub fn new(store: S) -> Self {
+    debug_assert!(store.transaction_contract().validate().is_ok());
+
     let change_listener_registry = Arc::new(ChangeListenerRegistry::new());
     Self {
       kernel: EngineKernel::new(store, change_listener_registry.clone()),
@@ -74,7 +76,13 @@ where
     }
   }
 
+  pub fn new_checked(store: S) -> Result<Self, EngineError> {
+    store.transaction_contract().validate()?;
+    Ok(Self::new(store))
+  }
+
   pub async fn open(store: S) -> Result<Self, EngineError> {
+    store.transaction_contract().validate()?;
     let change_listener_registry = Arc::new(ChangeListenerRegistry::new());
     Ok(Self {
       kernel: EngineKernel::open(store, change_listener_registry.clone()).await?,
@@ -203,11 +211,81 @@ where
   pub async fn execute_with_scope(
     &self,
     query: EngineQuery,
-    _scope: &SyncScope,
+    scope: &SyncScope,
   ) -> Result<EngineResult, EngineError> {
-    // For now, just execute the query normally.
-    // TODO: Add scope filtering to WHERE clause and result filtering
-    self.kernel.run(query).await
+    let scoped_query = self.apply_scope_to_query(query, scope)?;
+    self.kernel.run(scoped_query).await
+  }
+
+  fn apply_scope_to_query(
+    &self,
+    query: EngineQuery,
+    scope: &SyncScope,
+  ) -> Result<EngineQuery, EngineError> {
+    for table in query.tables() {
+      if !scope.can_access(&table) {
+        return Err(EngineError::TableNotFound(table));
+      }
+    }
+
+    let add_filter = |predicate: Option<QualifiedPredicate>, table: String| {
+      if let Some(filter) = scope.filter_for(&table) {
+        let combined = match predicate {
+          Some(existing) => QualifiedPredicate::And(Box::new(existing), Box::new(filter.clone())),
+          None => filter.clone(),
+        };
+        Some(combined)
+      } else {
+        predicate
+      }
+    };
+
+    Ok(match query {
+      EngineQuery::Select {
+        table: query_table,
+        projection,
+        predicate,
+        options,
+      } => EngineQuery::Select {
+        table: query_table.clone(),
+        projection,
+        predicate: add_filter(predicate, query_table.clone()),
+        options,
+      },
+      EngineQuery::Update {
+        table: query_table,
+        assignments,
+        predicate,
+        joins,
+        from_tables,
+        returning,
+      } => EngineQuery::Update {
+        table: query_table.clone(),
+        assignments,
+        predicate: add_filter(predicate, query_table.clone()),
+        joins,
+        from_tables,
+        returning,
+      },
+      EngineQuery::Delete {
+        table: query_table,
+        predicate,
+        returning,
+      } => EngineQuery::Delete {
+        table: query_table.clone(),
+        predicate: add_filter(predicate, query_table.clone()),
+        returning,
+      },
+      EngineQuery::Insert {
+        table,
+        row,
+        returning,
+      } => EngineQuery::Insert {
+        table,
+        row,
+        returning,
+      },
+    })
   }
 
   pub(crate) async fn recompute_batched_subscriptions(
