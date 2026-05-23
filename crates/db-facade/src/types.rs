@@ -51,6 +51,7 @@ pub type Row = Vec<EngineValue>;
 pub type InMemoryEngineStore = InMemoryNamedBTree<EngineKey, Vec<u8>>;
 #[cfg(feature = "redb")]
 pub type RedbEngineStore = REDBNamedBTree<EngineKey, Vec<u8>, EngineKeyCodec>;
+
 #[cfg(all(feature = "automerge", feature = "redb"))]
 pub type RedbAutomergeStore = AutomergeEngineStore<
   REDBBTree<DocumentChangeKey, Vec<u8>, FacadeDocumentChangeKeyCodec, FacadeVecBytesCodec>,

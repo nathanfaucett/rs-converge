@@ -166,9 +166,10 @@ where
     let prev = self.get_document(doc_id).await;
     let (start, end) = document_entry_bounds(doc_id);
 
-    if let Err(_) = self
+    if self
       .remove_document_keys_atomic(start.clone(), end.clone())
       .await
+      .is_err()
     {
       let _ = self.remove_document_keys_fallback(start, end).await;
     }

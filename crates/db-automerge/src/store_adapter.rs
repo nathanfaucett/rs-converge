@@ -21,7 +21,6 @@ use db_types::codec::{decode_store_value, encode_store_value};
 use doc_payload::{
   read_row_columns, read_store_key_metadata, set_row_columns, set_store_key_metadata,
 };
-pub use named::{AutomergeNamedTransaction, AutomergeNamedTree, AutomergeNamedTreeTransaction};
 
 /// Automerge-backed engine store: each logical collection (table/index/schema)
 /// is represented by an Automerge `AutoCommit` document stored in the

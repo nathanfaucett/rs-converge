@@ -1177,18 +1177,20 @@ fn sql_expr_to_update_value_expr_body(
   sql_expr_to_update_value_expr_core(expr, alias_map, table_schemas, mapper)
 }
 
+type UpdateValueExprConverter = fn(
+  &SqlExpr,
+  &HashMap<String, String>,
+  &HashMap<String, db_engine::TableSchema>,
+  &dyn ValueMapper,
+) -> Result<Option<db_engine::UpdateValueExpr>, TranslateError>;
+
 fn sql_expr_to_update_value_expr_core(
   expr: &SqlExpr,
   alias_map: &HashMap<String, String>,
   table_schemas: &HashMap<String, db_engine::TableSchema>,
   mapper: &dyn ValueMapper,
 ) -> Result<db_engine::UpdateValueExpr, TranslateError> {
-  let converters: &[fn(
-    &SqlExpr,
-    &HashMap<String, String>,
-    &HashMap<String, db_engine::TableSchema>,
-    &dyn ValueMapper,
-  ) -> Result<Option<db_engine::UpdateValueExpr>, TranslateError>] = &[
+  let converters: &[UpdateValueExprConverter] = &[
     sql_expr_to_update_value_expr_value,
     sql_expr_to_update_value_expr_column,
     sql_expr_to_update_value_expr_binary,
