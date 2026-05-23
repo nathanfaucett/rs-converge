@@ -25,26 +25,28 @@ fn main() {
       .expect("open automerge redb");
 
     // Create tables via SQL using the facade.
-    db.execute_sql("CREATE TABLE users (id INT PRIMARY KEY, name TEXT);")
+    db.execute_sql("CREATE TABLE users (id UUID PRIMARY KEY, name TEXT);")
       .await
       .expect("create users");
-    db.execute_sql("CREATE TABLE orders (id INT PRIMARY KEY, user_id INT, amount INT);")
+    db.execute_sql("CREATE TABLE orders (id UUID PRIMARY KEY, user_id UUID, amount INT);")
       .await
       .expect("create orders");
 
     // Insert some users via SQL using the facade
-    db.execute_sql("INSERT INTO users (id, name) VALUES (1, 'Alice');")
+    db.execute_sql("INSERT INTO users (id, name) VALUES ('00000000-0000-0000-0000-000000000001'::uuid, 'Alice');")
       .await
       .expect("insert user 1");
-    db.execute_sql("INSERT INTO users (id, name) VALUES (2, 'Bob');")
-      .await
-      .expect("insert user 2");
+    db.execute_sql(
+      "INSERT INTO users (id, name) VALUES ('00000000-0000-0000-0000-000000000002'::uuid, 'Bob');",
+    )
+    .await
+    .expect("insert user 2");
 
     // Insert some orders via SQL using the facade
-    db.execute_sql("INSERT INTO orders (id, user_id, amount) VALUES (1,1,100);")
+    db.execute_sql("INSERT INTO orders (id, user_id, amount) VALUES ('00000000-0000-0000-0000-000000000001'::uuid,'00000000-0000-0000-0000-000000000001'::uuid,100);")
       .await
       .expect("insert order 1");
-    db.execute_sql("INSERT INTO orders (id, user_id, amount) VALUES (2,2,200);")
+    db.execute_sql("INSERT INTO orders (id, user_id, amount) VALUES ('00000000-0000-0000-0000-000000000002'::uuid,'00000000-0000-0000-0000-000000000002'::uuid,200);")
       .await
       .expect("insert order 2");
 

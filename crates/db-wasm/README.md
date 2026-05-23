@@ -46,7 +46,7 @@ await init();
 
 const db = BrowserDatabase.open();
 
-await db.executeSql("CREATE TABLE users (id INT PRIMARY KEY, name TEXT)");
+await db.executeSql("CREATE TABLE users (id UUID PRIMARY KEY, name TEXT)");
 await db.executeSql("INSERT INTO users (id, name) VALUES (1, 'Ada')");
 const result = await db.executeSql("SELECT name FROM users WHERE id = 1");
 console.log(result.rows);
@@ -62,7 +62,7 @@ await init();
 
 const db = BrowserDatabase.open();
 
-await db.executeSql("CREATE TABLE users (id INT PRIMARY KEY, name TEXT)");
+await db.executeSql("CREATE TABLE users (id UUID PRIMARY KEY, name TEXT)");
 await db.executeSql("INSERT INTO users (id, name) VALUES (1, 'Ada')");
 
 const byPositional = await db.executeSqlWithParams(
