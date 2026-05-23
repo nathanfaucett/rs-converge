@@ -1,5 +1,7 @@
-use std::collections::{HashMap, HashSet};
-use std::future::Future;
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::future::Future;
+use hashbrown::{HashMap, HashSet};
 
 use crate::predicate::PredicateEvaluator;
 use crate::store_adapter::EngineStore;

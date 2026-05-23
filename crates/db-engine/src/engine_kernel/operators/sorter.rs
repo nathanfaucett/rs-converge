@@ -1,4 +1,6 @@
-use std::collections::HashSet;
+use alloc::vec::Vec;
+use core::cmp::Ordering;
+use hashbrown::HashSet;
 
 use crate::{
   EngineRow, EngineValue,
@@ -57,11 +59,11 @@ impl Sorter {
             SortDirection::Asc => cmp,
             SortDirection::Desc => cmp.reverse(),
           };
-          if cmp != std::cmp::Ordering::Equal {
+          if cmp != Ordering::Equal {
             return cmp;
           }
         }
-        std::cmp::Ordering::Equal
+        Ordering::Equal
       });
     }
 

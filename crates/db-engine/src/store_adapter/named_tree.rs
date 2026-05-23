@@ -1,4 +1,6 @@
 use crate::{EngineError, EngineKey, EngineRow, IndexSchema, PrimaryKey, TableSchema};
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 use async_stream::stream;
 use core::future::Future;
 use db_core::NamedTreeTransaction;

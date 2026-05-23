@@ -1,4 +1,6 @@
-use std::collections::HashMap;
+use alloc::string::String;
+use alloc::vec::Vec;
+use hashbrown::HashMap;
 
 use crate::{EngineRow, query::QualifiedColumn};
 

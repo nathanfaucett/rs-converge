@@ -1,8 +1,9 @@
 [package]
 name = "db-automerge"
 version = "0.1.0"
-edition = "2024"
 publish = false
+rust-version = "1.95"
+edition = "2024"
 
 [lib]
 path = "src/lib.rs"

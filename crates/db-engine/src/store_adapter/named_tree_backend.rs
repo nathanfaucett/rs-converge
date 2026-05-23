@@ -3,6 +3,11 @@ use db_core::NamedTreeTransaction;
 use db_types::key_encoding::{DefaultEncoding, KeyEncoding, RowEncoding};
 use futures::{Stream, StreamExt, pin_mut};
 
+#[cfg(not(feature = "std"))]
+use alloc::string::{String, ToString};
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+
 use crate::{EngineError, EngineKey, EngineRow, PrimaryKey};
 
 /// Raw named-tree storage access for engine-backed stores.

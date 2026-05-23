@@ -1,4 +1,10 @@
 use crate::store_adapter::EngineStore;
+use alloc::{
+  string::{String, ToString},
+  sync::Arc,
+  vec::Vec,
+};
+
 use crate::{
   EngineError, IndexSchema, TableSchema, query::Aggregate, query::QualifiedColumn,
   query::ResultColumn, query::SelectOptions,
@@ -8,7 +14,6 @@ use super::catalog::EngineCatalog;
 use super::executor::EngineWriteTxn;
 use super::transaction_lifecycle::TransactionLifecycle;
 use crate::ChangeListenerRegistry;
-use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub(crate) struct EngineKernel<S> {
@@ -22,7 +27,7 @@ where
   S: EngineStore,
 {
   pub(super) fn dedupe_result_column_names(columns: &mut [ResultColumn]) {
-    use std::collections::HashMap;
+    use hashbrown::HashMap;
 
     let mut counts: HashMap<String, usize> = HashMap::new();
     for column in columns.iter() {

@@ -1,5 +1,6 @@
 use crate::{ChangeEvent, EngineError, QualifiedPredicate, TableSchema};
-use std::collections::{HashMap, HashSet};
+use alloc::string::String;
+use hashbrown::{HashMap, HashSet};
 
 /// Represents the scope of data a peer can sync and query.
 /// Controls which tables are accessible and applies row-level filters.

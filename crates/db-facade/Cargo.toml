@@ -1,8 +1,9 @@
 [package]
 name = "db-facade"
 version = "0.1.0"
-edition = "2024"
 description = "Facade API over engine and storage backends"
+rust-version = "1.95"
+edition = "2024"
 
 [lib]
 path = "src/lib.rs"

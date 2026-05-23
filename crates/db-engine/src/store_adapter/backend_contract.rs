@@ -1,8 +1,9 @@
+use crate::EngineError;
 /// Explicit backend capabilities and contract documentation.
 ///
 /// Different backends provide different transactional guarantees.
 /// This module makes those guarantees explicit and testable.
-use crate::EngineError;
+use alloc::string::ToString;
 
 /// Transactional guarantees provided by a backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

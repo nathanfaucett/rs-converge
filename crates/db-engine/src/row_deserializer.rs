@@ -1,8 +1,5 @@
 #[cfg(not(feature = "std"))]
-use alloc::string::String;
-
-#[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
+use alloc::string::ToString;
 
 use serde::de::{DeserializeSeed, MapAccess, Visitor};
 

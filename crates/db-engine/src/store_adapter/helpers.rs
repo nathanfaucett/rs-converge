@@ -1,3 +1,4 @@
+use alloc::vec::Vec;
 use futures::{Stream, StreamExt, pin_mut};
 
 use crate::{

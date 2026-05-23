@@ -1,8 +1,9 @@
 [package]
 name = "db-types"
 version = "0.1.0"
-edition = "2024"
 description = "Shared store-level domain types and codec/persistence helpers"
+rust-version = "1.95"
+edition = "2024"
 
 [lib]
 path = "src/lib.rs"

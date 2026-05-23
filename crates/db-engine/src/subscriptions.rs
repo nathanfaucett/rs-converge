@@ -1,6 +1,24 @@
 use crate::{ChangeEvent, EngineError, EngineQuery, EngineResult, SyncScope};
+#[cfg(not(feature = "std"))]
+use alloc::boxed::Box;
+#[cfg(not(feature = "std"))]
+use alloc::string::{String, ToString};
+#[cfg(not(feature = "std"))]
+use alloc::sync::Arc;
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+#[cfg(not(feature = "std"))]
+use core::sync::atomic::{AtomicU64, Ordering};
+use core::{fmt, mem};
+#[cfg(not(feature = "std"))]
+use hashbrown::HashMap;
+#[cfg(not(feature = "std"))]
+use spin::RwLock;
+#[cfg(feature = "std")]
 use std::collections::HashMap;
+#[cfg(feature = "std")]
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(feature = "std")]
 use std::sync::{Arc, RwLock};
 
 /// Unique identifier for a subscription.
@@ -35,8 +53,8 @@ pub(crate) struct QuerySubscription {
   pub(crate) last_results: RwLock<Option<EngineResult>>,
 }
 
-impl std::fmt::Debug for QuerySubscription {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for QuerySubscription {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     f.debug_struct("QuerySubscription")
       .field("id", &self.id)
       .field("query", &self.query)
@@ -77,13 +95,19 @@ impl SubscriptionRegistry {
 
     // Add to subscriptions map
     {
+      #[cfg(feature = "std")]
       let mut subs = self.subscriptions.write().unwrap();
+      #[cfg(not(feature = "std"))]
+      let mut subs = self.subscriptions.write();
       subs.insert(id, subscription.clone());
     }
 
     // Add to table-to-subscriptions index
     {
+      #[cfg(feature = "std")]
       let mut table_map = self.table_to_subscriptions.write().unwrap();
+      #[cfg(not(feature = "std"))]
+      let mut table_map = self.table_to_subscriptions.write();
       for table in subscription.query.tables() {
         table_map.entry(table).or_default().push(id);
       }
@@ -92,10 +116,16 @@ impl SubscriptionRegistry {
 
   /// Unregister a subscription.
   pub(crate) fn unregister(&self, id: SubscriptionId) {
+    #[cfg(feature = "std")]
     let mut subs = self.subscriptions.write().unwrap();
+    #[cfg(not(feature = "std"))]
+    let mut subs = self.subscriptions.write();
     if let Some(sub) = subs.remove(&id) {
       // Remove from table index
+      #[cfg(feature = "std")]
       let mut table_map = self.table_to_subscriptions.write().unwrap();
+      #[cfg(not(feature = "std"))]
+      let mut table_map = self.table_to_subscriptions.write();
       for table in sub.query.tables() {
         if let Some(ids) = table_map.get_mut(&table) {
           ids.retain(|&sid| sid != id);
@@ -109,8 +139,14 @@ impl SubscriptionRegistry {
 
   /// Get all subscriptions affected by a change to a specific table.
   pub(crate) fn subscriptions_for_table(&self, table: &str) -> Vec<Arc<QuerySubscription>> {
+    #[cfg(feature = "std")]
     let table_map = self.table_to_subscriptions.read().unwrap();
+    #[cfg(not(feature = "std"))]
+    let table_map = self.table_to_subscriptions.read();
+    #[cfg(feature = "std")]
     let subs = self.subscriptions.read().unwrap();
+    #[cfg(not(feature = "std"))]
+    let subs = self.subscriptions.read();
 
     if let Some(ids) = table_map.get(table) {
       ids.iter().filter_map(|id| subs.get(id).cloned()).collect()
@@ -120,7 +156,10 @@ impl SubscriptionRegistry {
   }
 
   pub(crate) fn get_subscription(&self, id: SubscriptionId) -> Option<Arc<QuerySubscription>> {
+    #[cfg(feature = "std")]
     let subs = self.subscriptions.read().unwrap();
+    #[cfg(not(feature = "std"))]
+    let subs = self.subscriptions.read();
     subs.get(&id).cloned()
   }
 
@@ -155,14 +194,20 @@ impl SubscriptionBatch {
   }
 
   pub(crate) fn invalidate(&self, id: SubscriptionId) {
+    #[cfg(feature = "std")]
     let mut inv = self.invalidated.write().unwrap();
+    #[cfg(not(feature = "std"))]
+    let mut inv = self.invalidated.write();
     if !inv.contains(&id) {
       inv.push(id);
     }
   }
 
   pub(crate) fn take_invalidated(&self) -> Vec<SubscriptionId> {
+    #[cfg(feature = "std")]
     let mut inv = self.invalidated.write().unwrap();
-    std::mem::take(&mut *inv)
+    #[cfg(not(feature = "std"))]
+    let mut inv = self.invalidated.write();
+    mem::take(&mut *inv)
   }
 }

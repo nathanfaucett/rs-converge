@@ -63,6 +63,9 @@ impl fmt::Display for RowDeserializeError {
 #[cfg(feature = "std")]
 impl std::error::Error for RowDeserializeError {}
 
+#[cfg(not(feature = "std"))]
+impl core::error::Error for RowDeserializeError {}
+
 impl serde::de::Error for RowDeserializeError {
   fn custom<T>(msg: T) -> Self
   where

@@ -13,9 +13,25 @@ use crate::{
   subscriptions::{QuerySubscription, SubscriptionBatch, SubscriptionRegistry},
 };
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 use crate::store_adapter::NamedTreeEngineStore;
-use std::sync::Arc;
+
+#[cfg(not(feature = "std"))]
+use alloc::boxed::Box;
+#[cfg(not(feature = "std"))]
+use alloc::string::{String, ToString};
+#[cfg(not(feature = "std"))]
+use alloc::sync::Arc;
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+#[cfg(not(feature = "std"))]
+use spin::RwLock;
+#[cfg(feature = "std")]
+use std::boxed::Box;
+#[cfg(feature = "std")]
+use std::string::ToString;
+#[cfg(feature = "std")]
+use std::sync::{Arc, RwLock};
 
 #[derive(Debug, Clone)]
 pub struct EngineDatabase<S> {
@@ -198,7 +214,7 @@ where
       query,
       scope: scope.clone(),
       subscriber,
-      last_results: std::sync::RwLock::new(Some(initial_results)),
+      last_results: RwLock::new(Some(initial_results)),
     });
 
     // Register subscription
@@ -315,7 +331,16 @@ where
       match self.execute_with_scope(sub.query.clone(), &sub.scope).await {
         Ok(new_results) => {
           // Check if results changed (delta detection)
+          #[cfg(feature = "std")]
           let results_changed = match &*sub.last_results.read().unwrap() {
+            None => true, // First time
+            Some(old) => {
+              // Simple comparison: same number of rows and same content
+              old.rows != new_results.rows || old.columns != new_results.columns
+            }
+          };
+          #[cfg(not(feature = "std"))]
+          let results_changed = match &*sub.last_results.read() {
             None => true, // First time
             Some(old) => {
               // Simple comparison: same number of rows and same content
@@ -325,7 +350,11 @@ where
 
           if results_changed {
             // Update last results and call subscriber
-            *sub.last_results.write().unwrap() = Some(new_results.clone());
+            #[cfg(feature = "std")]
+            let mut last_results = sub.last_results.write().unwrap();
+            #[cfg(not(feature = "std"))]
+            let mut last_results = sub.last_results.write();
+            *last_results = Some(new_results.clone());
             sub.subscriber.on_results(Ok(new_results));
           }
         }
@@ -520,7 +549,7 @@ where
   }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
   use super::*;
   use crate::query::{
@@ -535,6 +564,7 @@ mod tests {
   use db_redb::REDBNamedBTree;
   use db_types::EngineKeyCodec;
   use futures::executor::block_on;
+  #[cfg(feature = "std")]
   use std::{
     fs,
     path::PathBuf,

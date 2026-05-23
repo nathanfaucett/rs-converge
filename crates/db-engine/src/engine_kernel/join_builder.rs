@@ -1,4 +1,8 @@
-use std::collections::{HashMap, HashSet};
+use alloc::{
+  string::{String, ToString},
+  vec::Vec,
+};
+use hashbrown::{HashMap, HashSet};
 
 use crate::query::{JoinClause, JoinKind, JoinOn};
 use crate::store_adapter::{EngineStore, collect_table_rows};

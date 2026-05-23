@@ -379,6 +379,8 @@ where
           if row.is_empty() {
             continue;
           }
+          // async_stream rust edition is not 2024
+          #[allow(clippy::collapsible_if)]
           if let Some(key) = read_store_key_metadata(&doc)? {
             if key_in_range(&key, &range) {
               yield Ok((key, StoreValue::Row(row)));

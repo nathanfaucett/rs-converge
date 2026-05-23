@@ -14,6 +14,11 @@ use redb::{Database, ReadableTable, TableDefinition, WriteTransaction};
 
 use crate::redb_btree::{EncodedKey, EncodedValue, REDBBTree, RedbKeyCodec, RedbValueCodec};
 
+type RedbNamedTable<'a, K, V, KC, VC> = redb::Table<'a, EncodedKey<K, KC>, EncodedValue<V, VC>>;
+
+type RedbNamedTableDefinition<'a, K, V, KC, VC> =
+  TableDefinition<'a, EncodedKey<K, KC>, EncodedValue<V, VC>>;
+
 /// Interns a string as a `'static` reference.
 ///
 /// The set of distinct names is bounded by the number of tables, indexes, and
@@ -56,9 +61,9 @@ where
   fn open_table<'a>(
     &'a self,
     tree: &'a str,
-  ) -> Result<redb::Table<'a, EncodedKey<K, KC>, EncodedValue<V, VC>>, BTreeError> {
+  ) -> Result<RedbNamedTable<'a, K, V, KC, VC>, BTreeError> {
     let name = intern(tree);
-    let def: TableDefinition<EncodedKey<K, KC>, EncodedValue<V, VC>> = TableDefinition::new(name);
+    let def: RedbNamedTableDefinition<K, V, KC, VC> = TableDefinition::new(name);
     self.write_tx.open_table(def).map_err(BTreeError::other)
   }
 }

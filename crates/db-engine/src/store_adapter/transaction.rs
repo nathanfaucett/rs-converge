@@ -2,6 +2,9 @@ use core::future::Future;
 use db_core::MaybeSend;
 use futures::Stream;
 
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+
 use crate::{EngineError, EngineKey, EngineRow, IndexSchema, PrimaryKey, TableSchema};
 
 /// A minimal read-only engine-level storage transaction.

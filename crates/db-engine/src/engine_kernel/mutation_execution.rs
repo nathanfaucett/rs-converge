@@ -1,5 +1,7 @@
 use crate::store_adapter::EngineStore;
 use crate::{EngineError, query::EngineQuery, query::EngineResult, query::UpdateValueExpr};
+use alloc::string::ToString;
+use alloc::vec::Vec;
 
 use super::planner::EngineKernel;
 

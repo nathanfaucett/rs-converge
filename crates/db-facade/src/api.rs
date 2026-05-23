@@ -2,10 +2,18 @@
 extern crate alloc;
 
 #[cfg(not(feature = "std"))]
-use alloc::{format, vec::Vec};
+use alloc::{
+  format,
+  string::{String, ToString},
+  vec::Vec,
+};
+#[cfg(feature = "std")]
+use std::string::ToString;
 #[cfg(feature = "std")]
 use std::vec::Vec;
 
+#[cfg(not(feature = "std"))]
+use alloc::sync::Arc;
 #[cfg(feature = "automerge")]
 use db_automerge::{AutomergeEngineStore, AutomergeEntry, DocumentChangeKey};
 #[cfg(feature = "redb")]
@@ -25,6 +33,8 @@ use db_redb::REDBNamedBTree;
 use db_types::EngineKeyCodec;
 #[cfg(feature = "redb")]
 use std::path::Path;
+#[cfg(feature = "std")]
+use std::sync::Arc;
 
 use db_sql_to_engine::{
   CanonicalStatement, DdlOp, SchemaResolver, SqlParams, parse_and_translate,
@@ -348,7 +358,7 @@ where
   pub async fn subscribe_query(
     &self,
     query: EngineQuery,
-    subscriber: std::sync::Arc<dyn Subscriber>,
+    subscriber: Arc<dyn Subscriber>,
     scope: Option<SyncScope>,
   ) -> Result<SubscriptionId, DatabaseError> {
     let scope = scope.unwrap_or_default();
@@ -364,7 +374,7 @@ where
   pub async fn subscribe_sql(
     &self,
     sql: &str,
-    subscriber: std::sync::Arc<dyn Subscriber>,
+    subscriber: Arc<dyn Subscriber>,
     scope: Option<SyncScope>,
   ) -> Result<SubscriptionId, DatabaseError> {
     let query = match parse_and_translate_statement(sql, self) {
@@ -385,7 +395,7 @@ where
     &self,
     sql: &str,
     params: &SqlParams,
-    subscriber: std::sync::Arc<dyn Subscriber>,
+    subscriber: Arc<dyn Subscriber>,
     scope: Option<SyncScope>,
   ) -> Result<SubscriptionId, DatabaseError> {
     let query = match parse_and_translate_statement_with_params(sql, self, params) {
@@ -404,7 +414,7 @@ where
   pub async fn subscribe_unrestricted(
     &self,
     query: EngineQuery,
-    subscriber: std::sync::Arc<dyn Subscriber>,
+    subscriber: Arc<dyn Subscriber>,
   ) -> Result<SubscriptionId, DatabaseError> {
     self.subscribe_query(query, subscriber, None).await
   }

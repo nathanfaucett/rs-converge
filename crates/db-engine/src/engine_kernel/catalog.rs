@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use alloc::{string::String, vec::Vec};
+use hashbrown::HashMap;
 
 use crate::store_adapter::{
   EngineStore, EngineStoreReadTransaction, EngineStoreTransaction, remove_index_entries,

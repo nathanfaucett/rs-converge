@@ -1,4 +1,6 @@
-use std::collections::HashMap;
+use alloc::{string::String, vec::Vec};
+use core::cmp::Ordering;
+use hashbrown::HashMap;
 
 use crate::{
   EngineError, EngineKey, EngineRow, EngineValue,
@@ -253,11 +255,11 @@ impl Aggregator {
             SortDirection::Asc => cmp,
             SortDirection::Desc => cmp.reverse(),
           };
-          if cmp != std::cmp::Ordering::Equal {
+          if cmp != Ordering::Equal {
             return cmp;
           }
         }
-        std::cmp::Ordering::Equal
+        Ordering::Equal
       });
     }
 
@@ -277,6 +279,7 @@ impl Aggregator {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use alloc::string::ToString;
 
   fn make_partial(table: &str, row: EngineRow) -> PartialRow {
     let mut m = HashMap::new();

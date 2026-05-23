@@ -1,3 +1,5 @@
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 use core::future::Future;
 use db_core::{MaybeSend, MaybeSync, NamedTreeProvider};
 

@@ -1,5 +1,18 @@
 use crate::{EngineRow, PrimaryKey};
+#[cfg(not(feature = "std"))]
+use alloc::string::String;
+#[cfg(not(feature = "std"))]
+use alloc::sync::Arc;
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+use core::fmt;
+#[cfg(not(feature = "std"))]
+use spin::RwLock;
+#[cfg(feature = "std")]
+use std::string::String;
+#[cfg(feature = "std")]
 use std::sync::Arc;
+#[cfg(feature = "std")]
 use std::sync::RwLock;
 
 /// A change event emitted when data in the engine mutates.
@@ -59,13 +72,15 @@ pub(crate) struct ChangeListenerRegistry {
   listeners: RwLock<Vec<Arc<dyn ChangeListener>>>,
 }
 
-impl std::fmt::Debug for ChangeListenerRegistry {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for ChangeListenerRegistry {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    #[cfg(feature = "std")]
+    let listener_count = self.listeners.read().unwrap().len();
+    #[cfg(not(feature = "std"))]
+    let listener_count = self.listeners.read().len();
+
     f.debug_struct("ChangeListenerRegistry")
-      .field(
-        "listener_count",
-        &self.listeners.read().map(|l| l.len()).unwrap_or(0),
-      )
+      .field("listener_count", &listener_count)
       .finish()
   }
 }
@@ -80,13 +95,19 @@ impl ChangeListenerRegistry {
   /// Register a change listener.
   #[allow(dead_code)]
   pub(crate) fn register(&self, listener: Arc<dyn ChangeListener>) {
+    #[cfg(feature = "std")]
     let mut listeners = self.listeners.write().unwrap();
+    #[cfg(not(feature = "std"))]
+    let mut listeners = self.listeners.write();
     listeners.push(listener);
   }
 
   /// Emit a change event to all registered listeners.
   pub(crate) fn emit(&self, event: ChangeEvent) {
+    #[cfg(feature = "std")]
     let listeners = self.listeners.read().unwrap();
+    #[cfg(not(feature = "std"))]
+    let listeners = self.listeners.read();
     for listener in listeners.iter() {
       listener.on_change(event.clone());
     }
@@ -95,7 +116,10 @@ impl ChangeListenerRegistry {
   /// Clear all listeners.
   #[allow(dead_code)]
   pub(crate) fn clear(&self) {
+    #[cfg(feature = "std")]
     let mut listeners = self.listeners.write().unwrap();
+    #[cfg(not(feature = "std"))]
+    let mut listeners = self.listeners.write();
     listeners.clear();
   }
 }

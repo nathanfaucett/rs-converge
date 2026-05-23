@@ -1807,10 +1807,17 @@ fn parse_limit_clause(
 #[cfg(test)]
 mod tests {
   use super::*;
+  #[cfg(not(feature = "std"))]
+  use alloc::string::String;
+  #[cfg(not(feature = "std"))]
+  use alloc::vec::Vec;
   use db_engine::{
     ColumnSchema, EngineQuery, EngineType, EngineValue, JoinKind, JoinOn, QualifiedColumn,
     QualifiedOperand, QualifiedPredicate, TableSchema, UpdateAssignment, UpdateValueExpr,
   };
+  #[cfg(not(feature = "std"))]
+  use hashbrown::HashMap;
+  #[cfg(feature = "std")]
   use std::collections::HashMap;
   use uuid::Uuid;
 

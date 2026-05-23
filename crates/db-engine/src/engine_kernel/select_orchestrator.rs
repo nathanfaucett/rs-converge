@@ -1,4 +1,5 @@
-use std::future::Future;
+use alloc::vec::Vec;
+use core::future::Future;
 
 use crate::store_adapter::EngineStore;
 use crate::{

@@ -39,6 +39,13 @@ impl Translator {
 mod tests {
   use super::*;
   use crate::translate::SchemaResolver;
+  #[cfg(not(feature = "std"))]
+  use alloc::string::String;
+  #[cfg(not(feature = "std"))]
+  use alloc::vec::Vec;
+  #[cfg(not(feature = "std"))]
+  use hashbrown::HashMap;
+  #[cfg(feature = "std")]
   use std::collections::HashMap;
 
   struct DummyResolver {

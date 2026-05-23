@@ -1,5 +1,8 @@
 pub use db_types::{EngineKey, EngineRow, EngineType, EngineValue, PrimaryKey};
 
+#[cfg(not(feature = "std"))]
+use alloc::string::String;
+
 use db_core::BTreeError;
 use thiserror::Error;
 

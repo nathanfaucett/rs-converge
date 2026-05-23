@@ -3,6 +3,7 @@ use crate::{
   predicate::{EvalContext, PredicateEvaluator},
   query::{QualifiedColumn, QualifiedPredicate},
 };
+use alloc::{string::String, vec::Vec};
 
 pub struct Scan {
   table: String,

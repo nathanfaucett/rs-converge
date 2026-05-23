@@ -22,6 +22,8 @@ mod tests {
   use crate::{
     ColumnSchema, EngineKey, EngineType, EngineValue, IndexSchema, PrimaryKey, TableSchema,
   };
+  #[cfg(not(feature = "std"))]
+  use alloc::vec::Vec;
   use db_core::block_on;
   use db_in_memory::InMemoryNamedBTree;
 

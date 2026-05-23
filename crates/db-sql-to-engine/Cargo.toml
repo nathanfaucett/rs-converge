@@ -1,8 +1,9 @@
 [package]
 name = "db-sql-to-engine"
 version = "0.1.0"
-edition = "2024"
 description = "Engine layer of the database"
+rust-version = "1.95"
+edition = "2024"
 
 [lib]
 path = "src/lib.rs"
@@ -11,7 +12,13 @@ name = "db_sql_to_engine"
 [features]
 default = ["std"]
 std = ["db-engine/std", "sqlparser/std", "thiserror/std"]
-wasm = ["tsify", "serde", "serde-wasm-bindgen", "wasm-bindgen"]
+wasm = [
+  "db-engine/wasm",
+  "tsify",
+  "serde",
+  "serde-wasm-bindgen",
+  "wasm-bindgen",
+]
 
 [dependencies]
 db-engine = { path = "../db-engine", default-features = false, features = [] }

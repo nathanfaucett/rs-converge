@@ -1,11 +1,9 @@
 [package]
-rust-version = "1.94"
 name = "db"
 description = "Database built on top of a B-Tree implementation."
 repository = "https://github.com/aicacia/rs-db"
-
-[package.edition]
-workspace = true
+rust-version = "1.95"
+edition = "2024"
 
 [package.version]
 workspace = true
@@ -59,7 +57,6 @@ resolver = "2"
 version = "0.1.0"
 authors = ["nathanfaucett@gmail.com"]
 license = "MIT OR Apache-2.0"
-edition = "2024"
 
 [workspace.lints.rust]
 ambiguous_negative_literals = "warn"

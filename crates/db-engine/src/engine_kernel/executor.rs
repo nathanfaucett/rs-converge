@@ -14,7 +14,19 @@ use crate::{
   PrimaryKey, query::JoinClause, query::QualifiedPredicate, query::UpdateAssignment,
   query::UpdateValueExpr,
 };
+#[cfg(not(feature = "std"))]
+use alloc::string::{String, ToString};
+#[cfg(not(feature = "std"))]
+use alloc::sync::Arc;
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+#[cfg(not(feature = "std"))]
+use hashbrown::{HashMap, HashSet};
+#[cfg(feature = "std")]
 use std::collections::{HashMap, HashSet};
+#[cfg(feature = "std")]
+use std::string::{String, ToString};
+#[cfg(feature = "std")]
 use std::sync::Arc;
 
 async fn ensure_indexes_unique<TX>(

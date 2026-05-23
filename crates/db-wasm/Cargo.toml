@@ -1,8 +1,9 @@
 [package]
 name = "db-wasm"
 version = "0.1.0"
-edition = "2024"
 description = "DB WASM"
+rust-version = "1.95"
+edition = "2024"
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = false

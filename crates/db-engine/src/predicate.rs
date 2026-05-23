@@ -1,4 +1,5 @@
-use std::collections::{HashMap, HashSet};
+use alloc::{string::String, vec::Vec};
+use hashbrown::{HashMap, HashSet};
 
 use crate::{
   EngineKey, EngineRow, EngineValue, IndexSchema,
@@ -344,6 +345,7 @@ impl QualifiedPredicate {
 mod tests {
   use super::*;
   use crate::{EngineValue, query::QualifiedOperand};
+  use alloc::{boxed::Box, string::ToString};
 
   #[test]
   fn single_row_equals() {
