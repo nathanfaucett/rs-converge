@@ -9,115 +9,85 @@ use wasm_bindgen_test::wasm_bindgen_test;
 const ADAPTER_SCRIPT: &str = r#"
 (() => {
   const state = {
-    rowsByTable: new Map(),
-    indexEntries: new Map(),
-    tableSchemas: new Map(),
-    indexSchemas: new Map(),
+    trees: new Map(),
   };
 
-  const pkKey = (pk) => (Array.isArray(pk) ? pk.join(":") : String(pk));
-  const indexEntryKey = (indexKey, rowPrimaryKey) => `${JSON.stringify(indexKey)}|${pkKey(rowPrimaryKey)}`;
+  const toBytes = (value) => Array.from(value ?? []);
+  const keyString = (key) => JSON.stringify(toBytes(key));
+  const compareBytes = (left, right) => {
+    const a = toBytes(left);
+    const b = toBytes(right);
+    const limit = Math.min(a.length, b.length);
+    for (let index = 0; index < limit; index += 1) {
+      if (a[index] !== b[index]) {
+        return a[index] - b[index];
+      }
+    }
+    return a.length - b.length;
+  };
+  const treeStore = (tree) => {
+    let store = state.trees.get(tree);
+    if (!store) {
+      store = new Map();
+      state.trees.set(tree, store);
+    }
+    return store;
+  };
 
   return {
     beginTransaction(_mode) {
       return Promise.resolve({
-        getRow(table, primaryKey) {
-          const tableRows = state.rowsByTable.get(table);
-          const row = tableRows?.get(pkKey(primaryKey));
+        get(tree, key) {
+          const store = state.trees.get(tree);
+          const row = store?.get(keyString(key));
           return Promise.resolve(row ? [...row] : undefined);
         },
-        putRow(table, primaryKey, row) {
-          let tableRows = state.rowsByTable.get(table);
-          if (!tableRows) {
-            tableRows = new Map();
-            state.rowsByTable.set(table, tableRows);
-          }
-          tableRows.set(pkKey(primaryKey), [...row]);
+        put(tree, key, value) {
+          const store = treeStore(tree);
+          store.set(keyString(key), [...value]);
           return Promise.resolve();
         },
-        deleteRow(table, primaryKey) {
-          const tableRows = state.rowsByTable.get(table);
-          const key = pkKey(primaryKey);
-          const previous = tableRows?.get(key);
-          tableRows?.delete(key);
-          return Promise.resolve(previous ? [...previous] : undefined);
+        delete(tree, key) {
+          const store = state.trees.get(tree);
+          const encodedKey = keyString(key);
+          const previous = store?.get(encodedKey);
+          store?.delete(encodedKey);
+          return Promise.resolve(previous !== undefined ? [...previous] : undefined);
         },
-        rangeRows(table, _range) {
-          const tableRows = state.rowsByTable.get(table);
-          if (!tableRows) {
+        range(tree, range) {
+          const store = state.trees.get(tree);
+          if (!store) {
             return Promise.resolve([]);
           }
-          const out = Array.from(tableRows.entries()).map(([key, row]) => ({
-            primaryKey: key.split(":").map((part) => Number.parseInt(part, 10)),
-            row: [...row],
-          }));
+          const start = range.start;
+          const end = range.end;
+          const startInclusive = range.startInclusive;
+          const endInclusive = range.endInclusive;
+          const out = Array.from(store.entries())
+            .map(([encodedKey, value]) => ({ key: JSON.parse(encodedKey), value: [...value] }))
+            .filter(({ key }) => {
+              if (start) {
+                const cmp = compareBytes(key, start);
+                if (cmp < 0 || (cmp === 0 && !startInclusive)) {
+                  return false;
+                }
+              }
+              if (end) {
+                const cmp = compareBytes(key, end);
+                if (cmp > 0 || (cmp === 0 && !endInclusive)) {
+                  return false;
+                }
+              }
+              return true;
+            })
+            .sort((left, right) => compareBytes(left.key, right.key));
           return Promise.resolve(out);
-        },
-        addIndex(index, indexKey, rowPrimaryKey) {
-          let entries = state.indexEntries.get(index);
-          if (!entries) {
-            entries = new Map();
-            state.indexEntries.set(index, entries);
-          }
-          entries.set(indexEntryKey(indexKey, rowPrimaryKey), {
-            indexKey,
-            rowPrimaryKey,
-          });
-          return Promise.resolve();
-        },
-        removeIndex(index, indexKey, rowPrimaryKey) {
-          const entries = state.indexEntries.get(index);
-          entries?.delete(indexEntryKey(indexKey, rowPrimaryKey));
-          return Promise.resolve();
-        },
-        rangeIndex(index, _range) {
-          const entries = state.indexEntries.get(index);
-          if (!entries) {
-            return Promise.resolve([]);
-          }
-          return Promise.resolve(Array.from(entries.values()));
-        },
-        getTableSchema(table) {
-          const row = state.tableSchemas.get(table);
-          return Promise.resolve(row ? [...row] : undefined);
-        },
-        putTableSchema(table, row) {
-          state.tableSchemas.set(table, [...row]);
-          return Promise.resolve();
-        },
-        deleteTableSchema(table) {
-          const previous = state.tableSchemas.get(table);
-          state.tableSchemas.delete(table);
-          return Promise.resolve(previous ? [...previous] : undefined);
-        },
-        rangeTableSchemas() {
-          return Promise.resolve(
-            Array.from(state.tableSchemas.entries()).map(([table, row]) => ({ table, row: [...row] })),
-          );
-        },
-        getIndexSchema(index) {
-          const row = state.indexSchemas.get(index);
-          return Promise.resolve(row ? [...row] : undefined);
-        },
-        putIndexSchema(index, row) {
-          state.indexSchemas.set(index, [...row]);
-          return Promise.resolve();
-        },
-        deleteIndexSchema(index) {
-          const previous = state.indexSchemas.get(index);
-          state.indexSchemas.delete(index);
-          return Promise.resolve(previous ? [...previous] : undefined);
-        },
-        rangeIndexSchemas() {
-          return Promise.resolve(
-            Array.from(state.indexSchemas.entries()).map(([index, row]) => ({ index, row: [...row] })),
-          );
         },
         commit() {
           return Promise.resolve();
         },
         rollback() {
-          return Promise.resolve();
+          return Promise.resolve(undefined);
         },
       });
     },
@@ -129,65 +99,45 @@ const DELAYED_ADAPTER_SCRIPT: &str = r#"
 (() => {
   const delay = (value) => new Promise((resolve) => setTimeout(() => resolve(value), 5));
   const state = {
-    tableSchemas: new Map(),
-    indexSchemas: new Map(),
+    trees: new Map(),
+  };
+
+  const toBytes = (value) => Array.from(value ?? []);
+  const keyString = (key) => JSON.stringify(toBytes(key));
+  const treeStore = (tree) => {
+    let store = state.trees.get(tree);
+    if (!store) {
+      store = new Map();
+      state.trees.set(tree, store);
+    }
+    return store;
   };
 
   return {
     beginTransaction(_mode) {
       return delay({
-        getRow() {
-          return delay(undefined);
-        },
-        putRow() {
-          return delay(undefined);
-        },
-        deleteRow() {
-          return delay(undefined);
-        },
-        rangeRows() {
-          return delay([]);
-        },
-        addIndex() {
-          return delay(undefined);
-        },
-        removeIndex() {
-          return delay(undefined);
-        },
-        rangeIndex() {
-          return delay([]);
-        },
-        getTableSchema(table) {
-          const row = state.tableSchemas.get(table);
+        get(tree, key) {
+          const store = state.trees.get(tree);
+          const row = store?.get(keyString(key));
           return delay(row ? [...row] : undefined);
         },
-        putTableSchema(table, row) {
-          state.tableSchemas.set(table, [...row]);
+        put(tree, key, value) {
+          treeStore(tree).set(keyString(key), [...value]);
           return delay(undefined);
         },
-        deleteTableSchema(table) {
-          const previous = state.tableSchemas.get(table);
-          state.tableSchemas.delete(table);
-          return delay(previous ? [...previous] : undefined);
+        delete(tree, key) {
+          const store = state.trees.get(tree);
+          const encodedKey = keyString(key);
+          const previous = store?.get(encodedKey);
+          store?.delete(encodedKey);
+          return delay(previous !== undefined ? [...previous] : undefined);
         },
-        rangeTableSchemas() {
-          return delay(Array.from(state.tableSchemas.entries()).map(([table, row]) => ({ table, row: [...row] })));
-        },
-        getIndexSchema(index) {
-          const row = state.indexSchemas.get(index);
-          return delay(row ? [...row] : undefined);
-        },
-        putIndexSchema(index, row) {
-          state.indexSchemas.set(index, [...row]);
-          return delay(undefined);
-        },
-        deleteIndexSchema(index) {
-          const previous = state.indexSchemas.get(index);
-          state.indexSchemas.delete(index);
-          return delay(previous ? [...previous] : undefined);
-        },
-        rangeIndexSchemas() {
-          return delay(Array.from(state.indexSchemas.entries()).map(([index, row]) => ({ index, row: [...row] })));
+        range(tree, _range) {
+          const store = state.trees.get(tree);
+          if (!store) {
+            return delay([]);
+          }
+          return delay(Array.from(store.entries()).map(([encodedKey, value]) => ({ key: JSON.parse(encodedKey), value: [...value] })));
         },
         commit() {
           return delay(undefined);
@@ -205,7 +155,7 @@ const DELAYED_ADAPTER_SCRIPT: &str = r#"
 async fn open_with_strict_transaction_adapter_supports_schema_lifecycle() {
   let adapter_value = js_sys::eval(ADAPTER_SCRIPT).expect("adapter eval should succeed");
   let options: DatabaseEngineOptions = adapter_value.unchecked_into();
-  let mut db = BrowserDatabase::open_with_backend(options)
+  let db = BrowserDatabase::open_with_backend(options)
     .await
     .expect("open_with_backend should succeed");
 
@@ -243,7 +193,7 @@ async fn open_with_strict_transaction_adapter_supports_schema_lifecycle() {
 async fn open_with_delayed_promise_adapter_supports_schema_lifecycle() {
   let adapter_value = js_sys::eval(DELAYED_ADAPTER_SCRIPT).expect("adapter eval should succeed");
   let options: DatabaseEngineOptions = adapter_value.unchecked_into();
-  let mut db = BrowserDatabase::open_with_backend(options)
+  let db = BrowserDatabase::open_with_backend(options)
     .await
     .expect("open_with_backend should succeed");
 
