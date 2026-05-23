@@ -1,10 +1,14 @@
 // Example: store and retrieve JSON column values via SQL
 //
 // Run with: cargo run --example json --features automerge
+#[cfg(feature = "automerge")]
 use db::Database;
+#[cfg(feature = "automerge")]
 use db_engine::EngineValue;
+#[cfg(feature = "automerge")]
 use futures::executor::block_on;
 
+#[cfg(feature = "automerge")]
 fn main() {
   block_on(async {
     let mut db = Database::open_automerge_in_memory()
@@ -68,4 +72,8 @@ fn main() {
       println!("alice updated: {config}");
     }
   });
+}
+#[cfg(not(feature = "automerge"))]
+fn main() {
+  eprintln!("Enable the `automerge` feature to run this example.");
 }

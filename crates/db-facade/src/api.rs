@@ -17,8 +17,10 @@ use db_engine::{
 #[cfg(feature = "automerge")]
 use db_in_memory::InMemoryBTree;
 use db_in_memory::InMemoryNamedBTree;
+#[cfg(all(feature = "automerge", feature = "redb"))]
+use db_redb::REDBBTree;
 #[cfg(feature = "redb")]
-use db_redb::{REDBBTree, REDBNamedBTree};
+use db_redb::REDBNamedBTree;
 #[cfg(feature = "redb")]
 use db_types::EngineKeyCodec;
 #[cfg(feature = "redb")]

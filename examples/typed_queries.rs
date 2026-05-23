@@ -4,7 +4,9 @@
 /// query results into strongly-typed Rust structs.
 ///
 /// Run with: cargo run --example typed_queries --features automerge
+#[cfg(feature = "automerge")]
 use db::Database;
+#[cfg(feature = "automerge")]
 use futures::executor::block_on;
 use serde::Deserialize;
 
@@ -25,6 +27,7 @@ struct Product {
   price: f64,
 }
 
+#[cfg(feature = "automerge")]
 fn main() {
   block_on(async {
     // Create an in-memory database
@@ -115,4 +118,8 @@ fn main() {
 
     println!("\n=== Example Complete ===");
   });
+}
+#[cfg(not(feature = "automerge"))]
+fn main() {
+  eprintln!("Enable the `automerge` feature to run this example.");
 }

@@ -5,17 +5,21 @@ extern crate alloc;
 use alloc::{format, string::String, vec::Vec};
 use core::fmt;
 
+#[cfg(all(feature = "automerge", feature = "redb"))]
+use db_automerge::DocumentType;
 #[cfg(feature = "automerge")]
-use db_automerge::{AutomergeEngineStore, AutomergeEntry, DocumentChangeKey, DocumentType};
-#[cfg(feature = "automerge")]
+use db_automerge::{AutomergeEngineStore, AutomergeEntry, DocumentChangeKey};
+#[cfg(all(feature = "automerge", feature = "redb"))]
 use db_core::BufferSink;
 use db_core::{MaybeSend, MaybeSync, NamedTreeProvider};
 use db_engine::{EngineDatabase, EngineKey, EngineValue, NamedTreeEngineStore};
 #[cfg(feature = "automerge")]
 use db_in_memory::InMemoryBTree;
 use db_in_memory::InMemoryNamedBTree;
+#[cfg(all(feature = "automerge", feature = "redb"))]
+use db_redb::REDBBTree;
 #[cfg(feature = "redb")]
-use db_redb::{REDBBTree, REDBNamedBTree};
+use db_redb::REDBNamedBTree;
 #[cfg(feature = "redb")]
 use db_types::EngineKeyCodec;
 
@@ -103,11 +107,11 @@ where
   pub(crate) db: &'db Database<S>,
 }
 
-#[cfg(feature = "automerge")]
+#[cfg(all(feature = "automerge", feature = "redb"))]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FacadeDocumentChangeKeyCodec;
 
-#[cfg(feature = "automerge")]
+#[cfg(all(feature = "automerge", feature = "redb"))]
 impl db_core::ValueCodec<DocumentChangeKey> for FacadeDocumentChangeKeyCodec {
   type Bytes<'a>
     = Vec<u8>
@@ -153,14 +157,14 @@ impl db_core::ValueCodec<DocumentChangeKey> for FacadeDocumentChangeKeyCodec {
   }
 }
 
-#[cfg(feature = "automerge")]
+#[cfg(all(feature = "automerge", feature = "redb"))]
 impl db_core::KeyCodec<DocumentChangeKey> for FacadeDocumentChangeKeyCodec {
   fn compare(left: &[u8], right: &[u8]) -> core::cmp::Ordering {
     left.cmp(right)
   }
 }
 
-#[cfg(feature = "automerge")]
+#[cfg(all(feature = "automerge", feature = "redb"))]
 impl db_core::FastKeyCodec<DocumentChangeKey> for FacadeDocumentChangeKeyCodec {
   fn encode_into(&self, value: &DocumentChangeKey, scratch: &mut db_core::KeyScratch) {
     scratch.push_bytes(value.doc_id.as_bytes());
@@ -177,11 +181,11 @@ impl db_core::FastKeyCodec<DocumentChangeKey> for FacadeDocumentChangeKeyCodec {
   }
 }
 
-#[cfg(feature = "automerge")]
+#[cfg(all(feature = "automerge", feature = "redb"))]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FacadeVecBytesCodec;
 
-#[cfg(feature = "automerge")]
+#[cfg(all(feature = "automerge", feature = "redb"))]
 impl db_core::ValueCodec<AutomergeEntry> for FacadeVecBytesCodec {
   type Bytes<'a>
     = Vec<u8>

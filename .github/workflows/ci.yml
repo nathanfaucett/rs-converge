@@ -41,13 +41,9 @@ jobs:
         run: cargo clippy --all -- -D warnings
 
   cargo-tests:
-    name: Cargo tests (${{ matrix.feature }})
+    name: Cargo tests
     needs: lint
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        feature: [no-default, std, automerge, automerge-redb]
-      fail-fast: false
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -59,6 +55,9 @@ jobs:
           profile: minimal
           override: true
 
+      - name: Install cargo-hack
+        run: cargo install cargo-hack --locked
+
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -66,31 +65,10 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ matrix.feature }}-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Show rustc/cargo
         run: rustc --version && cargo --version
 
-      - name: Build
-        run: |
-          if [ "${{ matrix.feature }}" = "no-default" ]; then
-            cargo build --workspace --no-default-features --all-targets
-          elif [ "${{ matrix.feature }}" = "automerge" ]; then
-            cargo build --workspace --no-default-features --features automerge --all-targets
-          elif [ "${{ matrix.feature }}" = "automerge-redb" ]; then
-            cargo build --workspace --no-default-features --features "automerge redb" --all-targets
-          else
-            cargo build --workspace --features std --all-targets
-          fi
-
-      - name: Test
-        run: |
-          if [ "${{ matrix.feature }}" = "no-default" ]; then
-            cargo test --workspace --no-default-features --all-targets
-          elif [ "${{ matrix.feature }}" = "automerge" ]; then
-            cargo test --workspace --no-default-features --features automerge --all-targets
-          elif [ "${{ matrix.feature }}" = "automerge-redb" ]; then
-            cargo test --workspace --no-default-features --features "automerge redb" --all-targets
-          else
-            cargo test --workspace --features std --all-targets
-          fi
+      - name: Test feature combinations
+        run: cargo hack test --feature-powerset --workspace --all-targets
