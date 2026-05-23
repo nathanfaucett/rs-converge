@@ -2291,7 +2291,7 @@ fn parse_limit_or_offset_expr(expr: &SqlExpr, label: &str) -> Result<usize, Tran
 mod tests {
   use super::*;
   #[cfg(not(feature = "std"))]
-  use alloc::string::String;
+  use alloc::{string::String, vec};
   use db_engine::{
     ColumnSchema, EngineQuery, EngineType, EngineValue, JoinKind, JoinOn, QualifiedColumn,
     QualifiedOperand, QualifiedPredicate, TableSchema, UpdateAssignment, UpdateValueExpr,

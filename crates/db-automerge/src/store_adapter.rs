@@ -8,10 +8,6 @@ use uuid::Uuid;
 use crate::automerge_btree::{AutomergeBTree, AutomergeEntry, DocumentChangeKey};
 use db_core::{BTree, BTreeError, BTreeExecutor, BTreeTransaction};
 
-mod doc_payload;
-mod named;
-mod named_routing;
-
 /// Automerge-backed engine store: each logical collection (table/index/schema)
 /// is represented by an Automerge `AutoCommit` document stored in the
 /// `AutomergeBTree<B>` backend. Engine-level keys/values are encoded as direct
@@ -110,24 +106,4 @@ pub fn automerge_metrics(docs: &BTreeMap<Uuid, AutoCommit>) -> (usize, usize) {
     })
     .sum();
   (document_count, total_document_bytes)
-}
-
-fn key_in_range<K, R>(key: &K, range: &R) -> bool
-where
-  K: Ord,
-  R: core::ops::RangeBounds<K>,
-{
-  use core::ops::Bound;
-
-  let start = match range.start_bound() {
-    Bound::Included(lower) => key >= lower,
-    Bound::Excluded(lower) => key > lower,
-    Bound::Unbounded => true,
-  };
-  let end = match range.end_bound() {
-    Bound::Included(upper) => key <= upper,
-    Bound::Excluded(upper) => key < upper,
-    Bound::Unbounded => true,
-  };
-  start && end
 }

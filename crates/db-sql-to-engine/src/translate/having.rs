@@ -318,6 +318,8 @@ pub fn expr_to_having_predicate(
 #[cfg(test)]
 mod tests {
   use super::*;
+  #[cfg(not(feature = "std"))]
+  use alloc::vec;
   use db_engine::{ColumnSchema, EngineType, RefOrAgg, TableSchema};
   use sqlparser::ast::Ident;
 

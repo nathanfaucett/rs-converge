@@ -5,10 +5,12 @@ extern crate alloc;
 use alloc::{format, string::String, vec::Vec};
 use core::fmt;
 
+#[cfg(feature = "automerge")]
+use crate::automerge_named_store::AutomergeNamedStore;
 #[cfg(all(feature = "automerge", feature = "redb"))]
 use db_automerge::DocumentType;
 #[cfg(feature = "automerge")]
-use db_automerge::{AutomergeEngineStore, AutomergeEntry, DocumentChangeKey};
+use db_automerge::{AutomergeEntry, DocumentChangeKey};
 #[cfg(all(feature = "automerge", feature = "redb"))]
 use db_core::BufferSink;
 use db_core::{MaybeSend, MaybeSync, NamedTreeProvider};
@@ -53,12 +55,12 @@ pub type InMemoryEngineStore = InMemoryNamedBTree<EngineKey, Vec<u8>>;
 pub type RedbEngineStore = REDBNamedBTree<EngineKey, Vec<u8>, EngineKeyCodec>;
 
 #[cfg(all(feature = "automerge", feature = "redb"))]
-pub type RedbAutomergeStore = AutomergeEngineStore<
+pub type RedbAutomergeStore = AutomergeNamedStore<
   REDBBTree<DocumentChangeKey, Vec<u8>, FacadeDocumentChangeKeyCodec, FacadeVecBytesCodec>,
 >;
 #[cfg(feature = "automerge")]
 pub type InMemoryAutomergeStore =
-  AutomergeEngineStore<InMemoryBTree<DocumentChangeKey, AutomergeEntry>>;
+  AutomergeNamedStore<InMemoryBTree<DocumentChangeKey, AutomergeEntry>>;
 
 #[cfg(feature = "automerge")]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

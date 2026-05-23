@@ -329,6 +329,8 @@ dependencies = [
 name = "db-facade"
 version = "0.1.0"
 dependencies = [
+ "async-stream",
+ "automerge",
  "db-automerge",
  "db-core",
  "db-engine",
@@ -338,6 +340,7 @@ dependencies = [
  "db-types",
  "futures",
  "redb",
+ "sha2 0.10.9",
  "uuid",
 ]
 

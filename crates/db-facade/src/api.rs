@@ -8,6 +8,8 @@ use std::string::ToString;
 #[cfg(feature = "std")]
 use std::vec::Vec;
 
+#[cfg(feature = "automerge")]
+use crate::automerge_named_store::AutomergeNamedStore;
 #[cfg(not(feature = "std"))]
 use alloc::sync::Arc;
 #[cfg(feature = "automerge")]
@@ -77,23 +79,26 @@ impl Database<InMemoryAutomergeStore> {
   /// Open an Automerge-backed database (feature-gated).
   pub async fn open_automerge_in_memory() -> Result<Self, DatabaseError> {
     let backend = InMemoryBTree::<DocumentChangeKey, AutomergeEntry>::new();
-    let store = AutomergeEngineStore::new_with_backend(backend);
+    let store = AutomergeNamedStore::new(AutomergeEngineStore::new_with_backend(backend));
     let engine = EngineDatabase::new(store.into_engine_store());
     Ok(Self { engine })
   }
 
   /// Merge Automerge documents from each peer and reload schema on both sides.
   pub async fn sync_with(&mut self, other: &mut Self) -> Result<(), DatabaseError> {
-    db_automerge::sync_automerge_stores(self.engine.store().inner(), other.engine.store().inner())
-      .await
-      .map_err(|e| DatabaseError::Engine(format!("{e}")))?;
+    db_automerge::sync_automerge_stores(
+      self.engine.store().inner().raw(),
+      other.engine.store().inner().raw(),
+    )
+    .await
+    .map_err(|e| DatabaseError::Engine(format!("{e}")))?;
     self.engine.reload_schema().await?;
     other.engine.reload_schema().await?;
     Ok(())
   }
 
   pub async fn automerge_sync_metrics(&self) -> Result<AutomergeSyncMetrics, DatabaseError> {
-    let docs = db_automerge::collect_documents(self.engine.store().inner())
+    let docs = db_automerge::collect_documents(self.engine.store().inner().raw())
       .await
       .map_err(|e| DatabaseError::Engine(format!("{e}")))?;
     let (document_count, total_document_bytes) = db_automerge::automerge_metrics(&docs);
@@ -117,23 +122,26 @@ impl Database<RedbAutomergeStore> {
       FacadeVecBytesCodec,
     >::open_with_codecs(path, table_name)
     .map_err(|e| DatabaseError::Engine(format!("{e}")))?;
-    let store = AutomergeEngineStore::new_with_backend(backend);
+    let store = AutomergeNamedStore::new(AutomergeEngineStore::new_with_backend(backend));
     let engine = EngineDatabase::new(store.into_engine_store());
     Ok(Self { engine })
   }
 
   /// Merge Automerge documents from each peer and reload schema on both sides.
   pub async fn sync_with(&mut self, other: &mut Self) -> Result<(), DatabaseError> {
-    db_automerge::sync_automerge_stores(self.engine.store().inner(), other.engine.store().inner())
-      .await
-      .map_err(|e| DatabaseError::Engine(format!("{e}")))?;
+    db_automerge::sync_automerge_stores(
+      self.engine.store().inner().raw(),
+      other.engine.store().inner().raw(),
+    )
+    .await
+    .map_err(|e| DatabaseError::Engine(format!("{e}")))?;
     self.engine.reload_schema().await?;
     other.engine.reload_schema().await?;
     Ok(())
   }
 
   pub async fn automerge_sync_metrics(&self) -> Result<AutomergeSyncMetrics, DatabaseError> {
-    let docs = db_automerge::collect_documents(self.engine.store().inner())
+    let docs = db_automerge::collect_documents(self.engine.store().inner().raw())
       .await
       .map_err(|e| DatabaseError::Engine(format!("{e}")))?;
     let (document_count, total_document_bytes) = db_automerge::automerge_metrics(&docs);

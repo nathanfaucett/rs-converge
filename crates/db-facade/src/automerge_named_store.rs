@@ -1,34 +1,107 @@
 use std::borrow::Borrow;
 
 use async_stream::stream;
-use automerge::AutoCommit;
-use automerge::ReadDoc;
-use automerge::ScalarValue;
-use automerge::Value;
 use automerge::transaction::Transactable;
-use futures::{StreamExt, pin_mut};
-use uuid::Uuid;
-
-use crate::automerge_btree::{AutomergeBTree, AutomergeEntry, DocumentChangeKey};
+use automerge::{AutoCommit, ObjType, ReadDoc, ScalarValue, Value};
+use db_automerge::{AutomergeBTree, AutomergeEngineStore, AutomergeEntry, DocumentChangeKey};
 use db_core::{
   BTree, BTreeError, BTreeExecutor, BTreeTransaction, NamedTreeProvider, NamedTreeTransaction,
+  decode_with_version,
 };
-use db_types::{
-  EngineKey, EngineValue, StoreKey,
-  key_encoding::{DefaultEncoding, RowEncoding},
-};
-
-use super::AutomergeEngineStore;
-use super::doc_payload::{
-  clear_doc_fields, read_row_columns, read_store_key_metadata, set_row_columns,
-  set_store_key_metadata,
-};
-use super::key_in_range;
-use super::named_routing::{doc_id_for_tree_key, is_row_tree, tree_uuid_range};
+use db_engine::EngineKey;
+use db_types::codec::{decode_store_key, encode_store_key};
+use db_types::key_encoding::{DefaultEncoding, RowEncoding};
+use db_types::{EngineValue, StoreKey};
+use futures::{StreamExt, pin_mut};
+use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 const NAMED_KEY_FIELD: &str = "named_key";
 const NAMED_VALUE_FIELD: &str = "value";
 const NAMED_TOMBSTONE_FIELD: &str = "deleted";
+const ROW_FIELD: &str = "row";
+const STORE_KEY_FIELD: &str = "store_key";
+const VALUE_FIELD: &str = "value";
+const TOMBSTONE_FIELD: &str = "deleted";
+
+#[derive(Clone)]
+pub struct AutomergeNamedStore<B>
+where
+  B: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
+{
+  raw: AutomergeEngineStore<B>,
+}
+
+impl<B> AutomergeNamedStore<B>
+where
+  B: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
+{
+  pub fn new(raw: AutomergeEngineStore<B>) -> Self {
+    Self { raw }
+  }
+
+  pub fn raw(&self) -> &AutomergeEngineStore<B> {
+    &self.raw
+  }
+}
+
+fn key_in_range<K, R>(key: &K, range: &R) -> bool
+where
+  K: Ord,
+  R: core::ops::RangeBounds<K>,
+{
+  use core::ops::Bound;
+
+  let start = match range.start_bound() {
+    Bound::Included(lower) => key >= lower,
+    Bound::Excluded(lower) => key > lower,
+    Bound::Unbounded => true,
+  };
+  let end = match range.end_bound() {
+    Bound::Included(upper) => key <= upper,
+    Bound::Excluded(upper) => key < upper,
+    Bound::Unbounded => true,
+  };
+  start && end
+}
+
+fn is_row_tree(tree: &str) -> bool {
+  tree.starts_with("t:")
+}
+
+fn hashed_doc_id(tree: &str, key: &EngineKey) -> Uuid {
+  let mut hasher = Sha256::new();
+  hasher.update(b"named:");
+  hasher.update(tree.as_bytes());
+  let tree_digest = hasher.finalize_reset();
+
+  hasher.update(key);
+  let key_digest = hasher.finalize();
+
+  let mut bytes = [0u8; 16];
+  bytes[..8].copy_from_slice(&tree_digest[..8]);
+  bytes[8..].copy_from_slice(&key_digest[..8]);
+  Uuid::from_bytes(bytes)
+}
+
+fn tree_uuid_range(tree: &str) -> (Uuid, Uuid) {
+  let mut hasher = Sha256::new();
+  hasher.update(b"named:");
+  hasher.update(tree.as_bytes());
+  let digest = hasher.finalize();
+
+  let mut start_bytes = [0u8; 16];
+  let mut end_bytes = [0u8; 16];
+  start_bytes[..8].copy_from_slice(&digest[..8]);
+  end_bytes[..8].copy_from_slice(&digest[..8]);
+  end_bytes[8..].fill(0xff);
+
+  (Uuid::from_bytes(start_bytes), Uuid::from_bytes(end_bytes))
+}
+
+fn doc_id_for_tree_key(tree: &str, key: &EngineKey) -> Result<Uuid, BTreeError> {
+  Ok(hashed_doc_id(tree, key))
+}
 
 fn scalar_bytes(value: Value<'_>) -> Result<Vec<u8>, BTreeError> {
   match value {
@@ -38,6 +111,96 @@ fn scalar_bytes(value: Value<'_>) -> Result<Vec<u8>, BTreeError> {
     },
     _ => Err(BTreeError::UnsupportedOperation),
   }
+}
+
+fn clear_doc_fields(doc: &mut AutoCommit) -> Result<(), BTreeError> {
+  for field in [ROW_FIELD, VALUE_FIELD, TOMBSTONE_FIELD] {
+    if let Ok(Some(_)) = doc.get(&automerge::ROOT, field) {
+      doc
+        .delete(&automerge::ROOT, field)
+        .map_err(BTreeError::other)?;
+    }
+  }
+  Ok(())
+}
+
+fn encode_row_cell(value: &EngineValue) -> Vec<u8> {
+  <DefaultEncoding as RowEncoding>::encode_values(core::slice::from_ref(value))
+}
+
+fn decode_row_cell(bytes: &[u8]) -> Result<EngineValue, BTreeError> {
+  let values = <DefaultEncoding as RowEncoding>::decode_values(bytes).map_err(BTreeError::other)?;
+  if values.len() == 1 {
+    Ok(values[0].clone())
+  } else {
+    Err(BTreeError::UnsupportedOperation)
+  }
+}
+
+fn set_row_columns(doc: &mut AutoCommit, row: &[EngineValue]) -> Result<(), BTreeError> {
+  if doc.get(&automerge::ROOT, ROW_FIELD).is_ok() {
+    doc
+      .delete(&automerge::ROOT, ROW_FIELD)
+      .map_err(BTreeError::other)?;
+  }
+
+  let row_obj = doc
+    .put_object(&automerge::ROOT, ROW_FIELD, ObjType::List)
+    .map_err(BTreeError::other)?;
+
+  for (index, value) in row.iter().enumerate() {
+    let encoded = encode_row_cell(value);
+    doc
+      .insert(&row_obj, index, encoded)
+      .map_err(BTreeError::other)?;
+  }
+
+  Ok(())
+}
+
+fn read_row_columns(doc: &AutoCommit) -> Result<Option<Vec<EngineValue>>, BTreeError> {
+  let Some((value, row_obj)) = doc
+    .get(&automerge::ROOT, ROW_FIELD)
+    .map_err(BTreeError::other)?
+  else {
+    return Ok(None);
+  };
+
+  if !matches!(value, Value::Object(ObjType::List)) {
+    return Err(BTreeError::UnsupportedOperation);
+  }
+
+  let mut row = Vec::with_capacity(doc.length(&row_obj));
+  for index in 0..doc.length(&row_obj) {
+    let Some((value, _)) = doc.get(&row_obj, index).map_err(BTreeError::other)? else {
+      return Err(BTreeError::UnsupportedOperation);
+    };
+    let bytes = scalar_bytes(value)?;
+    row.push(decode_row_cell(&bytes)?);
+  }
+  Ok(Some(row))
+}
+
+fn set_store_key_metadata(doc: &mut AutoCommit, key: &StoreKey) -> Result<(), BTreeError> {
+  let mut encoded = Vec::new();
+  encode_store_key(&mut encoded, key);
+  doc
+    .put(&automerge::ROOT, STORE_KEY_FIELD, encoded)
+    .map_err(BTreeError::other)?;
+  Ok(())
+}
+
+fn read_store_key_metadata(doc: &AutoCommit) -> Result<Option<StoreKey>, BTreeError> {
+  let Some((value, _)) = doc
+    .get(&automerge::ROOT, STORE_KEY_FIELD)
+    .map_err(BTreeError::other)?
+  else {
+    return Ok(None);
+  };
+  let bytes = scalar_bytes(value)?;
+  decode_with_version(&bytes, decode_store_key)
+    .map(Some)
+    .map_err(BTreeError::other)
 }
 
 fn set_named_key_metadata(doc: &mut AutoCommit, key: &EngineKey) -> Result<(), BTreeError> {
@@ -76,7 +239,7 @@ fn set_named_tombstone(doc: &mut AutoCommit) -> Result<(), BTreeError> {
   Ok(())
 }
 
-pub(super) fn is_named_tombstone(doc: &AutoCommit) -> Result<bool, BTreeError> {
+fn is_named_tombstone(doc: &AutoCommit) -> Result<bool, BTreeError> {
   if let Ok(Some((value, _id))) = doc.get(&automerge::ROOT, NAMED_TOMBSTONE_FIELD) {
     return match value {
       Value::Scalar(scalar) => match scalar.as_ref() {
@@ -89,7 +252,7 @@ pub(super) fn is_named_tombstone(doc: &AutoCommit) -> Result<bool, BTreeError> {
   Ok(false)
 }
 
-pub(super) fn read_named_value_bytes(doc: &AutoCommit) -> Result<Option<Vec<u8>>, BTreeError> {
+fn read_named_value_bytes(doc: &AutoCommit) -> Result<Option<Vec<u8>>, BTreeError> {
   if let Ok(Some((value, _id))) = doc.get(&automerge::ROOT, NAMED_VALUE_FIELD) {
     return Ok(Some(scalar_bytes(value)?));
   }
@@ -164,7 +327,7 @@ pub struct AutomergeNamedTree<B>
 where
   B: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
 {
-  store: AutomergeEngineStore<B>,
+  store: AutomergeNamedStore<B>,
   name: String,
 }
 
@@ -216,7 +379,7 @@ impl<B> AutomergeNamedTransaction<B>
 where
   B: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
 {
-  pub(super) fn build_named_tree_document(
+  fn build_named_tree_document(
     tree: &str,
     key: &EngineKey,
     value: Vec<u8>,
@@ -355,7 +518,7 @@ where
       let doc_stream = inner.range(tree_start..=tree_end);
       pin_mut!(doc_stream);
 
-      let mut entries: alloc::vec::Vec<(EngineKey, Vec<u8>)> = alloc::vec::Vec::new();
+      let mut entries: Vec<(EngineKey, Vec<u8>)> = Vec::new();
       while let Some(item) = doc_stream.next().await {
         let (_, doc) = item?;
         if row_tree && doc_tree(&doc).as_deref() != Some(tree_name.as_str()) {
@@ -528,7 +691,7 @@ where
   }
 }
 
-impl<B> NamedTreeProvider<EngineKey, Vec<u8>> for AutomergeEngineStore<B>
+impl<B> NamedTreeProvider<EngineKey, Vec<u8>> for AutomergeNamedStore<B>
 where
   B: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
 {
@@ -547,7 +710,7 @@ where
   fn begin_transaction<'a>(
     &'a self,
   ) -> impl core::future::Future<Output = Result<Self::Transaction, BTreeError>> + Send + 'a {
-    let automerge = self.automerge.clone();
+    let automerge = self.raw.automerge.clone();
     async move {
       let guard = automerge.read().await;
       let inner = guard.transaction().await?;
