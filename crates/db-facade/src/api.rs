@@ -291,13 +291,23 @@ where
         self.engine.drop_table(&name, if_exists).await?;
         Ok(EngineResult::new(Vec::new()))
       }
-      Ok(CanonicalStatement::Ddl(DdlOp::CreateIndex(schema))) => {
-        self.engine.register_index(schema).await?;
-        Ok(EngineResult::new(Vec::new()))
+      Ok(CanonicalStatement::Ddl(DdlOp::CreateIndex(schema, if_not_exists))) => {
+        match self.engine.register_index(schema).await {
+          Ok(()) => Ok(EngineResult::new(Vec::new())),
+          Err(db_engine::EngineError::DuplicateIndex(_)) if if_not_exists => {
+            Ok(EngineResult::new(Vec::new()))
+          }
+          Err(err) => Err(DatabaseError::Other(err.to_string())),
+        }
       }
-      Ok(CanonicalStatement::Ddl(DdlOp::DropIndex(name))) => {
-        self.engine.drop_index(&name).await?;
-        Ok(EngineResult::new(Vec::new()))
+      Ok(CanonicalStatement::Ddl(DdlOp::DropIndex(name, if_exists))) => {
+        match self.engine.drop_index(&name).await {
+          Ok(()) => Ok(EngineResult::new(Vec::new())),
+          Err(db_engine::EngineError::IndexNotFound(_)) if if_exists => {
+            Ok(EngineResult::new(Vec::new()))
+          }
+          Err(err) => Err(DatabaseError::Other(err.to_string())),
+        }
       }
       Err(e) => Err(DatabaseError::Other(format!("{e}"))),
     }
@@ -319,13 +329,23 @@ where
         self.engine.drop_table(&name, if_exists).await?;
         Ok(EngineResult::new(Vec::new()))
       }
-      Ok(CanonicalStatement::Ddl(DdlOp::CreateIndex(schema))) => {
-        self.engine.register_index(schema).await?;
-        Ok(EngineResult::new(Vec::new()))
+      Ok(CanonicalStatement::Ddl(DdlOp::CreateIndex(schema, if_not_exists))) => {
+        match self.engine.register_index(schema).await {
+          Ok(()) => Ok(EngineResult::new(Vec::new())),
+          Err(db_engine::EngineError::DuplicateIndex(_)) if if_not_exists => {
+            Ok(EngineResult::new(Vec::new()))
+          }
+          Err(err) => Err(DatabaseError::Other(err.to_string())),
+        }
       }
-      Ok(CanonicalStatement::Ddl(DdlOp::DropIndex(name))) => {
-        self.engine.drop_index(&name).await?;
-        Ok(EngineResult::new(Vec::new()))
+      Ok(CanonicalStatement::Ddl(DdlOp::DropIndex(name, if_exists))) => {
+        match self.engine.drop_index(&name).await {
+          Ok(()) => Ok(EngineResult::new(Vec::new())),
+          Err(db_engine::EngineError::IndexNotFound(_)) if if_exists => {
+            Ok(EngineResult::new(Vec::new()))
+          }
+          Err(err) => Err(DatabaseError::Other(err.to_string())),
+        }
       }
       Err(e) => Err(DatabaseError::Other(format!("{e}"))),
     }

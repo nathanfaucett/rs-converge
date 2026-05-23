@@ -86,6 +86,9 @@ pub enum JoinOn {
     left: QualifiedColumn,
     right: QualifiedColumn,
   },
+  ColumnEqList {
+    pairs: Vec<(QualifiedColumn, QualifiedColumn)>,
+  },
 }
 
 #[derive(Debug, Clone)]

@@ -13,9 +13,9 @@ use hashbrown::HashMap;
 use sqlparser::ast::{
   AssignmentTarget, BinaryOperator, ColumnDef, ColumnOption, CreateIndex, CreateTable, DataType,
   Delete as SqlDelete, Expr as SqlExpr, FromTable, FunctionArg, FunctionArgExpr, FunctionArguments,
-  GroupByExpr, JoinConstraint, JoinOperator, LimitClause, ObjectName, ObjectType, OrderBy, Query,
-  Select, SelectItem, SetExpr, Statement, TableConstraint, TableFactor, Update as SqlUpdate,
-  UpdateTableFromKind, Value as SqlValue,
+  GroupByExpr, IndexColumn, JoinConstraint, JoinOperator, LimitClause, ObjectName, ObjectType,
+  OrderBy, Query, Select, SelectItem, SetExpr, Statement, TableConstraint, TableFactor,
+  Update as SqlUpdate, UpdateTableFromKind, Value as SqlValue,
 };
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
@@ -320,7 +320,10 @@ pub fn translate_statement_to_canonical(
       ),
     )),
     Statement::CreateIndex(create_index) => Ok(crate::ir::CanonicalStatement::Ddl(
-      crate::ir::DdlOp::CreateIndex(translate_create_index(create_index, resolver)?),
+      crate::ir::DdlOp::CreateIndex(
+        translate_create_index(create_index, resolver)?,
+        create_index.if_not_exists,
+      ),
     )),
     Statement::Drop {
       object_type,
@@ -559,6 +562,23 @@ fn resolve_index_column_indices(
   Ok(column_indices)
 }
 
+fn generate_index_name(
+  table_name: &str,
+  columns: &[IndexColumn],
+) -> Result<String, TranslateError> {
+  let mut parts: Vec<String> = Vec::new();
+  for index_column in columns {
+    let (_, column_name) = helpers::extract_identifier(&index_column.column.expr)?;
+    parts.push(column_name.replace('.', "_"));
+  }
+  if parts.is_empty() {
+    return Err(TranslateError::UnsupportedFeature(
+      "CREATE INDEX must specify at least one column".into(),
+    ));
+  }
+  Ok(format!("idx_{}_{}", table_name, parts.join("_")))
+}
+
 /// Translate a `sqlparser` `CREATE INDEX` into an engine `IndexSchema`.
 fn translate_create_index(
   create_index: &CreateIndex,
@@ -569,13 +589,11 @@ fn translate_create_index(
     .describe_table(&table_name)
     .ok_or_else(|| TranslateError::UnknownTable(table_name.clone()))?;
 
-  let index_name = create_index
-    .name
-    .as_ref()
-    .map(object_name_to_string)
-    .ok_or_else(|| {
-      TranslateError::UnsupportedFeature("CREATE INDEX without explicit name is unsupported".into())
-    })?;
+  let index_name = if let Some(name) = &create_index.name {
+    object_name_to_string(name)
+  } else {
+    generate_index_name(&table_name, &create_index.columns)?
+  };
 
   let column_indices = resolve_index_column_indices(create_index, &table_schema)?;
 
@@ -603,7 +621,7 @@ fn translate_drop_statement(
 
   match object_type {
     ObjectType::Table => Ok(crate::ir::DdlOp::DropTable(object_name, if_exists)),
-    ObjectType::Index => Ok(crate::ir::DdlOp::DropIndex(object_name)),
+    ObjectType::Index => Ok(crate::ir::DdlOp::DropIndex(object_name, if_exists)),
     _ => Err(TranslateError::UnsupportedStatement),
   }
 }
@@ -1824,7 +1842,13 @@ fn parse_joins(
       }
     };
 
-    let on = parse_join_on(constraint, alias_map, table_schemas)?;
+    let on = parse_join_on(
+      constraint,
+      alias_map,
+      table_schemas,
+      &current_left,
+      &right_table,
+    )?;
 
     out.push(db_engine::JoinClause {
       kind,
@@ -1842,6 +1866,8 @@ fn parse_join_on(
   constraint: &JoinConstraint,
   alias_map: &HashMap<String, String>,
   table_schemas: &HashMap<String, db_engine::TableSchema>,
+  left_table: &str,
+  right_table: &str,
 ) -> Result<db_engine::JoinOn, TranslateError> {
   match constraint {
     JoinConstraint::On(expr) => match expr {
@@ -1863,8 +1889,48 @@ fn parse_join_on(
         "unsupported join ON expression".into(),
       )),
     },
+    JoinConstraint::Using(columns) => {
+      let mut pairs: Vec<(db_engine::QualifiedColumn, db_engine::QualifiedColumn)> = Vec::new();
+      for column in columns {
+        let column_name = object_name_to_string(column);
+        let left_schema = table_schemas
+          .get(left_table)
+          .ok_or_else(|| TranslateError::UnknownTable(left_table.to_string()))?;
+        let right_schema = table_schemas
+          .get(right_table)
+          .ok_or_else(|| TranslateError::UnknownTable(right_table.to_string()))?;
+        let left_idx = left_schema
+          .columns
+          .iter()
+          .position(|c| c.name == column_name)
+          .ok_or_else(|| TranslateError::UnknownColumn(column_name.clone()))?;
+        let right_idx = right_schema
+          .columns
+          .iter()
+          .position(|c| c.name == column_name)
+          .ok_or_else(|| TranslateError::UnknownColumn(column_name.clone()))?;
+
+        pairs.push((
+          db_engine::QualifiedColumn {
+            table: left_table.to_string(),
+            column_index: left_idx,
+          },
+          db_engine::QualifiedColumn {
+            table: right_table.to_string(),
+            column_index: right_idx,
+          },
+        ));
+      }
+
+      if pairs.len() == 1 {
+        let (left, right) = pairs.into_iter().next().unwrap();
+        Ok(db_engine::JoinOn::ColumnEq { left, right })
+      } else {
+        Ok(db_engine::JoinOn::ColumnEqList { pairs })
+      }
+    }
     _ => Err(TranslateError::UnsupportedFeature(
-      "only ON join constraints supported".into(),
+      "only ON and USING join constraints supported".into(),
     )),
   }
 }
@@ -2504,9 +2570,272 @@ mod tests {
             assert_eq!(right.table, "orders");
             assert_eq!(right.column_index, 1);
           }
+          other => panic!("unexpected join on: {:?}", other),
         }
       }
       other => panic!("unexpected query: {:?}", other),
+    }
+  }
+
+  #[test]
+  fn translate_join_select_using() {
+    let mut tables = HashMap::new();
+    tables.insert(
+      "users".into(),
+      TableSchema {
+        name: "users".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "name".into(),
+            data_type: EngineType::Text,
+          },
+        ],
+        primary_key: vec![0],
+      },
+    );
+
+    tables.insert(
+      "orders".into(),
+      TableSchema {
+        name: "orders".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "user_id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "amount".into(),
+            data_type: EngineType::Integer,
+          },
+        ],
+        primary_key: vec![0],
+      },
+    );
+
+    let resolver = DummyResolver { tables };
+
+    let q = parse_and_translate(
+      "SELECT u.name, o.amount FROM users u JOIN orders o USING (id);",
+      &resolver,
+    )
+    .expect("translate");
+
+    match q {
+      EngineQuery::Select {
+        table,
+        projection,
+        predicate: _,
+        options,
+      } => {
+        assert_eq!(table, "users");
+        assert_eq!(projection.len(), 2);
+        assert_eq!(projection[0].table, "users");
+        assert_eq!(projection[0].column_index, 1);
+        assert_eq!(projection[1].table, "orders");
+        assert_eq!(projection[1].column_index, 2);
+        assert_eq!(options.joins.len(), 1);
+        let j = &options.joins[0];
+        assert_eq!(j.kind, JoinKind::Inner);
+        match &j.on {
+          JoinOn::ColumnEq { left, right } => {
+            assert_eq!(left.table, "users");
+            assert_eq!(left.column_index, 0);
+            assert_eq!(right.table, "orders");
+            assert_eq!(right.column_index, 0);
+          }
+          other => panic!("unexpected join on: {:?}", other),
+        }
+      }
+      other => panic!("unexpected query: {:?}", other),
+    }
+  }
+
+  #[test]
+  fn translate_join_select_using_multiple_columns() {
+    let mut tables = HashMap::new();
+    tables.insert(
+      "users".into(),
+      TableSchema {
+        name: "users".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "tenant_id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "name".into(),
+            data_type: EngineType::Text,
+          },
+        ],
+        primary_key: vec![0],
+      },
+    );
+
+    tables.insert(
+      "orders".into(),
+      TableSchema {
+        name: "orders".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "tenant_id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "amount".into(),
+            data_type: EngineType::Integer,
+          },
+        ],
+        primary_key: vec![0],
+      },
+    );
+
+    let resolver = DummyResolver { tables };
+
+    let q = parse_and_translate(
+      "SELECT u.name, o.amount FROM users u JOIN orders o USING (id, tenant_id);",
+      &resolver,
+    )
+    .expect("translate");
+
+    match q {
+      EngineQuery::Select {
+        table,
+        projection,
+        predicate: _,
+        options,
+      } => {
+        assert_eq!(table, "users");
+        assert_eq!(projection.len(), 2);
+        assert_eq!(projection[0].table, "users");
+        assert_eq!(projection[0].column_index, 2);
+        assert_eq!(projection[1].table, "orders");
+        assert_eq!(projection[1].column_index, 2);
+        assert_eq!(options.joins.len(), 1);
+        let j = &options.joins[0];
+        assert_eq!(j.kind, JoinKind::Inner);
+        match &j.on {
+          JoinOn::ColumnEqList { pairs } => {
+            assert_eq!(pairs.len(), 2);
+            assert_eq!(pairs[0].0.table, "users");
+            assert_eq!(pairs[0].0.column_index, 0);
+            assert_eq!(pairs[0].1.table, "orders");
+            assert_eq!(pairs[0].1.column_index, 0);
+            assert_eq!(pairs[1].0.table, "users");
+            assert_eq!(pairs[1].0.column_index, 1);
+            assert_eq!(pairs[1].1.table, "orders");
+            assert_eq!(pairs[1].1.column_index, 1);
+          }
+          other => panic!("unexpected join on: {:?}", other),
+        }
+      }
+      other => panic!("unexpected query: {:?}", other),
+    }
+  }
+
+  #[test]
+  fn translate_create_index_without_explicit_name() {
+    let resolver = DummyResolver {
+      tables: HashMap::from([(
+        "users".into(),
+        TableSchema {
+          name: "users".into(),
+          columns: vec![
+            ColumnSchema {
+              name: "id".into(),
+              data_type: EngineType::Integer,
+            },
+            ColumnSchema {
+              name: "name".into(),
+              data_type: EngineType::Text,
+            },
+          ],
+          primary_key: vec![0],
+        },
+      )]),
+    };
+
+    let statement = parse_and_translate_statement("CREATE INDEX ON users (name);", &resolver)
+      .expect("create index without name should be accepted");
+
+    match statement {
+      crate::ir::CanonicalStatement::Ddl(crate::ir::DdlOp::CreateIndex(schema, _)) => {
+        assert_eq!(schema.name, "idx_users_name");
+        assert_eq!(schema.table_name, "users");
+        assert_eq!(schema.column_indices, vec![1]);
+      }
+      other => panic!("unexpected statement: {:?}", other),
+    }
+  }
+
+  #[test]
+  fn translate_create_index_if_not_exists() {
+    let resolver = DummyResolver {
+      tables: HashMap::from([(
+        "users".into(),
+        TableSchema {
+          name: "users".into(),
+          columns: vec![
+            ColumnSchema {
+              name: "id".into(),
+              data_type: EngineType::Integer,
+            },
+            ColumnSchema {
+              name: "name".into(),
+              data_type: EngineType::Text,
+            },
+          ],
+          primary_key: vec![0],
+        },
+      )]),
+    };
+
+    let statement = parse_and_translate_statement(
+      "CREATE INDEX IF NOT EXISTS idx_users_name ON users (name);",
+      &resolver,
+    )
+    .expect("create index if not exists should be accepted");
+
+    match statement {
+      crate::ir::CanonicalStatement::Ddl(crate::ir::DdlOp::CreateIndex(schema, if_not_exists)) => {
+        assert!(if_not_exists);
+        assert_eq!(schema.name, "idx_users_name");
+      }
+      other => panic!("unexpected statement: {:?}", other),
+    }
+  }
+
+  #[test]
+  fn translate_drop_index_if_exists() {
+    let resolver = DummyResolver {
+      tables: HashMap::new(),
+    };
+
+    let statement =
+      parse_and_translate_statement("DROP INDEX IF EXISTS idx_users_name;", &resolver)
+        .expect("drop index if exists should be accepted");
+
+    match statement {
+      crate::ir::CanonicalStatement::Ddl(crate::ir::DdlOp::DropIndex(name, if_exists)) => {
+        assert!(if_exists);
+        assert_eq!(name, "idx_users_name");
+      }
+      other => panic!("unexpected statement: {:?}", other),
     }
   }
 

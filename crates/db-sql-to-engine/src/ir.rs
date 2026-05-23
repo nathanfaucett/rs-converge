@@ -29,8 +29,8 @@ impl From<db_engine::EngineQuery> for CanonicalQuery {
 pub enum DdlOp {
   CreateTable(db_engine::TableSchema, bool),
   DropTable(String, bool),
-  CreateIndex(db_engine::IndexSchema),
-  DropIndex(String),
+  CreateIndex(db_engine::IndexSchema, bool),
+  DropIndex(String, bool),
 }
 
 #[derive(Clone, Debug)]

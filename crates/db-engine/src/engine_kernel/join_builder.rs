@@ -4,7 +4,7 @@ use alloc::{
 };
 use hashbrown::{HashMap, HashSet};
 
-use crate::query::{JoinClause, JoinKind, JoinOn};
+use crate::query::{JoinClause, JoinKind, JoinOn, QualifiedColumn};
 use crate::store_adapter::{EngineStore, collect_table_rows};
 use crate::{EngineError, EngineRow};
 
@@ -122,8 +122,9 @@ pub(crate) fn apply_join_clauses(
   for join in joins {
     let right_table = &join.right_table;
 
-    let (left_qc, right_qc) = match &join.on {
-      JoinOn::ColumnEq { left, right } => (left, right),
+    let join_pairs: Vec<(QualifiedColumn, QualifiedColumn)> = match &join.on {
+      JoinOn::ColumnEq { left, right } => vec![(left.clone(), right.clone())],
+      JoinOn::ColumnEqList { pairs } => pairs.clone(),
     };
 
     let right_rows = table_rows_map.get(right_table).cloned().unwrap_or_default();
@@ -138,8 +139,7 @@ pub(crate) fn apply_join_clauses(
       &partial_results,
       &right_rows,
       right_table,
-      left_qc,
-      right_qc,
+      &join_pairs,
       template,
     );
 

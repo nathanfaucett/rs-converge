@@ -20,8 +20,20 @@ fn right_column_value(row: &EngineRow, qc: &QualifiedColumn) -> Option<EngineVal
   row.get(qc.column_index).cloned()
 }
 
-fn values_match(left: Option<&EngineValue>, right: Option<EngineValue>) -> bool {
-  matches!((left, right), (Some(left), Some(right)) if *left == right)
+fn values_match(left: Option<&EngineValue>, right: Option<&EngineValue>) -> bool {
+  matches!((left, right), (Some(left), Some(right)) if *left == *right)
+}
+
+fn join_pair_values_match(
+  partial: &HashMap<String, Option<EngineRow>>,
+  row: &EngineRow,
+  pairs: &[(QualifiedColumn, QualifiedColumn)],
+) -> bool {
+  pairs.iter().all(|(left_qc, right_qc)| {
+    let left_val = get_partial_column_value(partial, left_qc);
+    let right_val = right_column_value(row, right_qc);
+    values_match(left_val.as_ref(), right_val.as_ref())
+  })
 }
 
 fn push_joined(
@@ -49,15 +61,12 @@ pub fn apply_inner_join(
   partial_results: &[HashMap<String, Option<EngineRow>>],
   right_rows: &[EngineRow],
   right_table: &str,
-  left_qc: &QualifiedColumn,
-  right_qc: &QualifiedColumn,
+  join_pairs: &[(QualifiedColumn, QualifiedColumn)],
 ) -> Vec<HashMap<String, Option<EngineRow>>> {
   let mut new_results = Vec::new();
   for partial in partial_results {
-    let left_val = get_partial_column_value(partial, left_qc);
-
     for rr in right_rows {
-      if values_match(left_val.as_ref(), right_column_value(rr, right_qc)) {
+      if join_pair_values_match(partial, rr, join_pairs) {
         push_joined(&mut new_results, partial, right_table, rr);
       }
     }
@@ -69,15 +78,13 @@ pub fn apply_left_join(
   partial_results: &[HashMap<String, Option<EngineRow>>],
   right_rows: &[EngineRow],
   right_table: &str,
-  left_qc: &QualifiedColumn,
-  right_qc: &QualifiedColumn,
+  join_pairs: &[(QualifiedColumn, QualifiedColumn)],
 ) -> Vec<HashMap<String, Option<EngineRow>>> {
   let mut new_results = Vec::new();
   for partial in partial_results {
     let mut matched = false;
-    let left_val = get_partial_column_value(partial, left_qc);
     for rr in right_rows {
-      if values_match(left_val.as_ref(), right_column_value(rr, right_qc)) {
+      if join_pair_values_match(partial, rr, join_pairs) {
         push_joined(&mut new_results, partial, right_table, rr);
         matched = true;
       }
@@ -94,8 +101,7 @@ pub fn apply_right_join(
   partial_results: &[HashMap<String, Option<EngineRow>>],
   right_rows: &[EngineRow],
   right_table: &str,
-  left_qc: &QualifiedColumn,
-  right_qc: &QualifiedColumn,
+  join_pairs: &[(QualifiedColumn, QualifiedColumn)],
   template: &HashMap<String, Option<EngineRow>>,
 ) -> Vec<HashMap<String, Option<EngineRow>>> {
   let mut new_results = Vec::new();
@@ -103,8 +109,7 @@ pub fn apply_right_join(
   for rr in right_rows {
     let mut any = false;
     for partial in partial_results {
-      let left_val = get_partial_column_value(partial, left_qc);
-      if values_match(left_val.as_ref(), right_column_value(rr, right_qc)) {
+      if join_pair_values_match(partial, rr, join_pairs) {
         push_joined(&mut new_results, partial, right_table, rr);
         any = true;
       }
@@ -124,8 +129,7 @@ pub fn apply_full_join(
   partial_results: &[HashMap<String, Option<EngineRow>>],
   right_rows: &[EngineRow],
   right_table: &str,
-  left_qc: &QualifiedColumn,
-  right_qc: &QualifiedColumn,
+  join_pairs: &[(QualifiedColumn, QualifiedColumn)],
   template: &HashMap<String, Option<EngineRow>>,
 ) -> Vec<HashMap<String, Option<EngineRow>>> {
   let mut new_results = Vec::new();
@@ -133,9 +137,8 @@ pub fn apply_full_join(
 
   for partial in partial_results {
     let mut any = false;
-    let left_val = get_partial_column_value(partial, left_qc);
     for (ri, rr) in right_rows.iter().enumerate() {
-      if values_match(left_val.as_ref(), right_column_value(rr, right_qc)) {
+      if join_pair_values_match(partial, rr, join_pairs) {
         push_joined(&mut new_results, partial, right_table, rr);
         matched[ri] = true;
         any = true;
@@ -180,7 +183,8 @@ mod tests {
   fn inner_join_matching_rows() {
     let left = vec![make_partial("a", Some(vec![EngineValue::Integer(1)]))];
     let right = vec![vec![EngineValue::Integer(1)]];
-    let result = apply_inner_join(&left, &right, "b", &qc("a", 0), &qc("b", 0));
+    let join_pairs = vec![(qc("a", 0), qc("b", 0))];
+    let result = apply_inner_join(&left, &right, "b", &join_pairs);
     assert_eq!(result.len(), 1);
     assert_eq!(result[0]["b"], Some(vec![EngineValue::Integer(1)]));
   }
@@ -189,7 +193,8 @@ mod tests {
   fn inner_join_no_match_returns_empty() {
     let left = vec![make_partial("a", Some(vec![EngineValue::Integer(1)]))];
     let right = vec![vec![EngineValue::Integer(2)]];
-    let result = apply_inner_join(&left, &right, "b", &qc("a", 0), &qc("b", 0));
+    let join_pairs = vec![(qc("a", 0), qc("b", 0))];
+    let result = apply_inner_join(&left, &right, "b", &join_pairs);
     assert!(result.is_empty());
   }
 
@@ -197,7 +202,8 @@ mod tests {
   fn left_join_no_right_match_preserves_left() {
     let left = vec![make_partial("a", Some(vec![EngineValue::Integer(1)]))];
     let right: Vec<EngineRow> = vec![];
-    let result = apply_left_join(&left, &right, "b", &qc("a", 0), &qc("b", 0));
+    let join_pairs = vec![(qc("a", 0), qc("b", 0))];
+    let result = apply_left_join(&left, &right, "b", &join_pairs);
     assert_eq!(result.len(), 1);
     assert_eq!(result[0]["b"], None);
   }
@@ -207,7 +213,8 @@ mod tests {
     let left: Vec<HashMap<String, Option<EngineRow>>> = vec![];
     let right = vec![vec![EngineValue::Integer(99)]];
     let template = make_partial("a", None);
-    let result = apply_right_join(&left, &right, "b", &qc("a", 0), &qc("b", 0), &template);
+    let join_pairs = vec![(qc("a", 0), qc("b", 0))];
+    let result = apply_right_join(&left, &right, "b", &join_pairs, &template);
     assert_eq!(result.len(), 1);
     assert_eq!(result[0]["b"], Some(vec![EngineValue::Integer(99)]));
     assert_eq!(result[0]["a"], None);
@@ -218,7 +225,8 @@ mod tests {
     let left = vec![make_partial("a", Some(vec![EngineValue::Integer(1)]))];
     let right = vec![vec![EngineValue::Integer(2)]];
     let template = make_partial("a", None);
-    let result = apply_full_join(&left, &right, "b", &qc("a", 0), &qc("b", 0), &template);
+    let join_pairs = vec![(qc("a", 0), qc("b", 0))];
+    let result = apply_full_join(&left, &right, "b", &join_pairs, &template);
     // left row unmatched → appears with None right
     // right row unmatched → appears with None left
     assert_eq!(result.len(), 2);

@@ -321,6 +321,8 @@ pub fn encode_store_value(buffer: &mut Vec<u8>, value: &StoreValue) {
 
 #[cfg(test)]
 mod tests {
+  use std::f64::consts::PI;
+
   use super::*;
   use crate::engine_types::EngineValue;
 
@@ -330,7 +332,7 @@ mod tests {
     let values = vec![
       EngineValue::Null,
       EngineValue::Integer(42),
-      EngineValue::Float(3.14),
+      EngineValue::Float(PI),
       EngineValue::Text("hello".into()),
       EngineValue::Blob(vec![0, 1, 2, 3]),
       EngineValue::Uuid(uuid),

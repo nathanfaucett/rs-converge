@@ -14,14 +14,15 @@ pub(crate) type JoinedRowStates = Vec<JoinedRowState>;
 /// Seam for join execution algorithms. All join variants receive the same
 /// parameters; implementations that do not need the `template` (e.g., inner
 /// join) simply ignore it.
+pub(crate) type QualifiedColumnPairs = Vec<(QualifiedColumn, QualifiedColumn)>;
+
 pub(crate) trait JoinAlgorithm {
   fn apply(
     &self,
     partial_results: &[JoinedRowState],
     right_rows: &[EngineRow],
     right_table: &str,
-    left_qc: &QualifiedColumn,
-    right_qc: &QualifiedColumn,
+    join_pairs: &QualifiedColumnPairs,
     template: &JoinedRowState,
   ) -> JoinedRowStates;
 }
@@ -35,11 +36,10 @@ impl JoinAlgorithm for NestedLoopInner {
     partial_results: &[JoinedRowState],
     right_rows: &[EngineRow],
     right_table: &str,
-    left_qc: &QualifiedColumn,
-    right_qc: &QualifiedColumn,
+    join_pairs: &QualifiedColumnPairs,
     _template: &JoinedRowState,
   ) -> JoinedRowStates {
-    apply_inner_join(partial_results, right_rows, right_table, left_qc, right_qc)
+    apply_inner_join(partial_results, right_rows, right_table, join_pairs)
   }
 }
 
@@ -52,11 +52,10 @@ impl JoinAlgorithm for NestedLoopLeft {
     partial_results: &[JoinedRowState],
     right_rows: &[EngineRow],
     right_table: &str,
-    left_qc: &QualifiedColumn,
-    right_qc: &QualifiedColumn,
+    join_pairs: &QualifiedColumnPairs,
     _template: &JoinedRowState,
   ) -> JoinedRowStates {
-    apply_left_join(partial_results, right_rows, right_table, left_qc, right_qc)
+    apply_left_join(partial_results, right_rows, right_table, join_pairs)
   }
 }
 
@@ -69,16 +68,14 @@ impl JoinAlgorithm for NestedLoopRight {
     partial_results: &[JoinedRowState],
     right_rows: &[EngineRow],
     right_table: &str,
-    left_qc: &QualifiedColumn,
-    right_qc: &QualifiedColumn,
+    join_pairs: &QualifiedColumnPairs,
     template: &JoinedRowState,
   ) -> JoinedRowStates {
     apply_right_join(
       partial_results,
       right_rows,
       right_table,
-      left_qc,
-      right_qc,
+      join_pairs,
       template,
     )
   }
@@ -93,16 +90,14 @@ impl JoinAlgorithm for NestedLoopFull {
     partial_results: &[JoinedRowState],
     right_rows: &[EngineRow],
     right_table: &str,
-    left_qc: &QualifiedColumn,
-    right_qc: &QualifiedColumn,
+    join_pairs: &QualifiedColumnPairs,
     template: &JoinedRowState,
   ) -> JoinedRowStates {
     apply_full_join(
       partial_results,
       right_rows,
       right_table,
-      left_qc,
-      right_qc,
+      join_pairs,
       template,
     )
   }
