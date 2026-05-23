@@ -61,6 +61,9 @@ pub(crate) struct EngineSnapshotAdapter;
 
 const ROW_FIELD: &str = "row";
 const STORE_KEY_FIELD: &str = "store_key";
+const VALUE_FIELD: &str = "value";
+const TOMBSTONE_FIELD: &str = "deleted";
+const SNAPSHOT_FIELD: &str = "snapshot";
 
 impl SnapshotAdapter for EngineSnapshotAdapter {
   type Key = EngineKey;
@@ -117,6 +120,76 @@ pub(crate) fn encode_entries<A: SnapshotAdapter>(entries: &[(A::Key, A::Value)])
     A::encode_value(&mut buf, value);
   }
   buf
+}
+
+pub(crate) fn clear_doc_fields(doc: &mut AutoCommit) -> Result<(), BTreeError> {
+  for field in [ROW_FIELD, VALUE_FIELD, TOMBSTONE_FIELD, SNAPSHOT_FIELD] {
+    if let Ok(Some(_)) = doc.get(&automerge::ROOT, field) {
+      doc
+        .delete(&automerge::ROOT, field)
+        .map_err(BTreeError::other)?;
+    }
+  }
+  Ok(())
+}
+
+pub(crate) fn set_doc_value(doc: &mut AutoCommit, value: &StoreValue) -> Result<(), BTreeError> {
+  clear_doc_fields(doc)?;
+  let mut encoded = Vec::new();
+  encode_store_value(&mut encoded, value);
+  doc
+    .put(&automerge::ROOT, VALUE_FIELD, encoded)
+    .map_err(BTreeError::other)?;
+  Ok(())
+}
+
+pub(crate) fn read_value_bytes(doc: &AutoCommit) -> Result<Option<Vec<u8>>, BTreeError> {
+  if let Ok(Some((value, _id))) = doc.get(&automerge::ROOT, VALUE_FIELD) {
+    return Ok(Some(scalar_bytes(value)?));
+  }
+  Ok(None)
+}
+
+pub(crate) fn set_tombstone(doc: &mut AutoCommit) -> Result<(), BTreeError> {
+  clear_doc_fields(doc)?;
+  doc
+    .put(&automerge::ROOT, TOMBSTONE_FIELD, true)
+    .map_err(BTreeError::other)?;
+  Ok(())
+}
+
+pub(crate) fn is_tombstone(doc: &AutoCommit) -> Result<bool, BTreeError> {
+  if let Ok(Some((value, _id))) = doc.get(&automerge::ROOT, TOMBSTONE_FIELD) {
+    return match value {
+      Value::Scalar(scalar) => match scalar.as_ref() {
+        ScalarValue::Boolean(b) => Ok(*b),
+        _ => Err(BTreeError::UnsupportedOperation),
+      },
+      _ => Err(BTreeError::UnsupportedOperation),
+    };
+  }
+  Ok(false)
+}
+
+pub(crate) fn read_doc_value(doc: &AutoCommit) -> Result<Option<StoreValue>, BTreeError> {
+  if is_tombstone(doc)? {
+    return Ok(None);
+  }
+
+  if let Some(row) = read_row_columns(doc)? {
+    if row.is_empty() {
+      return Ok(None);
+    }
+    return Ok(Some(StoreValue::Row(row)));
+  }
+
+  if let Some(bytes) = read_value_bytes(doc)? {
+    return decode_with_version(&bytes, decode_store_value)
+      .map(Some)
+      .map_err(BTreeError::other);
+  }
+
+  Ok(None)
 }
 
 pub(crate) fn find_entry<A: SnapshotAdapter>(

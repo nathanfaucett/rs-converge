@@ -355,6 +355,8 @@ where
   }
 }
 
+pub type RedbTable<'a, K, V, KC, VC> = redb::Table<'a, EncodedKey<K, KC>, EncodedValue<V, VC>>;
+
 // Begin adapter rewrite: explicit StoragePort impl so this adapter is the
 // declared port implementation for the engine. The impl is empty since the
 // required methods are provided by the existing `BTree` implementation.
@@ -366,9 +368,7 @@ where
   KC: KeyCodec<K>,
   VC: ValueCodec<V>,
 {
-  fn open_table(
-    &self,
-  ) -> Result<redb::Table<'_, EncodedKey<K, KC>, EncodedValue<V, VC>>, BTreeError> {
+  fn open_table(&self) -> Result<RedbTable<'_, K, V, KC, VC>, BTreeError> {
     self
       .write_tx
       .open_table(self.table_definition)

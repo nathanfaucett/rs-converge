@@ -3,7 +3,6 @@ use std::{borrow::Borrow, collections::BTreeMap, sync::Arc};
 use async_lock::RwLock;
 use async_stream::stream;
 use automerge::AutoCommit;
-use automerge::transaction::Transactable;
 use futures::{StreamExt, pin_mut};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -17,9 +16,9 @@ mod snapshot;
 
 pub use named::{AutomergeNamedTransaction, AutomergeNamedTree, AutomergeNamedTreeTransaction};
 use snapshot::{
-  StoreSnapshotAdapter, encode_entries, encode_snapshot_base64, find_entry, key_in_range,
-  parse_entries, read_row_columns, read_store_key_metadata, set_entry, set_row_columns,
-  set_store_key_metadata, snapshot_bytes, snapshot_doc,
+  StoreSnapshotAdapter, find_entry, is_tombstone, key_in_range, parse_entries, read_doc_value,
+  read_row_columns, read_store_key_metadata, set_doc_value, set_row_columns,
+  set_store_key_metadata, set_tombstone, snapshot_bytes,
 };
 
 /// Automerge-backed engine store: each logical collection (table/index/schema)
@@ -173,66 +172,6 @@ fn find_in_snapshot(buf: &[u8], needle: &StoreKey) -> Result<Option<StoreValue>,
   find_entry::<StoreSnapshotAdapter>(buf, needle)
 }
 
-fn set_in_snapshot(
-  buf: Option<&[u8]>,
-  key: &StoreKey,
-  value: &StoreValue,
-) -> Result<Vec<u8>, BTreeError> {
-  set_entry::<StoreSnapshotAdapter>(buf, key, value)
-}
-
-fn remove_from_snapshot(
-  buf: Option<&[u8]>,
-  key: &StoreKey,
-) -> Result<(Option<StoreValue>, Option<Vec<u8>>), BTreeError> {
-  let mut entries = if let Some(bytes) = buf {
-    parse_entries::<StoreSnapshotAdapter>(bytes)?
-  } else {
-    Vec::new()
-  };
-
-  let mut removed = None;
-  entries.retain(|(existing, value)| {
-    if existing == key {
-      removed = Some(value.clone());
-      false
-    } else {
-      true
-    }
-  });
-
-  if removed.is_none() {
-    return Ok((None, buf.map(|bytes| bytes.to_vec())));
-  }
-
-  if entries.is_empty() {
-    Ok((removed, None))
-  } else {
-    Ok((
-      removed,
-      Some(encode_entries::<StoreSnapshotAdapter>(&entries)),
-    ))
-  }
-}
-
-fn doc_with_snapshot(
-  existing: Option<AutoCommit>,
-  snapshot: &[u8],
-) -> Result<AutoCommit, BTreeError> {
-  if let Some(mut doc) = existing {
-    doc
-      .put(
-        &automerge::ROOT,
-        "snapshot",
-        encode_snapshot_base64(snapshot),
-      )
-      .map_err(BTreeError::other)?;
-    Ok(doc)
-  } else {
-    snapshot_doc(snapshot)
-  }
-}
-
 fn doc_with_row(
   existing: Option<AutoCommit>,
   key: &StoreKey,
@@ -242,6 +181,47 @@ fn doc_with_row(
   set_store_key_metadata(&mut doc, key)?;
   set_row_columns(&mut doc, row)?;
   Ok(doc)
+}
+
+fn doc_with_value(
+  existing: Option<AutoCommit>,
+  key: &StoreKey,
+  value: &StoreValue,
+) -> Result<AutoCommit, BTreeError> {
+  let mut doc = existing.unwrap_or_default();
+  set_store_key_metadata(&mut doc, key)?;
+  set_doc_value(&mut doc, value)?;
+  Ok(doc)
+}
+
+fn doc_with_tombstone(
+  existing: Option<AutoCommit>,
+  key: &StoreKey,
+) -> Result<AutoCommit, BTreeError> {
+  let mut doc = existing.unwrap_or_default();
+  set_store_key_metadata(&mut doc, key)?;
+  set_tombstone(&mut doc)?;
+  Ok(doc)
+}
+
+fn is_direct_document(doc: &AutoCommit) -> Result<bool, BTreeError> {
+  if read_store_key_metadata(doc)?.is_none() {
+    return Ok(false);
+  }
+  if is_tombstone(doc)? {
+    return Ok(true);
+  }
+  if read_row_columns(doc)?.is_some() {
+    return Ok(true);
+  }
+  if read_doc_value(doc)?.is_some() {
+    return Ok(true);
+  }
+  Ok(false)
+}
+
+fn read_direct_document_entry(doc: &AutoCommit) -> Result<Option<StoreValue>, BTreeError> {
+  read_doc_value(doc)
 }
 
 pub struct AutomergeEngineStoreTransaction<B>
@@ -255,6 +235,7 @@ impl<B> BTreeExecutor<StoreKey, StoreValue> for AutomergeEngineStoreTransaction<
 where
   B: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
 {
+  #[allow(clippy::manual_async_fn)]
   fn get<'a, Q>(
     &'a self,
     key: Q,
@@ -279,6 +260,15 @@ where
               }
             }));
           }
+
+          if is_tombstone(&doc)? {
+            return Ok(None);
+          }
+
+          if let Some(value) = read_direct_document_entry(&doc)? {
+            return Ok(Some(value));
+          }
+
           match snapshot_bytes(&doc)? {
             Some(bytes) => find_in_snapshot(&bytes, &key),
             None => Ok(None),
@@ -288,6 +278,7 @@ where
     }
   }
 
+  #[allow(clippy::manual_async_fn)]
   fn insert<'a>(
     &'a mut self,
     key: StoreKey,
@@ -306,17 +297,13 @@ where
           _ => return Err(BTreeError::UnsupportedOperation),
         }
       } else {
-        let existing_buf = match &existing {
-          Some(doc) => snapshot_bytes(doc)?,
-          None => None,
-        };
-        let new_buf = set_in_snapshot(existing_buf.as_deref(), &key, &value)?;
-        doc_with_snapshot(existing, &new_buf)?
+        doc_with_value(existing, &key, &value)?
       };
       inner.insert(doc_id, next_doc).await
     }
   }
 
+  #[allow(clippy::manual_async_fn)]
   fn remove<'a, Q>(
     &'a mut self,
     key: Q,
@@ -346,20 +333,31 @@ where
         return Ok(prev.map(StoreValue::Row));
       }
 
-      let buf_opt = snapshot_bytes(&doc)?;
-      let (prev, updated) = remove_from_snapshot(buf_opt.as_deref(), &key)?;
-      if prev.is_none() {
+      if is_tombstone(&doc)? {
         return Ok(None);
       }
 
-      // Keep an empty snapshot document as a tombstone so deletes replicate via sync.
-      let next = updated.unwrap_or_default();
-      let next_doc = doc_with_snapshot(Some(doc), &next)?;
+      let prev = if let Some(value) = read_direct_document_entry(&doc)? {
+        Some(value)
+      } else if let Some(bytes) = snapshot_bytes(&doc)? {
+        find_in_snapshot(&bytes, &key)?
+      } else {
+        None
+      };
+
+      let prev = if let Some(value) = prev {
+        value
+      } else {
+        return Ok(None);
+      };
+
+      let next_doc = doc_with_tombstone(Some(doc), &key)?;
       inner.insert(doc_id, next_doc).await?;
-      Ok(prev)
+      Ok(Some(prev))
     }
   }
 
+  #[allow(clippy::collapsible_if)]
   fn range<'a, R>(
     &'a self,
     range: R,
@@ -375,15 +373,12 @@ where
       pin_mut!(doc_stream);
       while let Some(item) = doc_stream.next().await {
         let (_doc_id, doc) = item?;
-        if let Some(row) = read_row_columns(&doc)? {
-          if row.is_empty() {
-            continue;
-          }
-          // async_stream rust edition is not 2024
-          #[allow(clippy::collapsible_if)]
-          if let Some(key) = read_store_key_metadata(&doc)? {
-            if key_in_range(&key, &range) {
-              yield Ok((key, StoreValue::Row(row)));
+        if is_direct_document(&doc)? {
+          if let Some(value) = read_direct_document_entry(&doc)? {
+            if let Some(key) = read_store_key_metadata(&doc)? {
+              if key_in_range(&key, &range) {
+                yield Ok((key, value));
+              }
             }
           }
           continue;
@@ -439,6 +434,7 @@ where
     }
   }
 
+  #[allow(clippy::manual_async_fn)]
   fn insert<'a>(
     &'a mut self,
     key: StoreKey,
@@ -454,6 +450,7 @@ where
     }
   }
 
+  #[allow(clippy::manual_async_fn)]
   fn remove<'a, Q>(
     &'a mut self,
     key: Q,
@@ -514,7 +511,10 @@ mod tests {
   use db_core::{NamedTreeProvider, NamedTreeTransaction, block_on};
   use db_in_memory::InMemoryBTree;
   use db_types::key_encoding::{DefaultEncoding, KeyEncoding, RowEncoding};
-  use db_types::{EngineKey, EngineValue};
+  use db_types::{
+    EngineKey, EngineValue, StoreKey, StoreValue,
+    schema::{IndexSchema, TableSchema},
+  };
 
   fn store() -> AutomergeEngineStore<InMemoryBTree<DocumentChangeKey, AutomergeEntry>> {
     AutomergeEngineStore::new_with_backend(InMemoryBTree::new())
@@ -661,6 +661,65 @@ mod tests {
         assert_eq!(rows[0].0, key1);
         assert_eq!(rows[0].1, val1);
       }
+    });
+  }
+
+  #[test]
+  fn direct_schema_and_index_documents_roundtrip() {
+    block_on(async {
+      let store = store();
+
+      let table_schema_key = StoreKey::TableSchema {
+        table_name: "users".to_string(),
+      };
+      let table_schema_value = StoreValue::TableSchema(TableSchema {
+        name: "users".to_string(),
+        columns: Vec::new(),
+        primary_key: Vec::new(),
+      });
+
+      let index_schema_key = StoreKey::IndexSchema {
+        index_name: "users_by_name".to_string(),
+      };
+      let index_schema_value = StoreValue::IndexSchema(IndexSchema {
+        name: "users_by_name".to_string(),
+        table_name: "users".to_string(),
+        column_indices: vec![0],
+        unique: true,
+      });
+
+      let index_entry_key = StoreKey::IndexEntry {
+        index_name: "users_by_name".to_string(),
+        index_key: key(vec![EngineValue::Text("alice".to_string())]),
+        row_pk: key(vec![EngineValue::Integer(1)]),
+      };
+      let index_entry_value = StoreValue::IndexEntry;
+
+      let mut tx = store.transaction().await.expect("begin tx");
+      tx.insert(table_schema_key.clone(), table_schema_value.clone())
+        .await
+        .expect("insert table schema");
+      tx.insert(index_schema_key.clone(), index_schema_value.clone())
+        .await
+        .expect("insert index schema");
+      tx.insert(index_entry_key.clone(), index_entry_value.clone())
+        .await
+        .expect("insert index entry");
+      tx.commit().await.expect("commit tx");
+
+      let read = store.transaction().await.expect("read tx");
+      assert_eq!(
+        read.get(&table_schema_key).await.expect("get table schema"),
+        Some(table_schema_value)
+      );
+      assert_eq!(
+        read.get(&index_schema_key).await.expect("get index schema"),
+        Some(index_schema_value)
+      );
+      assert_eq!(
+        read.get(&index_entry_key).await.expect("get index entry"),
+        Some(index_entry_value)
+      );
     });
   }
 }
