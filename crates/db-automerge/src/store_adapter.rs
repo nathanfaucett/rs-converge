@@ -223,6 +223,42 @@ where
   inner: <AutomergeBTree<B> as BTree<Uuid, AutoCommit>>::Transaction,
 }
 
+impl<B> AutomergeEngineStoreTransaction<B>
+where
+  B: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
+{
+  fn build_removed_row_doc(
+    mut doc: AutoCommit,
+    key: &StoreKey,
+  ) -> Result<(AutoCommit, Option<StoreValue>), BTreeError> {
+    let prev = read_row_columns(&doc)?;
+    if prev.as_ref().is_none_or(|row| row.is_empty()) {
+      return Ok((doc, None));
+    }
+
+    set_store_key_metadata(&mut doc, key)?;
+    set_row_columns(&mut doc, &[])?;
+    Ok((doc, prev.map(StoreValue::Row)))
+  }
+
+  fn build_removed_direct_doc(
+    doc: AutoCommit,
+    key: &StoreKey,
+  ) -> Result<(AutoCommit, Option<StoreValue>), BTreeError> {
+    if is_tombstone(&doc)? {
+      return Ok((doc, None));
+    }
+
+    let prev = match read_direct_document_entry(&doc)? {
+      Some(value) => value,
+      None => return Ok((doc, None)),
+    };
+
+    let next_doc = doc_with_tombstone(Some(doc), key)?;
+    Ok((next_doc, Some(prev)))
+  }
+}
+
 impl<B> BTreeExecutor<StoreKey, StoreValue> for AutomergeEngineStoreTransaction<B>
 where
   B: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
@@ -306,37 +342,18 @@ where
     async move {
       let doc_id = doc_id_for_key(&key);
       let existing = inner.get(&doc_id).await?;
-      if existing.is_none() {
-        return Ok(None);
-      }
-      let doc = existing.expect("checked is_some");
-      if is_table_row_key(&key) {
-        let prev = read_row_columns(&doc)?;
-        if prev.as_ref().is_none_or(|row| row.is_empty()) {
-          return Ok(None);
-        }
-        let mut next_doc = doc;
-        set_store_key_metadata(&mut next_doc, &key)?;
-        set_row_columns(&mut next_doc, &[])?;
-        inner.insert(doc_id, next_doc).await?;
-        return Ok(prev.map(StoreValue::Row));
-      }
-
-      if is_tombstone(&doc)? {
-        return Ok(None);
-      }
-
-      let prev = read_direct_document_entry(&doc)?;
-
-      let prev = if let Some(value) = prev {
-        value
-      } else {
+      let Some(doc) = existing else {
         return Ok(None);
       };
 
-      let next_doc = doc_with_tombstone(Some(doc), &key)?;
+      let (next_doc, result) = if is_table_row_key(&key) {
+        Self::build_removed_row_doc(doc, &key)?
+      } else {
+        Self::build_removed_direct_doc(doc, &key)?
+      };
+
       inner.insert(doc_id, next_doc).await?;
-      Ok(Some(prev))
+      Ok(result)
     }
   }
 

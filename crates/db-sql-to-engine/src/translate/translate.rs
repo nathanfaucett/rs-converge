@@ -11,7 +11,7 @@ use core::cell::Cell;
 pub use db_engine::SchemaResolver;
 use hashbrown::HashMap;
 use sqlparser::ast::{
-  AssignmentTarget, BinaryOperator, ColumnOption, CreateIndex, CreateTable, DataType,
+  AssignmentTarget, BinaryOperator, ColumnDef, ColumnOption, CreateIndex, CreateTable, DataType,
   Delete as SqlDelete, Expr as SqlExpr, FromTable, FunctionArg, FunctionArgExpr, FunctionArguments,
   GroupByExpr, JoinConstraint, JoinOperator, LimitClause, ObjectName, ObjectType, OrderBy, Query,
   Select, SelectItem, SetExpr, Statement, TableConstraint, TableFactor, Update as SqlUpdate,
@@ -340,27 +340,48 @@ fn translate_create_table(
   create_table: &CreateTable,
 ) -> Result<db_engine::TableSchema, TranslateError> {
   let table_name = object_name_to_string(&create_table.name);
-  let mut columns: Vec<db_engine::ColumnSchema> = Vec::new();
-  let mut pk_names: Vec<String> = Vec::new();
+  let columns = collect_create_table_columns(&create_table.columns)?;
+  let pk_names =
+    collect_create_table_primary_keys(&create_table.columns, &create_table.constraints)?;
+  let primary_key = resolve_primary_key_indexes(&columns, &pk_names)?;
 
-  for column in &create_table.columns {
+  validate_primary_key_schema(&columns, &primary_key)?;
+
+  Ok(db_engine::TableSchema {
+    name: table_name,
+    columns,
+    primary_key,
+  })
+}
+
+fn collect_create_table_columns(
+  columns: &[ColumnDef],
+) -> Result<Vec<db_engine::ColumnSchema>, TranslateError> {
+  let mut result = Vec::new();
+  for column in columns {
     let data_type = sql_type_to_engine_type(&column.data_type)?;
-    let column_name = column.name.value.clone();
-    for option in &column.options {
-      match &option.option {
-        ColumnOption::PrimaryKey(_) => pk_names.push(column_name.clone()),
-        ColumnOption::Unique(_) => {}
-        _ => {}
-      }
-    }
-
-    columns.push(db_engine::ColumnSchema {
-      name: column_name,
+    result.push(db_engine::ColumnSchema {
+      name: column.name.value.clone(),
       data_type,
     });
   }
+  Ok(result)
+}
 
-  for constraint in &create_table.constraints {
+fn collect_create_table_primary_keys(
+  columns: &[ColumnDef],
+  constraints: &[TableConstraint],
+) -> Result<Vec<String>, TranslateError> {
+  let mut pk_names = Vec::new();
+  for column in columns {
+    for option in &column.options {
+      if let ColumnOption::PrimaryKey(_) = &option.option {
+        pk_names.push(column.name.value.clone());
+      }
+    }
+  }
+
+  for constraint in constraints {
     if let TableConstraint::PrimaryKey(pk) = constraint {
       for column in &pk.columns {
         let name = match &column.column.expr {
@@ -381,29 +402,41 @@ fn translate_create_table(
     }
   }
 
-  let primary_key: Vec<usize> = if pk_names.is_empty() {
+  if pk_names.is_empty() {
     return Err(TranslateError::UnsupportedFeature(
       "CREATE TABLE must define exactly one PRIMARY KEY column".into(),
     ));
-  } else {
-    pk_names
-      .iter()
-      .filter_map(|pk| columns.iter().position(|c| &c.name == pk))
-      .collect()
-  };
+  }
+  Ok(pk_names)
+}
+
+fn resolve_primary_key_indexes(
+  columns: &[db_engine::ColumnSchema],
+  pk_names: &[String],
+) -> Result<Vec<usize>, TranslateError> {
+  let primary_key: Vec<usize> = pk_names
+    .iter()
+    .filter_map(|pk| columns.iter().position(|c| &c.name == pk))
+    .collect();
 
   if primary_key.is_empty() {
     return Err(TranslateError::UnsupportedFeature(
       "CREATE TABLE primary key columns not found".into(),
     ));
   }
-
   if primary_key.len() != 1 {
     return Err(TranslateError::UnsupportedFeature(
       "CREATE TABLE must define exactly one PRIMARY KEY column".into(),
     ));
   }
 
+  Ok(primary_key)
+}
+
+fn validate_primary_key_schema(
+  columns: &[db_engine::ColumnSchema],
+  primary_key: &[usize],
+) -> Result<(), TranslateError> {
   let pk_index = primary_key[0];
   if columns
     .get(pk_index)
@@ -414,12 +447,7 @@ fn translate_create_table(
       "PRIMARY KEY column must use UUID type".into(),
     ));
   }
-
-  Ok(db_engine::TableSchema {
-    name: table_name,
-    columns,
-    primary_key,
-  })
+  Ok(())
 }
 
 fn sql_type_to_engine_type(data_type: &DataType) -> Result<db_engine::EngineType, TranslateError> {
@@ -843,7 +871,7 @@ fn translate_update(
   let mut referenced_tables: Vec<String> = Vec::new();
   let mut table_schemas: HashMap<String, db_engine::TableSchema> = HashMap::new();
 
-  let table = parse_from_clause(
+  let table = parse_update_target_table(
     &update.table,
     resolver,
     &mut alias_map,
@@ -851,7 +879,7 @@ fn translate_update(
     &mut table_schemas,
   )?;
 
-  let mut joins = parse_joins(
+  let mut joins = parse_update_joins(
     &update.table.joins,
     &mut alias_map,
     &mut referenced_tables,
@@ -860,8 +888,91 @@ fn translate_update(
     &table,
   )?;
 
-  let mut from_tables: Vec<String> = Vec::new();
-  if let Some(update_from) = &update.from {
+  let from_tables = parse_update_from_tables(
+    &update.from,
+    resolver,
+    &mut alias_map,
+    &mut referenced_tables,
+    &mut table_schemas,
+    &mut joins,
+  )?;
+
+  let schema = resolver
+    .describe_table(&table)
+    .ok_or_else(|| TranslateError::UnknownTable(table.clone()))?;
+
+  let resolved_assignments = translate_update_assignments(
+    &update.assignments,
+    &alias_map,
+    &table_schemas,
+    &schema,
+    mapper,
+  )?;
+
+  let predicate = translate_update_predicate(
+    update.selection.as_ref(),
+    &alias_map,
+    &table_schemas,
+    resolver,
+    mapper,
+  )?;
+
+  let returning = translate_update_returning(
+    update.returning.as_ref(),
+    &table,
+    &alias_map,
+    &table_schemas,
+    mapper,
+  )?;
+
+  Ok(db_engine::EngineQuery::Update {
+    table,
+    assignments: resolved_assignments,
+    predicate,
+    joins,
+    from_tables,
+    returning,
+  })
+}
+
+fn parse_update_target_table(
+  table: &sqlparser::ast::TableWithJoins,
+  resolver: &dyn SchemaResolver,
+  alias_map: &mut HashMap<String, String>,
+  referenced_tables: &mut Vec<String>,
+  table_schemas: &mut HashMap<String, db_engine::TableSchema>,
+) -> Result<String, TranslateError> {
+  parse_from_clause(table, resolver, alias_map, referenced_tables, table_schemas)
+}
+
+fn parse_update_joins(
+  joins: &[sqlparser::ast::Join],
+  alias_map: &mut HashMap<String, String>,
+  referenced_tables: &mut Vec<String>,
+  table_schemas: &mut HashMap<String, db_engine::TableSchema>,
+  resolver: &dyn SchemaResolver,
+  table: &str,
+) -> Result<Vec<db_engine::JoinClause>, TranslateError> {
+  parse_joins(
+    joins,
+    alias_map,
+    referenced_tables,
+    table_schemas,
+    resolver,
+    table,
+  )
+}
+
+fn parse_update_from_tables(
+  update_from: &Option<UpdateTableFromKind>,
+  resolver: &dyn SchemaResolver,
+  alias_map: &mut HashMap<String, String>,
+  referenced_tables: &mut Vec<String>,
+  table_schemas: &mut HashMap<String, db_engine::TableSchema>,
+  joins: &mut Vec<db_engine::JoinClause>,
+) -> Result<Vec<String>, TranslateError> {
+  let mut from_tables = Vec::new();
+  if let Some(update_from) = update_from {
     let from_items = match update_from {
       UpdateTableFromKind::BeforeSet(items) | UpdateTableFromKind::AfterSet(items) => items,
     };
@@ -870,36 +981,40 @@ fn translate_update(
       let from_base = parse_from_clause(
         from_item,
         resolver,
-        &mut alias_map,
-        &mut referenced_tables,
-        &mut table_schemas,
+        alias_map,
+        referenced_tables,
+        table_schemas,
       )?;
       from_tables.push(from_base.clone());
       joins.extend(parse_joins(
         &from_item.joins,
-        &mut alias_map,
-        &mut referenced_tables,
-        &mut table_schemas,
+        alias_map,
+        referenced_tables,
+        table_schemas,
         resolver,
         &from_base,
       )?);
     }
   }
+  Ok(from_tables)
+}
 
-  let schema = resolver
-    .describe_table(&table)
-    .ok_or_else(|| TranslateError::UnknownTable(table.clone()))?;
-
-  let mut resolved_assignments: Vec<db_engine::UpdateAssignment> = Vec::new();
-  for assignment in &update.assignments {
-    let column = assignment_target_column_name(&assignment.target, &alias_map, &table)?;
+fn translate_update_assignments(
+  assignments: &[sqlparser::ast::Assignment],
+  alias_map: &HashMap<String, String>,
+  table_schemas: &HashMap<String, db_engine::TableSchema>,
+  schema: &db_engine::TableSchema,
+  mapper: &dyn ValueMapper,
+) -> Result<Vec<db_engine::UpdateAssignment>, TranslateError> {
+  let mut resolved_assignments = Vec::new();
+  for assignment in assignments {
+    let column = assignment_target_column_name(&assignment.target, alias_map, &schema.name)?;
     let column_index = schema
       .columns
       .iter()
       .position(|column_schema| column_schema.name == column)
       .ok_or_else(|| TranslateError::UnknownColumn(column.clone()))?;
-    let value =
-      sql_expr_to_update_value_expr(&assignment.value, &alias_map, &table_schemas, mapper)?;
+    let value = sql_expr_to_update_value_expr(&assignment.value, alias_map, table_schemas, mapper)?;
     let value = if let db_engine::UpdateValueExpr::Value(literal) = value {
       db_engine::UpdateValueExpr::Value(convert_value_to_column_type(
         literal,
@@ -913,39 +1028,47 @@ fn translate_update(
       value,
     });
   }
+  Ok(resolved_assignments)
+}
 
-  let predicate = if let Some(selection) = &update.selection {
-    Some(expr_to_qualified_predicate(
+fn translate_update_predicate(
+  selection: Option<&SqlExpr>,
+  alias_map: &HashMap<String, String>,
+  table_schemas: &HashMap<String, db_engine::TableSchema>,
+  resolver: &dyn SchemaResolver,
+  mapper: &dyn ValueMapper,
+) -> Result<Option<db_engine::QualifiedPredicate>, TranslateError> {
+  if let Some(selection) = selection {
+    Ok(Some(expr_to_qualified_predicate(
       selection,
-      &alias_map,
-      &table_schemas,
+      alias_map,
+      table_schemas,
       resolver,
       mapper,
-    )?)
+    )?))
   } else {
-    None
-  };
+    Ok(None)
+  }
+}
 
-  let returning = if let Some(returning_items) = &update.returning {
-    Some(translate_returning_projection(
+fn translate_update_returning(
+  returning_items: Option<&Vec<sqlparser::ast::SelectItem>>,
+  table: &str,
+  alias_map: &HashMap<String, String>,
+  table_schemas: &HashMap<String, db_engine::TableSchema>,
+  mapper: &dyn ValueMapper,
+) -> Result<Option<Vec<db_engine::UpdateValueExpr>>, TranslateError> {
+  if let Some(returning_items) = returning_items {
+    Ok(Some(translate_returning_projection(
       returning_items,
-      &table,
-      &alias_map,
-      &table_schemas,
+      table,
+      alias_map,
+      table_schemas,
       mapper,
-    )?)
+    )?))
   } else {
-    None
-  };
-
-  Ok(db_engine::EngineQuery::Update {
-    table,
-    assignments: resolved_assignments,
-    predicate,
-    joins,
-    from_tables,
-    returning,
-  })
+    Ok(None)
+  }
 }
 
 fn sql_expr_to_update_value_expr(
@@ -1258,33 +1381,67 @@ fn translate_insert(
       "INSERT ON is not supported: {on:?}"
     )));
   }
-  let table = match &insert.table {
-    sqlparser::ast::TableObject::TableName(name) => object_name_to_string(name),
-    _ => {
-      return Err(TranslateError::UnsupportedFeature(
-        "only table name inserts supported".into(),
-      ));
-    }
-  };
 
+  let table = parse_insert_table_name(&insert.table)?;
   let schema = resolver
     .describe_table(&table)
     .ok_or_else(|| TranslateError::UnknownTable(table.clone()))?;
+  let columns = parse_insert_columns(insert, &schema)?;
+  let row = build_insert_row(insert, &schema, &columns, mapper)?;
 
-  let columns = if insert.columns.is_empty() {
-    schema
-      .columns
-      .iter()
-      .map(|c| c.name.clone())
-      .collect::<Vec<_>>()
+  let mut alias_map: HashMap<String, String> = HashMap::new();
+  alias_map.insert(table.clone(), table.clone());
+
+  let mut table_schemas: HashMap<String, db_engine::TableSchema> = HashMap::new();
+  table_schemas.insert(table.clone(), schema.clone());
+
+  let returning = translate_insert_returning(
+    insert.returning.as_ref(),
+    &table,
+    &alias_map,
+    &table_schemas,
+    mapper,
+  )?;
+
+  Ok(db_engine::EngineQuery::Insert {
+    table,
+    row,
+    returning,
+  })
+}
+
+fn parse_insert_table_name(table: &sqlparser::ast::TableObject) -> Result<String, TranslateError> {
+  match table {
+    sqlparser::ast::TableObject::TableName(name) => Ok(object_name_to_string(name)),
+    _ => Err(TranslateError::UnsupportedFeature(
+      "only table name inserts supported".into(),
+    )),
+  }
+}
+
+fn parse_insert_columns(
+  insert: &sqlparser::ast::Insert,
+  schema: &db_engine::TableSchema,
+) -> Result<Vec<String>, TranslateError> {
+  if insert.columns.is_empty() {
+    Ok(schema.columns.iter().map(|c| c.name.clone()).collect())
   } else {
-    insert
-      .columns
-      .iter()
-      .map(|ident| ident.value.clone())
-      .collect()
-  };
+    Ok(
+      insert
+        .columns
+        .iter()
+        .map(|ident| ident.value.clone())
+        .collect(),
+    )
+  }
+}
 
+fn build_insert_row(
+  insert: &sqlparser::ast::Insert,
+  schema: &db_engine::TableSchema,
+  columns: &[String],
+  mapper: &dyn ValueMapper,
+) -> Result<Vec<db_engine::EngineValue>, TranslateError> {
   let source = insert.source.as_ref().ok_or_else(|| {
     TranslateError::UnsupportedFeature("INSERT without source unsupported".into())
   })?;
@@ -1320,37 +1477,32 @@ fn translate_insert(
       .position(|c| c.name == *col_name)
       .ok_or_else(|| TranslateError::UnknownColumn(col_name.clone()))?;
     let mut value = mapper.map_sql_value(expr)?;
-
-    // Convert to appropriate type based on schema
     let column_type = &schema.columns[idx].data_type;
     value = convert_value_to_column_type(value, column_type)?;
-
     row[idx] = value;
   }
 
-  let mut alias_map: HashMap<String, String> = HashMap::new();
-  alias_map.insert(table.clone(), table.clone());
+  Ok(row)
+}
 
-  let mut table_schemas: HashMap<String, db_engine::TableSchema> = HashMap::new();
-  table_schemas.insert(table.clone(), schema.clone());
-
-  let returning = if let Some(returning_items) = &insert.returning {
-    Some(translate_returning_projection(
+fn translate_insert_returning(
+  returning_items: Option<&Vec<sqlparser::ast::SelectItem>>,
+  table: &str,
+  alias_map: &HashMap<String, String>,
+  table_schemas: &HashMap<String, db_engine::TableSchema>,
+  mapper: &dyn ValueMapper,
+) -> Result<Option<Vec<db_engine::UpdateValueExpr>>, TranslateError> {
+  if let Some(returning_items) = returning_items {
+    Ok(Some(translate_returning_projection(
       returning_items,
-      &table,
-      &alias_map,
-      &table_schemas,
+      table,
+      alias_map,
+      table_schemas,
       mapper,
-    )?)
+    )?))
   } else {
-    None
-  };
-
-  Ok(db_engine::EngineQuery::Insert {
-    table,
-    row,
-    returning,
-  })
+    Ok(None)
+  }
 }
 
 // `extract_identifier` moved to `translate/helpers.rs`.
@@ -1541,72 +1693,129 @@ fn parse_projection_item(
 ) -> Result<(), TranslateError> {
   match item {
     SelectItem::Wildcard(_) => {
-      for t in referenced_tables {
-        if let Some(schema) = table_schemas.get(t) {
-          for (i, _) in schema.columns.iter().enumerate() {
-            projection_qc.push(db_engine::QualifiedColumn {
-              table: t.clone(),
-              column_index: i,
-            });
-          }
-        }
-      }
+      parse_projection_wildcard(referenced_tables, table_schemas, projection_qc)
     }
     SelectItem::QualifiedWildcard(kind, _) => {
-      let table_name = match kind {
-        sqlparser::ast::SelectItemQualifiedWildcardKind::ObjectName(name) => {
-          let raw = object_name_to_string(name);
-          alias_map.get(&raw).cloned().unwrap_or(raw)
-        }
-        _ => {
-          return Err(TranslateError::UnsupportedFeature(
-            "unsupported qualified wildcard projection item".into(),
-          ));
-        }
-      };
-      let schema = table_schemas
-        .get(&table_name)
-        .ok_or_else(|| TranslateError::UnknownTable(table_name.clone()))?;
+      parse_projection_qualified_wildcard(kind, alias_map, table_schemas, projection_qc)
+    }
+    SelectItem::UnnamedExpr(expr) => parse_projection_unnamed_expr(
+      expr,
+      alias_map,
+      referenced_tables,
+      table_schemas,
+      aggregates,
+      proj_alias_map,
+      projection_qc,
+    ),
+    SelectItem::ExprWithAlias { expr, alias } => parse_projection_expr_with_alias(
+      expr,
+      alias,
+      alias_map,
+      referenced_tables,
+      table_schemas,
+      aggregates,
+      proj_alias_map,
+      projection_qc,
+    ),
+  }
+}
+
+fn parse_projection_wildcard(
+  referenced_tables: &[String],
+  table_schemas: &HashMap<String, db_engine::TableSchema>,
+  projection_qc: &mut Vec<db_engine::QualifiedColumn>,
+) -> Result<(), TranslateError> {
+  for t in referenced_tables {
+    if let Some(schema) = table_schemas.get(t) {
       for (i, _) in schema.columns.iter().enumerate() {
         projection_qc.push(db_engine::QualifiedColumn {
-          table: table_name.clone(),
+          table: t.clone(),
           column_index: i,
         });
       }
     }
-    SelectItem::UnnamedExpr(expr) => {
-      parse_projection_expression(
-        expr,
-        alias_map,
-        referenced_tables,
-        table_schemas,
-        aggregates,
-        proj_alias_map,
-        projection_qc,
-        None,
-      )?;
-    }
-    SelectItem::ExprWithAlias { expr, alias } => match expr {
-      SqlExpr::Function(_) => {
-        parse_projection_expression(
-          expr,
-          alias_map,
-          referenced_tables,
-          table_schemas,
-          aggregates,
-          proj_alias_map,
-          projection_qc,
-          Some(&alias.value),
-        )?;
-      }
-      _ => {
-        let qc = helpers::resolve_column(expr, alias_map, referenced_tables, table_schemas)?;
-        proj_alias_map.insert(alias.value.clone(), qc.clone());
-        projection_qc.push(qc);
-      }
-    },
   }
   Ok(())
+}
+
+fn parse_projection_qualified_wildcard(
+  kind: &sqlparser::ast::SelectItemQualifiedWildcardKind,
+  alias_map: &HashMap<String, String>,
+  table_schemas: &HashMap<String, db_engine::TableSchema>,
+  projection_qc: &mut Vec<db_engine::QualifiedColumn>,
+) -> Result<(), TranslateError> {
+  let table_name = match kind {
+    sqlparser::ast::SelectItemQualifiedWildcardKind::ObjectName(name) => {
+      let raw = object_name_to_string(name);
+      alias_map.get(&raw).cloned().unwrap_or(raw)
+    }
+    _ => {
+      return Err(TranslateError::UnsupportedFeature(
+        "unsupported qualified wildcard projection item".into(),
+      ));
+    }
+  };
+  let schema = table_schemas
+    .get(&table_name)
+    .ok_or_else(|| TranslateError::UnknownTable(table_name.clone()))?;
+  for (i, _) in schema.columns.iter().enumerate() {
+    projection_qc.push(db_engine::QualifiedColumn {
+      table: table_name.clone(),
+      column_index: i,
+    });
+  }
+  Ok(())
+}
+
+fn parse_projection_unnamed_expr(
+  expr: &SqlExpr,
+  alias_map: &HashMap<String, String>,
+  referenced_tables: &[String],
+  table_schemas: &HashMap<String, db_engine::TableSchema>,
+  aggregates: &mut Vec<db_engine::Aggregate>,
+  proj_alias_map: &mut HashMap<String, db_engine::QualifiedColumn>,
+  projection_qc: &mut Vec<db_engine::QualifiedColumn>,
+) -> Result<(), TranslateError> {
+  parse_projection_expression(
+    expr,
+    alias_map,
+    referenced_tables,
+    table_schemas,
+    aggregates,
+    proj_alias_map,
+    projection_qc,
+    None,
+  )
+}
+
+fn parse_projection_expr_with_alias(
+  expr: &SqlExpr,
+  alias: &sqlparser::ast::Ident,
+  alias_map: &HashMap<String, String>,
+  referenced_tables: &[String],
+  table_schemas: &HashMap<String, db_engine::TableSchema>,
+  aggregates: &mut Vec<db_engine::Aggregate>,
+  proj_alias_map: &mut HashMap<String, db_engine::QualifiedColumn>,
+  projection_qc: &mut Vec<db_engine::QualifiedColumn>,
+) -> Result<(), TranslateError> {
+  match expr {
+    SqlExpr::Function(_) => parse_projection_expression(
+      expr,
+      alias_map,
+      referenced_tables,
+      table_schemas,
+      aggregates,
+      proj_alias_map,
+      projection_qc,
+      Some(&alias.value),
+    ),
+    _ => {
+      let qc = helpers::resolve_column(expr, alias_map, referenced_tables, table_schemas)?;
+      proj_alias_map.insert(alias.value.clone(), qc.clone());
+      projection_qc.push(qc);
+      Ok(())
+    }
+  }
 }
 
 #[allow(clippy::too_many_arguments)]

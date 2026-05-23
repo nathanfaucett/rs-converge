@@ -32,49 +32,53 @@ impl AggState {
   }
 
   fn update(&mut self, agg: &Aggregate, value: Option<EngineValue>) {
-    match agg {
-      Aggregate::Count(col) => {
-        if let AggState::Count(c) = self {
-          if col.is_none() {
-            *c += 1;
-          } else if let Some(v) = value
-            && !matches!(v, EngineValue::Null)
-          {
-            *c += 1;
-          }
-        }
+    agg.apply_to_state(self, value)
+  }
+
+  fn update_count(&mut self, col: &Option<QualifiedColumn>, value: Option<EngineValue>) {
+    if let AggState::Count(c) = self {
+      if col.is_none() {
+        *c += 1;
+      } else if let Some(v) = value
+        && !matches!(v, EngineValue::Null)
+      {
+        *c += 1;
       }
-      Aggregate::Sum(_) => {
-        if let AggState::Sum(s) = self
-          && let Some(v) = value
-          && let Some(n) = to_f64(&v)
-        {
-          *s += n;
-        }
-      }
-      Aggregate::Min(_) => {
-        if let AggState::Min(opt) = self
-          && let Some(value) = value
-        {
-          update_best(opt, value, |value, current| value < current);
-        }
-      }
-      Aggregate::Max(_) => {
-        if let AggState::Max(opt) = self
-          && let Some(value) = value
-        {
-          update_best(opt, value, |value, current| value > current);
-        }
-      }
-      Aggregate::Avg(_) => {
-        if let AggState::Avg { sum, count } = self
-          && let Some(v) = value
-          && let Some(n) = to_f64(&v)
-        {
-          *sum += n;
-          *count += 1;
-        }
-      }
+    }
+  }
+
+  fn update_sum(&mut self, value: Option<EngineValue>) {
+    if let AggState::Sum(s) = self
+      && let Some(v) = value
+      && let Some(n) = to_f64(&v)
+    {
+      *s += n;
+    }
+  }
+
+  fn update_min(&mut self, value: Option<EngineValue>) {
+    if let AggState::Min(opt) = self
+      && let Some(value) = value
+    {
+      update_best(opt, value, |value, current| value < current);
+    }
+  }
+
+  fn update_max(&mut self, value: Option<EngineValue>) {
+    if let AggState::Max(opt) = self
+      && let Some(value) = value
+    {
+      update_best(opt, value, |value, current| value > current);
+    }
+  }
+
+  fn update_avg(&mut self, value: Option<EngineValue>) {
+    if let AggState::Avg { sum, count } = self
+      && let Some(v) = value
+      && let Some(n) = to_f64(&v)
+    {
+      *sum += n;
+      *count += 1;
     }
   }
 
@@ -93,6 +97,18 @@ impl AggState {
           EngineValue::Float(*sum / (*count as f64))
         }
       }
+    }
+  }
+}
+
+impl Aggregate {
+  fn apply_to_state(&self, state: &mut AggState, value: Option<EngineValue>) {
+    match self {
+      Aggregate::Count(col) => state.update_count(col, value),
+      Aggregate::Sum(_) => state.update_sum(value),
+      Aggregate::Min(_) => state.update_min(value),
+      Aggregate::Max(_) => state.update_max(value),
+      Aggregate::Avg(_) => state.update_avg(value),
     }
   }
 }
@@ -149,21 +165,23 @@ impl Aggregator {
   }
 
   pub fn execute(self) -> Result<Vec<EngineRow>, EngineError> {
-    let Self {
-      group_by,
-      aggregates,
-      having,
-      order_by,
-      limit,
-      offset,
-      input,
-    } = self;
+    let mut out_rows = self.build_grouped_rows()?;
+    out_rows = self.apply_having(out_rows);
+    self.apply_order_by(&mut out_rows)?;
+    Ok(self.apply_limit_offset(out_rows))
+  }
 
+  fn build_grouped_rows(&self) -> Result<Vec<EngineRow>, EngineError> {
+    let groups = self.build_groups()?;
+    self.finish_group_rows(groups)
+  }
+
+  fn build_groups(&self) -> Result<HashMap<EngineKey, Vec<AggState>>, EngineError> {
     let mut groups: HashMap<EngineKey, Vec<AggState>> = HashMap::new();
 
-    for partial in &input {
-      let mut key_vals: Vec<EngineValue> = Vec::with_capacity(group_by.len());
-      for gc in &group_by {
+    for partial in &self.input {
+      let mut key_vals: Vec<EngineValue> = Vec::with_capacity(self.group_by.len());
+      for gc in &self.group_by {
         match partial.get(&gc.table) {
           Some(Some(row)) => key_vals.push(
             row
@@ -184,9 +202,9 @@ impl Aggregator {
       let key = <DefaultEncoding as KeyEncoding>::encode_values(&key_vals);
       let entry = groups
         .entry(key)
-        .or_insert_with(|| aggregates.iter().map(AggState::new_for).collect());
+        .or_insert_with(|| self.aggregates.iter().map(AggState::new_for).collect());
 
-      for (i, agg) in aggregates.iter().enumerate() {
+      for (i, agg) in self.aggregates.iter().enumerate() {
         let val = match agg {
           Aggregate::Count(Some(qc))
           | Aggregate::Sum(qc)
@@ -202,6 +220,13 @@ impl Aggregator {
       }
     }
 
+    Ok(groups)
+  }
+
+  fn finish_group_rows(
+    &self,
+    groups: HashMap<EngineKey, Vec<AggState>>,
+  ) -> Result<Vec<EngineRow>, EngineError> {
     let mut out_rows: Vec<EngineRow> = Vec::with_capacity(groups.len());
     for (key_bytes, agg_states) in groups {
       let key_vals = <DefaultEncoding as KeyEncoding>::decode_values(&key_bytes)
@@ -212,67 +237,77 @@ impl Aggregator {
       }
       out_rows.push(row);
     }
+    Ok(out_rows)
+  }
 
-    if let Some(having) = &having {
+  fn apply_having(&self, mut out_rows: Vec<EngineRow>) -> Vec<EngineRow> {
+    if let Some(having) = &self.having {
       out_rows.retain(|r| {
         let ctx = GroupRowContext {
           row: r,
-          group_by: &group_by,
+          group_by: &self.group_by,
         };
         eval_having_predicate(having, &ctx)
       });
     }
+    out_rows
+  }
 
-    if !order_by.is_empty() {
-      let mut orders_idx: Vec<(usize, SortDirection)> = Vec::new();
-      for ord in &order_by {
-        if let Some(pos) = group_by.iter().position(|gc| gc == &ord.expr) {
-          orders_idx.push((pos, ord.direction.clone()));
-          continue;
-        }
-        if let Some(pos) = aggregates.iter().position(|agg| match agg {
-          Aggregate::Count(None) => false,
-          Aggregate::Count(Some(qc)) => qc == &ord.expr,
-          Aggregate::Sum(qc) => qc == &ord.expr,
-          Aggregate::Min(qc) => qc == &ord.expr,
-          Aggregate::Max(qc) => qc == &ord.expr,
-          Aggregate::Avg(qc) => qc == &ord.expr,
-        }) {
-          orders_idx.push((group_by.len() + pos, ord.direction.clone()));
-          continue;
-        }
-        return Err(EngineError::SchemaMismatch(
-          "ORDER BY references unknown group or aggregate column".into(),
-        ));
-      }
-
-      out_rows.sort_by(|a, b| {
-        for (idx, dir) in &orders_idx {
-          let av = a.get(*idx).unwrap_or(&EngineValue::Null);
-          let bv = b.get(*idx).unwrap_or(&EngineValue::Null);
-          let cmp = av.cmp(bv);
-          let cmp = match dir {
-            SortDirection::Asc => cmp,
-            SortDirection::Desc => cmp.reverse(),
-          };
-          if cmp != Ordering::Equal {
-            return cmp;
-          }
-        }
-        Ordering::Equal
-      });
+  fn apply_order_by(&self, out_rows: &mut Vec<EngineRow>) -> Result<(), EngineError> {
+    if self.order_by.is_empty() {
+      return Ok(());
     }
 
-    let rows = match limit {
-      Some(limit) => out_rows
+    let mut orders_idx: Vec<(usize, SortDirection)> = Vec::new();
+    for ord in &self.order_by {
+      if let Some(pos) = self.group_by.iter().position(|gc| gc == &ord.expr) {
+        orders_idx.push((pos, ord.direction.clone()));
+        continue;
+      }
+      if let Some(pos) = self.aggregates.iter().position(|agg| match agg {
+        Aggregate::Count(None) => false,
+        Aggregate::Count(Some(qc)) => qc == &ord.expr,
+        Aggregate::Sum(qc) => qc == &ord.expr,
+        Aggregate::Min(qc) => qc == &ord.expr,
+        Aggregate::Max(qc) => qc == &ord.expr,
+        Aggregate::Avg(qc) => qc == &ord.expr,
+      }) {
+        orders_idx.push((self.group_by.len() + pos, ord.direction.clone()));
+        continue;
+      }
+      return Err(EngineError::SchemaMismatch(
+        "ORDER BY references unknown group or aggregate column".into(),
+      ));
+    }
+
+    out_rows.sort_by(|a, b| {
+      for (idx, dir) in &orders_idx {
+        let av = a.get(*idx).unwrap_or(&EngineValue::Null);
+        let bv = b.get(*idx).unwrap_or(&EngineValue::Null);
+        let cmp = av.cmp(bv);
+        let cmp = match dir {
+          SortDirection::Asc => cmp,
+          SortDirection::Desc => cmp.reverse(),
+        };
+        if cmp != Ordering::Equal {
+          return cmp;
+        }
+      }
+      Ordering::Equal
+    });
+
+    Ok(())
+  }
+
+  fn apply_limit_offset(&self, rows: Vec<EngineRow>) -> Vec<EngineRow> {
+    match self.limit {
+      Some(limit) => rows
         .into_iter()
-        .skip(offset.unwrap_or(0))
+        .skip(self.offset.unwrap_or(0))
         .take(limit)
         .collect(),
-      None => out_rows.into_iter().skip(offset.unwrap_or(0)).collect(),
-    };
-
-    Ok(rows)
+      None => rows.into_iter().skip(self.offset.unwrap_or(0)).collect(),
+    }
   }
 }
 

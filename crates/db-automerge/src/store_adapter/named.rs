@@ -204,6 +204,68 @@ where
   }
 }
 
+impl<B> AutomergeNamedTransaction<B>
+where
+  B: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
+{
+  fn build_named_tree_document(
+    tree: &str,
+    key: &EngineKey,
+    value: Vec<u8>,
+    existing: Option<AutoCommit>,
+  ) -> Result<AutoCommit, BTreeError>
+  where
+    EngineKey: Ord,
+  {
+    if is_row_tree(tree) {
+      let row = decode_row_bytes(&value)?;
+      let mut doc = existing.unwrap_or_default();
+      set_row_columns(&mut doc, &row)?;
+      set_doc_tree(doc, tree)
+    } else {
+      build_named_doc(existing, key, &value)
+    }
+  }
+
+  fn build_removed_named_row_doc(
+    mut doc: AutoCommit,
+    tree: &str,
+  ) -> Result<(AutoCommit, Option<Vec<u8>>), BTreeError> {
+    let removed = read_row_columns(&doc)?.and_then(|row| {
+      if row.is_empty() {
+        None
+      } else {
+        Some(encode_row_bytes(&row))
+      }
+    });
+
+    if removed.is_some() {
+      set_row_columns(&mut doc, &[])?;
+      let next_doc = set_doc_tree(doc, tree)?;
+      Ok((next_doc, removed))
+    } else {
+      Ok((doc, None))
+    }
+  }
+
+  fn build_removed_named_doc(
+    doc: AutoCommit,
+    key: &EngineKey,
+  ) -> Result<(AutoCommit, Option<Vec<u8>>), BTreeError> {
+    if is_named_tombstone(&doc)? {
+      return Ok((doc, None));
+    }
+
+    let removed = read_named_value_bytes(&doc)?;
+    if removed.is_none() {
+      return Ok((doc, None));
+    }
+
+    let next_doc = build_named_tombstone(doc, key)?;
+    Ok((next_doc, removed))
+  }
+}
+
 impl<B> NamedTreeTransaction<EngineKey, Vec<u8>> for AutomergeNamedTransaction<B>
 where
   B: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
@@ -230,36 +292,7 @@ where
   {
     let doc_id = doc_id_for_tree_key(tree, &key)?;
     let existing = self.inner.get(&doc_id).await?;
-    let row_values = if is_row_tree(tree) {
-      Some(decode_row_bytes(&value)?)
-    } else {
-      None
-    };
-
-    let new_doc = if let Some(doc) = existing {
-      if let Some(row) = row_values.as_ref() {
-        let mut updated = doc;
-        set_row_columns(&mut updated, row)?;
-        if is_row_tree(tree) {
-          set_doc_tree(updated, tree)?
-        } else {
-          updated
-        }
-      } else {
-        build_named_doc(Some(doc), &key, &value)?
-      }
-    } else if let Some(row) = row_values.as_ref() {
-      let mut created = AutoCommit::new();
-      set_row_columns(&mut created, row)?;
-      if is_row_tree(tree) {
-        set_doc_tree(created, tree)?
-      } else {
-        created
-      }
-    } else {
-      build_named_doc(None, &key, &value)?
-    };
-
+    let new_doc = Self::build_named_tree_document(tree, &key, value, existing)?;
     self.inner.insert(doc_id, new_doc).await
   }
 
@@ -275,30 +308,17 @@ where
     let Some(existing) = self.inner.get(&doc_id).await? else {
       return Ok(None);
     };
-    let removed = if is_row_tree(tree) {
-      read_row_columns(&existing)?.and_then(|row| {
-        if row.is_empty() {
-          None
-        } else {
-          Some(encode_row_bytes(&row))
-        }
-      })
+
+    let (next_doc, removed) = if is_row_tree(tree) {
+      Self::build_removed_named_row_doc(existing, tree)?
     } else {
-      if is_named_tombstone(&existing)? {
-        return Ok(None);
-      }
-      read_named_value_bytes(&existing)?
+      Self::build_removed_named_doc(existing, key)?
     };
+
     if removed.is_some() {
-      let tombstone = if is_row_tree(tree) {
-        let mut next = existing;
-        set_row_columns(&mut next, &[])?;
-        set_doc_tree(next, tree)?
-      } else {
-        build_named_tombstone(existing, key)?
-      };
-      self.inner.insert(doc_id, tombstone).await?;
+      self.inner.insert(doc_id, next_doc).await?;
     }
+
     Ok(removed)
   }
 

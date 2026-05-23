@@ -94,6 +94,90 @@ where
 
     Ok(Some(reconstruct_state(latest_snapshot, &deltas)))
   }
+
+  async fn load_existing_state(
+    inner_tx: &mut T,
+    doc_id: Uuid,
+  ) -> Result<Option<Vec<u8>>, BTreeError> {
+    let (start, end) = document_entry_bounds(doc_id);
+    let mut latest_snapshot: Option<Vec<u8>> = None;
+    let mut deltas: Vec<Vec<u8>> = Vec::new();
+    let mut has_entries = false;
+
+    let stream = inner_tx.range(start..=end);
+    futures::pin_mut!(stream);
+    while let Some(item) = stream.next().await {
+      let (key, entry) = item?;
+      has_entries = true;
+      if key.doc_type.is_snapshot() {
+        latest_snapshot = Some(entry);
+      } else {
+        deltas.push(entry);
+      }
+    }
+
+    if has_entries {
+      Ok(Some(reconstruct_state(latest_snapshot, &deltas)))
+    } else {
+      Ok(None)
+    }
+  }
+
+  async fn commit_pending_changes(
+    inner_tx: &mut T,
+    pending: BTreeMap<Uuid, Option<AutoCommit>>,
+  ) -> Result<(), BTreeError> {
+    for (doc_id, op) in pending {
+      Self::commit_pending_change(inner_tx, doc_id, op).await?;
+    }
+    Ok(())
+  }
+
+  async fn commit_pending_change(
+    inner_tx: &mut T,
+    doc_id: Uuid,
+    op: Option<AutoCommit>,
+  ) -> Result<(), BTreeError> {
+    match op {
+      Some(snapshot_doc) => {
+        let existing_state = Self::load_existing_state(inner_tx, doc_id).await?;
+        let existing_doc = existing_state
+          .as_ref()
+          .map(|bytes| load_autocommit(bytes))
+          .transpose()?;
+
+        if let Some((entry_key, entry_bytes)) =
+          build_lifecycle_write(doc_id, snapshot_doc, existing_doc)
+        {
+          inner_tx.insert(entry_key, entry_bytes).await?;
+        }
+      }
+      None => {
+        Self::remove_doc_entries(inner_tx, doc_id).await?;
+      }
+    }
+    Ok(())
+  }
+
+  async fn remove_doc_entries(inner_tx: &mut T, doc_id: Uuid) -> Result<(), BTreeError> {
+    let (start, end) = document_entry_bounds(doc_id);
+    let keys_to_remove: alloc::vec::Vec<DocumentChangeKey> = {
+      let mut collected: alloc::vec::Vec<DocumentChangeKey> = alloc::vec::Vec::new();
+      let stream = inner_tx.range(start.clone()..=end.clone());
+      futures::pin_mut!(stream);
+      while let Some(item) = stream.next().await {
+        let (k, _v) = item?;
+        collected.push(k);
+      }
+      collected
+    };
+
+    for k in keys_to_remove {
+      inner_tx.remove(&k).await?;
+    }
+
+    Ok(())
+  }
 }
 
 impl<T> BTreeTransaction<Uuid, AutoCommit> for AutomergeTransaction<T>
@@ -105,63 +189,7 @@ where
       mut inner_tx,
       pending,
     } = self;
-    for (doc_id, op) in pending {
-      if let Some(snapshot_doc) = op {
-        let existing_state: Option<Vec<u8>> = {
-          let (start, end) = document_entry_bounds(doc_id);
-          let mut latest_snapshot: Option<Vec<u8>> = None;
-          let mut deltas: Vec<Vec<u8>> = Vec::new();
-          let mut has_entries = false;
-
-          let stream = inner_tx.range(start..=end);
-          futures::pin_mut!(stream);
-          while let Some(item) = stream.next().await {
-            let (key, entry) = item?;
-            has_entries = true;
-            if key.doc_type.is_snapshot() {
-              latest_snapshot = Some(entry);
-            } else {
-              deltas.push(entry);
-            }
-          }
-
-          if has_entries {
-            Some(reconstruct_state(latest_snapshot, &deltas))
-          } else {
-            None
-          }
-        };
-
-        let existing_doc = match existing_state.as_ref() {
-          Some(bytes) => Some(load_autocommit(bytes)?),
-          None => None,
-        };
-
-        if let Some((entry_key, entry_bytes)) =
-          build_lifecycle_write(doc_id, snapshot_doc, existing_doc)
-        {
-          inner_tx.insert(entry_key, entry_bytes).await?;
-        }
-      } else {
-        // staged delete: remove all internal entries for this doc_id
-        let (start, end) = document_entry_bounds(doc_id);
-
-        let keys_to_remove: alloc::vec::Vec<DocumentChangeKey> = {
-          let mut collected: alloc::vec::Vec<DocumentChangeKey> = alloc::vec::Vec::new();
-          let stream = inner_tx.range(start.clone()..=end.clone());
-          futures::pin_mut!(stream);
-          while let Some(item) = stream.next().await {
-            let (k, _v) = item?;
-            collected.push(k);
-          }
-          collected
-        };
-
-        for k in keys_to_remove {
-          inner_tx.remove(&k).await?;
-        }
-      }
-    }
+    Self::commit_pending_changes(&mut inner_tx, pending).await?;
     inner_tx.commit().await
   }
 
@@ -300,7 +328,12 @@ pub struct AutomergeEncodedTransaction<T, KC, VC> {
 impl<T, KC, VC> AutomergeEncodedTransaction<T, KC, VC>
 where
   T: BTreeTransaction<Vec<u8>, Vec<u8>> + Send,
-  KC: db_core::ValueCodec<DocumentChangeKey> + Clone + Send + Sync + 'static,
+  KC: db_core::ValueCodec<DocumentChangeKey>
+    + db_core::FastKeyCodec<DocumentChangeKey>
+    + Clone
+    + Send
+    + Sync
+    + 'static,
   VC: db_core::ValueCodec<AutomergeEntry> + Clone + Send + Sync + 'static,
 {
   pub fn new(inner_tx: T, key_codec: KC, val_codec: VC) -> Self {
@@ -347,6 +380,140 @@ where
       &deltas_after_snapshot,
     )))
   }
+
+  async fn apply_snapshot_doc(
+    inner_tx: &mut T,
+    doc_id: Uuid,
+    snapshot_doc: AutoCommit,
+    key_codec: &KC,
+  ) -> Result<(), BTreeError> {
+    let existing_state = Self::load_existing_state(inner_tx, doc_id, key_codec).await?;
+    let existing_doc = existing_state
+      .as_ref()
+      .map(|bytes| load_autocommit(bytes))
+      .transpose()?;
+
+    if let Some((entry_key, entry_bytes)) =
+      build_lifecycle_write(doc_id, snapshot_doc, existing_doc)
+    {
+      Self::write_pending_snapshot(inner_tx, key_codec, entry_key, entry_bytes).await?;
+    }
+
+    Ok(())
+  }
+
+  async fn write_pending_snapshot(
+    inner_tx: &mut T,
+    key_codec: &KC,
+    entry_key: DocumentChangeKey,
+    entry_bytes: AutomergeEntry,
+  ) -> Result<(), BTreeError> {
+    let mut key_scratch = db_core::KeyScratch::with_capacity(49);
+    <KC as db_core::FastKeyCodec<DocumentChangeKey>>::encode_into(
+      key_codec,
+      &entry_key,
+      &mut key_scratch,
+    );
+    let value_encoded: Vec<u8> = <VC as db_core::ValueCodec<AutomergeEntry>>::encode(&entry_bytes)
+      .as_ref()
+      .to_vec();
+    inner_tx.insert(key_scratch.buf, value_encoded).await?;
+    Ok(())
+  }
+}
+
+impl<T, KC, VC> AutomergeEncodedTransaction<T, KC, VC>
+where
+  T: BTreeTransaction<Vec<u8>, Vec<u8>> + Send,
+  KC: db_core::FastKeyCodec<DocumentChangeKey> + Clone + Send + Sync + 'static,
+  VC: db_core::ValueCodec<AutomergeEntry> + Clone + Send + Sync + 'static,
+{
+  async fn load_existing_state(
+    inner_tx: &mut T,
+    doc_id: Uuid,
+    key_codec: &KC,
+  ) -> Result<Option<Vec<u8>>, BTreeError> {
+    let (start_enc, end_enc) = encode_doc_key_range(doc_id, key_codec);
+    let mut latest_snapshot: Option<Vec<u8>> = None;
+    let mut deltas_after_snapshot: Vec<Vec<u8>> = Vec::new();
+    let mut has_entries = false;
+
+    let stream = inner_tx.range(start_enc.clone()..=end_enc.clone());
+    futures::pin_mut!(stream);
+    while let Some(item) = stream.next().await {
+      let (k_enc, entry_enc) = item?;
+      let key = match <KC as db_core::ValueCodec<DocumentChangeKey>>::decode_checked(&k_enc) {
+        Ok(decoded) => decoded,
+        Err(_) => continue,
+      };
+      has_entries = true;
+      if key.doc_type.is_snapshot() {
+        latest_snapshot = Some(decode_entry_or_raw::<VC>(&entry_enc));
+        deltas_after_snapshot.clear();
+      } else {
+        deltas_after_snapshot.push(decode_entry_or_raw::<VC>(&entry_enc));
+      }
+    }
+
+    if has_entries {
+      Ok(Some(reconstruct_state(
+        latest_snapshot,
+        &deltas_after_snapshot,
+      )))
+    } else {
+      Ok(None)
+    }
+  }
+
+  async fn remove_doc_entries(
+    inner_tx: &mut T,
+    doc_id: Uuid,
+    key_codec: &KC,
+  ) -> Result<(), BTreeError> {
+    let (start_enc, end_enc) = encode_doc_key_range(doc_id, key_codec);
+    let keys_to_remove = {
+      let mut collected: alloc::vec::Vec<Vec<u8>> = alloc::vec::Vec::new();
+      let stream = inner_tx.range(start_enc.clone()..=end_enc.clone());
+      futures::pin_mut!(stream);
+      while let Some(item) = stream.next().await {
+        let (k_enc, _v_enc) = item?;
+        collected.push(k_enc);
+      }
+      collected
+    };
+
+    for k in keys_to_remove {
+      inner_tx.remove(&k).await?;
+    }
+
+    Ok(())
+  }
+
+  async fn commit_pending_changes(
+    inner_tx: &mut T,
+    pending: BTreeMap<Uuid, Option<AutoCommit>>,
+    key_codec: &KC,
+  ) -> Result<(), BTreeError> {
+    for (doc_id, op) in pending {
+      Self::commit_pending_change(inner_tx, doc_id, op, key_codec).await?;
+    }
+    Ok(())
+  }
+
+  async fn commit_pending_change(
+    inner_tx: &mut T,
+    doc_id: Uuid,
+    op: Option<AutoCommit>,
+    key_codec: &KC,
+  ) -> Result<(), BTreeError> {
+    match op {
+      Some(snapshot_doc) => {
+        Self::apply_snapshot_doc(inner_tx, doc_id, snapshot_doc, key_codec).await?
+      }
+      None => Self::remove_doc_entries(inner_tx, doc_id, key_codec).await?,
+    }
+    Ok(())
+  }
 }
 
 impl<T, KC, VC> BTreeTransaction<Uuid, AutoCommit> for AutomergeEncodedTransaction<T, KC, VC>
@@ -362,76 +529,8 @@ where
       key_codec,
       _val_codec: _,
     } = self;
-    for (doc_id, op) in pending {
-      if let Some(snapshot_doc) = op {
-        let (start_enc, end_enc) = encode_doc_key_range(doc_id, &key_codec);
-        let existing_state: Option<Vec<u8>> = {
-          let mut latest_snapshot: Option<Vec<u8>> = None;
-          let mut deltas_after_snapshot: Vec<Vec<u8>> = Vec::new();
-          let mut has_entries = false;
 
-          let stream = inner_tx.range(start_enc.clone()..=end_enc.clone());
-          futures::pin_mut!(stream);
-          while let Some(item) = stream.next().await {
-            let (k_enc, entry_enc) = item?;
-            let key = match <KC as db_core::ValueCodec<DocumentChangeKey>>::decode_checked(&k_enc) {
-              Ok(decoded) => decoded,
-              Err(_) => continue,
-            };
-            has_entries = true;
-            if key.doc_type.is_snapshot() {
-              latest_snapshot = Some(decode_entry_or_raw::<VC>(&entry_enc));
-              deltas_after_snapshot.clear();
-            } else {
-              deltas_after_snapshot.push(decode_entry_or_raw::<VC>(&entry_enc));
-            }
-          }
-
-          if has_entries {
-            Some(reconstruct_state(latest_snapshot, &deltas_after_snapshot))
-          } else {
-            None
-          }
-        };
-
-        let existing_doc = match existing_state.as_ref() {
-          Some(bytes) => Some(load_autocommit(bytes)?),
-          None => None,
-        };
-
-        if let Some((entry_key, entry_bytes)) =
-          build_lifecycle_write(doc_id, snapshot_doc, existing_doc)
-        {
-          let mut key_scratch = db_core::KeyScratch::with_capacity(49);
-          <KC as db_core::FastKeyCodec<DocumentChangeKey>>::encode_into(
-            &key_codec,
-            &entry_key,
-            &mut key_scratch,
-          );
-          let value_encoded: Vec<u8> =
-            <VC as db_core::ValueCodec<AutomergeEntry>>::encode(&entry_bytes)
-              .as_ref()
-              .to_vec();
-          inner_tx.insert(key_scratch.buf, value_encoded).await?;
-        }
-      } else {
-        let (start_enc, end_enc) = encode_doc_key_range(doc_id, &key_codec);
-
-        let keys_to_remove: alloc::vec::Vec<Vec<u8>> = {
-          let mut collected: alloc::vec::Vec<Vec<u8>> = alloc::vec::Vec::new();
-          let stream = inner_tx.range(start_enc.clone()..=end_enc.clone());
-          futures::pin_mut!(stream);
-          while let Some(item) = stream.next().await {
-            let (k_enc, _v_enc) = item?;
-            collected.push(k_enc);
-          }
-          collected
-        };
-        for k in keys_to_remove {
-          inner_tx.remove(&k).await?;
-        }
-      }
-    }
+    Self::commit_pending_changes(&mut inner_tx, pending, &key_codec).await?;
     inner_tx.commit().await
   }
 

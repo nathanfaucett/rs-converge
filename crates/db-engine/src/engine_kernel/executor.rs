@@ -11,8 +11,8 @@ use crate::store_adapter::{
 };
 use crate::{
   ChangeEvent, ChangeListenerRegistry, EngineError, EngineRow, EngineValue, IndexSchema,
-  PrimaryKey, query::JoinClause, query::QualifiedPredicate, query::UpdateAssignment,
-  query::UpdateValueExpr,
+  PrimaryKey, QualifiedColumn, TableSchema, query::JoinClause, query::QualifiedPredicate,
+  query::UpdateAssignment, query::UpdateValueExpr,
 };
 #[cfg(not(feature = "std"))]
 use alloc::string::{String, ToString};
@@ -28,6 +28,16 @@ use std::collections::{HashMap, HashSet};
 use std::string::{String, ToString};
 #[cfg(feature = "std")]
 use std::sync::Arc;
+
+fn engine_value_to_f64(value: &EngineValue, op: &str) -> Result<f64, EngineError> {
+  match value {
+    EngineValue::Integer(number) => Ok(*number as f64),
+    EngineValue::Float(number) => Ok(*number),
+    other => Err(EngineError::TypeMismatch(format!(
+      "operator {op} requires numeric values, got {other:?}"
+    ))),
+  }
+}
 
 async fn ensure_indexes_unique<TX>(
   tx: &mut TX,
@@ -186,73 +196,132 @@ where
     from_tables: Vec<String>,
     returning: Option<Vec<UpdateValueExpr>>,
   ) -> Result<Vec<EngineRow>, EngineError> {
-    let table = self.catalog.table(table_name)?.clone();
     if assignments.is_empty() {
       return Ok(Vec::new());
     }
 
-    let indexes = self.catalog.indexes_for_table(table_name);
-    let mut pending_events = Vec::new();
-    let mut returning_rows: Vec<EngineRow> = Vec::new();
+    let (table, indexes, tx) = self.prepare_update_context(table_name).await?;
+    let rows =
+      Self::collect_update_rows(tx, table_name, predicate, &joins, &from_tables, &table).await?;
 
-    {
-      let tx = self.transaction().await?;
-      let rows = if joins.is_empty() && from_tables.is_empty() {
+    let (pending_events, returning_rows) = Self::process_update_rows(
+      tx,
+      table_name,
+      &table,
+      &indexes,
+      rows,
+      &assignments,
+      returning.as_ref(),
+    )
+    .await?;
+
+    self.pending_events.extend(pending_events);
+    Ok(returning_rows)
+  }
+
+  async fn prepare_update_context(
+    &mut self,
+    table_name: &str,
+  ) -> Result<(TableSchema, Vec<IndexSchema>, &mut S::Transaction), EngineError>
+  where
+    S::Transaction: EngineStoreTransaction,
+  {
+    let table = self.catalog.table(table_name)?.clone();
+    let indexes = self.catalog.indexes_for_table(table_name);
+    let tx = self.transaction().await?;
+    Ok((table, indexes, tx))
+  }
+
+  async fn collect_update_rows(
+    tx: &mut S::Transaction,
+    table_name: &str,
+    predicate: Option<QualifiedPredicate>,
+    joins: &[JoinClause],
+    from_tables: &[String],
+    table: &TableSchema,
+  ) -> Result<Vec<(PrimaryKey, EngineRow, Option<JoinedRowState>)>, EngineError>
+  where
+    S::Transaction: EngineStoreTransaction,
+  {
+    if joins.is_empty() && from_tables.is_empty() {
+      Ok(
         collect_table_rows(tx, table_name, predicate)
           .await?
           .into_iter()
           .map(|(pk, row)| (pk, row, None))
-          .collect::<Vec<_>>()
-      } else {
-        Self::collect_join_update_rows(
-          tx,
-          &table,
+          .collect(),
+      )
+    } else {
+      Self::collect_join_update_rows(
+        tx,
+        table,
+        table_name,
+        joins,
+        from_tables,
+        predicate.as_ref(),
+      )
+      .await
+    }
+  }
+
+  async fn process_update_rows(
+    tx: &mut S::Transaction,
+    table_name: &str,
+    table: &TableSchema,
+    indexes: &[IndexSchema],
+    rows: Vec<(PrimaryKey, EngineRow, Option<JoinedRowState>)>,
+    assignments: &[UpdateAssignment],
+    returning: Option<&Vec<UpdateValueExpr>>,
+  ) -> Result<(Vec<ChangeEvent>, Vec<EngineRow>), EngineError> {
+    let mut pending_events = Vec::new();
+    let mut returning_rows = Vec::new();
+
+    for (old_pk, old_row, joined_state) in rows {
+      let updated_row =
+        Self::apply_assignments(&old_row, assignments, table_name, joined_state.as_ref())?;
+      table.validate_row(&updated_row)?;
+      let new_pk = table.primary_key(&updated_row)?;
+
+      Self::ensure_update_primary_key_available(tx, table_name, &new_pk, &old_pk).await?;
+      delete_row(tx, table_name, &old_pk, &old_row, indexes).await?;
+      ensure_indexes_unique(tx, indexes, &updated_row, &new_pk).await?;
+
+      tx.insert_table_row(table_name, new_pk, updated_row.clone())
+        .await?;
+      insert_all_index_entries(tx, indexes, &updated_row, &new_pk).await?;
+
+      pending_events.push(ChangeEvent::RowUpdated {
+        table: table_name.to_string(),
+        pk: new_pk,
+        old_row,
+        new_row: updated_row.clone(),
+      });
+
+      if let Some(expressions) = returning {
+        returning_rows.push(Self::evaluate_returning_row(
           table_name,
-          &joins,
-          &from_tables,
-          predicate.as_ref(),
-        )
-        .await?
-      };
-
-      for (old_pk, old_row, joined_state) in rows {
-        let updated_row =
-          Self::apply_assignments(&old_row, &assignments, table_name, joined_state.as_ref())?;
-        table.validate_row(&updated_row)?;
-        let new_pk = table.primary_key(&updated_row)?;
-
-        if new_pk != old_pk && tx.get_table_row(table_name, &new_pk).await?.is_some() {
-          return Err(EngineError::DuplicatePrimaryKey(new_pk));
-        }
-
-        delete_row(tx, table_name, &old_pk, &old_row, &indexes).await?;
-        ensure_indexes_unique(tx, &indexes, &updated_row, &new_pk).await?;
-
-        tx.insert_table_row(table_name, new_pk, updated_row.clone())
-          .await?;
-
-        insert_all_index_entries(tx, &indexes, &updated_row, &new_pk).await?;
-
-        pending_events.push(ChangeEvent::RowUpdated {
-          table: table_name.to_string(),
-          pk: new_pk,
-          old_row,
-          new_row: updated_row.clone(),
-        });
-
-        if let Some(expressions) = returning.as_ref() {
-          returning_rows.push(Self::evaluate_returning_row(
-            table_name,
-            &updated_row,
-            expressions,
-          )?);
-        }
+          &updated_row,
+          expressions,
+        )?);
       }
     }
 
-    self.pending_events.extend(pending_events);
+    Ok((pending_events, returning_rows))
+  }
 
-    Ok(returning_rows)
+  async fn ensure_update_primary_key_available(
+    tx: &mut S::Transaction,
+    table_name: &str,
+    new_pk: &PrimaryKey,
+    old_pk: &PrimaryKey,
+  ) -> Result<(), EngineError>
+  where
+    S::Transaction: EngineStoreTransaction,
+  {
+    if new_pk != old_pk && tx.get_table_row(table_name, new_pk).await?.is_some() {
+      return Err(EngineError::DuplicatePrimaryKey(*new_pk));
+    }
+    Ok(())
   }
 
   fn evaluate_returning_row(
@@ -297,106 +366,157 @@ where
     target_table: &str,
     joined_state: Option<&JoinedRowState>,
   ) -> Result<EngineValue, EngineError> {
-    match expr {
+    expr.evaluate(row, target_table, joined_state)
+  }
+}
+
+impl UpdateValueExpr {
+  fn evaluate(
+    &self,
+    row: &EngineRow,
+    target_table: &str,
+    joined_state: Option<&JoinedRowState>,
+  ) -> Result<EngineValue, EngineError> {
+    match self {
       UpdateValueExpr::Value(value) => Ok(value.clone()),
       UpdateValueExpr::Column(column) => {
-        if column.table == target_table {
-          return row.get(column.column_index).cloned().ok_or_else(|| {
-            EngineError::SchemaMismatch(format!(
-              "column index {} is out of bounds",
-              column.column_index
-            ))
-          });
-        }
-
-        let state = joined_state.ok_or_else(|| {
-          EngineError::SchemaMismatch(format!(
-            "column {}.{} requires join context",
-            column.table, column.column_index
-          ))
-        })?;
-
-        let joined_row = state
-          .get(&column.table)
-          .and_then(|entry| entry.as_ref())
-          .ok_or_else(|| {
-            EngineError::SchemaMismatch(format!(
-              "join table {} has no row for expression",
-              column.table
-            ))
-          })?;
-
-        joined_row.get(column.column_index).cloned().ok_or_else(|| {
-          EngineError::SchemaMismatch(format!(
-            "column index {} is out of bounds",
-            column.column_index
-          ))
-        })
+        self.resolve_column(column, row, target_table, joined_state)
       }
-      UpdateValueExpr::Add(left, right) => Self::evaluate_numeric_binary(
-        row,
-        left,
-        right,
-        "+",
-        |l, r| l + r,
-        target_table,
-        joined_state,
-      ),
-      UpdateValueExpr::Subtract(left, right) => Self::evaluate_numeric_binary(
-        row,
-        left,
-        right,
-        "-",
-        |l, r| l - r,
-        target_table,
-        joined_state,
-      ),
-      UpdateValueExpr::Multiply(left, right) => Self::evaluate_numeric_binary(
-        row,
-        left,
-        right,
-        "*",
-        |l, r| l * r,
-        target_table,
-        joined_state,
-      ),
-      UpdateValueExpr::Divide(left, right) => {
-        let left_value = Self::evaluate_update_expr(row, left, target_table, joined_state)?;
-        let right_value = Self::evaluate_update_expr(row, right, target_table, joined_state)?;
-        if matches!(&right_value, EngineValue::Integer(0)) {
-          return Err(EngineError::TypeMismatch("division by zero".into()));
-        }
-        if matches!(&right_value, EngineValue::Float(v) if *v == 0.0) {
-          return Err(EngineError::TypeMismatch("division by zero".into()));
-        }
-        let left_number = Self::engine_value_to_f64(&left_value, "/")?;
-        let right_number = Self::engine_value_to_f64(&right_value, "/")?;
-        Ok(EngineValue::Float(left_number / right_number))
-      }
+      _ => self.evaluate_operator(row, target_table, joined_state),
     }
   }
 
-  fn evaluate_numeric_binary<F>(
+  fn evaluate_operator(
+    &self,
     row: &EngineRow,
-    left: &UpdateValueExpr,
+    target_table: &str,
+    joined_state: Option<&JoinedRowState>,
+  ) -> Result<EngineValue, EngineError> {
+    match self {
+      UpdateValueExpr::Add(left, right) => {
+        left.evaluate_arithmetic(right, "+", |l, r| l + r, row, target_table, joined_state)
+      }
+      UpdateValueExpr::Subtract(left, right) => {
+        left.evaluate_arithmetic(right, "-", |l, r| l - r, row, target_table, joined_state)
+      }
+      UpdateValueExpr::Multiply(left, right) => {
+        left.evaluate_arithmetic(right, "*", |l, r| l * r, row, target_table, joined_state)
+      }
+      UpdateValueExpr::Divide(left, right) => {
+        left.evaluate_divide(right, row, target_table, joined_state)
+      }
+      _ => unreachable!(),
+    }
+  }
+
+  fn resolve_column(
+    &self,
+    column: &QualifiedColumn,
+    row: &EngineRow,
+    target_table: &str,
+    joined_state: Option<&JoinedRowState>,
+  ) -> Result<EngineValue, EngineError> {
+    if column.table == target_table {
+      return row.get(column.column_index).cloned().ok_or_else(|| {
+        EngineError::SchemaMismatch(format!(
+          "column index {} is out of bounds",
+          column.column_index
+        ))
+      });
+    }
+
+    let state = joined_state.ok_or_else(|| {
+      EngineError::SchemaMismatch(format!(
+        "column {}.{} requires join context",
+        column.table, column.column_index
+      ))
+    })?;
+
+    let joined_row = state
+      .get(&column.table)
+      .and_then(|entry| entry.as_ref())
+      .ok_or_else(|| {
+        EngineError::SchemaMismatch(format!(
+          "join table {} has no row for expression",
+          column.table
+        ))
+      })?;
+
+    joined_row.get(column.column_index).cloned().ok_or_else(|| {
+      EngineError::SchemaMismatch(format!(
+        "column index {} is out of bounds",
+        column.column_index
+      ))
+    })
+  }
+
+  fn evaluate_arithmetic<F>(
+    &self,
     right: &UpdateValueExpr,
     op: &str,
     apply: F,
+    row: &EngineRow,
     target_table: &str,
     joined_state: Option<&JoinedRowState>,
   ) -> Result<EngineValue, EngineError>
   where
     F: Fn(f64, f64) -> f64,
   {
-    let left_value = Self::evaluate_update_expr(row, left, target_table, joined_state)?;
-    let right_value = Self::evaluate_update_expr(row, right, target_table, joined_state)?;
+    let (left_value, right_value) =
+      self.evaluate_binary_operands(right, row, target_table, joined_state)?;
+    self.numeric_binary_result(left_value, right_value, op, apply)
+  }
 
+  fn evaluate_divide(
+    &self,
+    right: &UpdateValueExpr,
+    row: &EngineRow,
+    target_table: &str,
+    joined_state: Option<&JoinedRowState>,
+  ) -> Result<EngineValue, EngineError> {
+    let (left_value, right_value) =
+      self.evaluate_binary_operands(right, row, target_table, joined_state)?;
+
+    if matches!(&right_value, EngineValue::Integer(0)) {
+      return Err(EngineError::TypeMismatch("division by zero".into()));
+    }
+    if matches!(&right_value, EngineValue::Float(v) if *v == 0.0) {
+      return Err(EngineError::TypeMismatch("division by zero".into()));
+    }
+
+    let left_number = engine_value_to_f64(&left_value, "/")?;
+    let right_number = engine_value_to_f64(&right_value, "/")?;
+    Ok(EngineValue::Float(left_number / right_number))
+  }
+
+  fn evaluate_binary_operands(
+    &self,
+    right: &UpdateValueExpr,
+    row: &EngineRow,
+    target_table: &str,
+    joined_state: Option<&JoinedRowState>,
+  ) -> Result<(EngineValue, EngineValue), EngineError> {
+    let left_value = self.evaluate(row, target_table, joined_state)?;
+    let right_value = right.evaluate(row, target_table, joined_state)?;
+    Ok((left_value, right_value))
+  }
+
+  fn numeric_binary_result<F>(
+    &self,
+    left_value: EngineValue,
+    right_value: EngineValue,
+    op: &str,
+    apply: F,
+  ) -> Result<EngineValue, EngineError>
+  where
+    F: Fn(f64, f64) -> f64,
+  {
     if left_value == EngineValue::Null || right_value == EngineValue::Null {
       return Ok(EngineValue::Null);
     }
 
-    let left_number = Self::engine_value_to_f64(&left_value, op)?;
-    let right_number = Self::engine_value_to_f64(&right_value, op)?;
+    let left_number = engine_value_to_f64(&left_value, op)?;
+    let right_number = engine_value_to_f64(&right_value, op)?;
     let output = apply(left_number, right_number);
 
     if let (EngineValue::Integer(_), EngineValue::Integer(_)) = (&left_value, &right_value)
@@ -407,17 +527,13 @@ where
 
     Ok(EngineValue::Float(output))
   }
+}
 
-  fn engine_value_to_f64(value: &EngineValue, op: &str) -> Result<f64, EngineError> {
-    match value {
-      EngineValue::Integer(number) => Ok(*number as f64),
-      EngineValue::Float(number) => Ok(*number),
-      other => Err(EngineError::TypeMismatch(format!(
-        "operator {op} requires numeric values, got {other:?}"
-      ))),
-    }
-  }
-
+impl<'db, S> EngineWriteTxn<'db, S>
+where
+  S: EngineStore,
+  S::Transaction: EngineStoreTransaction,
+{
   async fn collect_join_update_rows(
     tx: &mut S::Transaction,
     table: &crate::TableSchema,

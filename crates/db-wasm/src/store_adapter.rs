@@ -440,6 +440,13 @@ pub struct StoreAdapterTransaction {
 const TABLE_SCHEMAS_TREE: &str = "sys:table_schemas";
 const INDEX_SCHEMAS_TREE: &str = "sys:index_schemas";
 
+enum StoreTree<'a> {
+  TableSchemas,
+  IndexSchemas,
+  RowTable(&'a str),
+  IndexTable(&'a str),
+}
+
 fn key_in_range<R>(key: &EngineKey, range: &R) -> bool
 where
   R: RangeBounds<EngineKey>,
@@ -470,6 +477,18 @@ impl StoreAdapterCallbacks {
 
   fn index_name<'a>(&self, tree: &'a str) -> Option<&'a str> {
     tree.strip_prefix("i:")
+  }
+
+  fn tree_kind<'a>(&'a self, tree: &'a str) -> StoreTree<'a> {
+    if tree == TABLE_SCHEMAS_TREE {
+      StoreTree::TableSchemas
+    } else if tree == INDEX_SCHEMAS_TREE {
+      StoreTree::IndexSchemas
+    } else if let Some(index_name) = self.index_name(tree) {
+      StoreTree::IndexTable(index_name)
+    } else {
+      StoreTree::RowTable(tree.strip_prefix("t:").unwrap_or(tree))
+    }
   }
 
   fn table_schema_name_from_engine_key(&self, key: &EngineKey) -> BTreeResult<String> {
@@ -557,6 +576,413 @@ impl StoreAdapterCallbacks {
     }
   }
 
+  fn load_backend_transaction_handles(
+    &self,
+    value: JsValue,
+  ) -> BTreeResult<BackendTransactionHandles> {
+    macro_rules! load_fn {
+      ($name:expr) => {
+        load_required_function(&value, $name).map_err(serde_error)?
+      };
+    }
+
+    Ok(BackendTransactionHandles {
+      value,
+      get_row: load_fn!("getRow"),
+      put_row: load_fn!("putRow"),
+      delete_row: load_fn!("deleteRow"),
+      range_rows: load_fn!("rangeRows"),
+      add_index: load_fn!("addIndex"),
+      remove_index: load_fn!("removeIndex"),
+      range_index: load_fn!("rangeIndex"),
+      get_table_schema: load_fn!("getTableSchema"),
+      put_table_schema: load_fn!("putTableSchema"),
+      delete_table_schema: load_fn!("deleteTableSchema"),
+      range_table_schemas: load_fn!("rangeTableSchemas"),
+      get_index_schema: load_fn!("getIndexSchema"),
+      put_index_schema: load_fn!("putIndexSchema"),
+      delete_index_schema: load_fn!("deleteIndexSchema"),
+      range_index_schemas: load_fn!("rangeIndexSchemas"),
+      commit: load_fn!("commit"),
+      rollback: load_fn!("rollback"),
+    })
+  }
+
+  async fn tx_get_table_schema(
+    &self,
+    tx: &BackendTransaction,
+    key: &EngineKey,
+  ) -> BTreeResult<Option<Vec<u8>>> {
+    let table = self.table_schema_name_from_engine_key(key)?;
+    let table_js = JsValue::from_str(&table);
+    let (get_table_schema, tx_value) = {
+      let handles = tx.handles.borrow();
+      (handles.get_table_schema.clone(), handles.value.clone())
+    };
+    let value = call_method1(get_table_schema, tx_value, table_js).await?;
+    if value.is_null() || value.is_undefined() {
+      return Ok(None);
+    }
+    from_js(value)
+  }
+
+  async fn tx_get_index_schema(
+    &self,
+    tx: &BackendTransaction,
+    key: &EngineKey,
+  ) -> BTreeResult<Option<Vec<u8>>> {
+    let index = self.index_schema_name_from_engine_key(key)?;
+    let index_js = JsValue::from_str(&index);
+    let (get_index_schema, tx_value) = {
+      let handles = tx.handles.borrow();
+      (handles.get_index_schema.clone(), handles.value.clone())
+    };
+    let value = call_method1(get_index_schema, tx_value, index_js).await?;
+    if value.is_null() || value.is_undefined() {
+      return Ok(None);
+    }
+    from_js(value)
+  }
+
+  async fn tx_get_row(
+    &self,
+    tx: &BackendTransaction,
+    table: &str,
+    key: &EngineKey,
+  ) -> BTreeResult<Option<Vec<u8>>> {
+    let table_js = JsValue::from_str(table);
+    let pk = self.primary_key_from_engine_key(key)?;
+    let pk_js = to_js(&pk)?;
+    let (get_row, tx_value) = {
+      let handles = tx.handles.borrow();
+      (handles.get_row.clone(), handles.value.clone())
+    };
+    let value = call_method2(get_row, tx_value, table_js, pk_js).await?;
+    if value.is_null() || value.is_undefined() {
+      return Ok(None);
+    }
+    from_js(value)
+  }
+
+  async fn tx_get_index_entry(
+    &self,
+    tx: &BackendTransaction,
+    index_name: &str,
+    key: &EngineKey,
+  ) -> BTreeResult<Option<Vec<u8>>> {
+    let (index_key, row_pk) = self.split_composite_index_key(index_name, key)?;
+    let request = IndexRangeRequest {
+      start: Some(index_key.clone()),
+      start_inclusive: true,
+      end: Some(index_key),
+      end_inclusive: true,
+    };
+    let index_js = JsValue::from_str(index_name);
+    let req_js = to_js(&request)?;
+    let (range_index, tx_value) = {
+      let handles = tx.handles.borrow();
+      (handles.range_index.clone(), handles.value.clone())
+    };
+    let value = call_method2(range_index, tx_value, index_js, req_js).await?;
+    let entries: Vec<IndexEntry> = from_js(value)?;
+    let found = entries
+      .into_iter()
+      .any(|entry| entry.row_primary_key == row_pk);
+    Ok(found.then(Vec::new))
+  }
+
+  async fn tx_insert_table_schema(
+    &self,
+    tx: &BackendTransaction,
+    key: &EngineKey,
+    row: &[u8],
+  ) -> BTreeResult<()> {
+    let table = self.table_schema_name_from_engine_key(key)?;
+    let table_js = JsValue::from_str(&table);
+    let row_js = to_js(row)?;
+    let (put_table_schema, tx_value) = {
+      let handles = tx.handles.borrow();
+      (handles.put_table_schema.clone(), handles.value.clone())
+    };
+    let _ = call_method2(put_table_schema, tx_value, table_js, row_js).await?;
+    Ok(())
+  }
+
+  async fn tx_insert_index_schema(
+    &self,
+    tx: &BackendTransaction,
+    key: &EngineKey,
+    row: &[u8],
+  ) -> BTreeResult<()> {
+    let index = self.index_schema_name_from_engine_key(key)?;
+    let index_js = JsValue::from_str(&index);
+    let row_js = to_js(row)?;
+    let (put_index_schema, tx_value) = {
+      let handles = tx.handles.borrow();
+      (handles.put_index_schema.clone(), handles.value.clone())
+    };
+    let _ = call_method2(put_index_schema, tx_value, index_js, row_js).await?;
+    self.maybe_update_index_schema_widths(INDEX_SCHEMAS_TREE, key, row);
+    Ok(())
+  }
+
+  async fn tx_insert_row(
+    &self,
+    tx: &BackendTransaction,
+    table: &str,
+    key: &EngineKey,
+    row: &[u8],
+  ) -> BTreeResult<()> {
+    let table_js = JsValue::from_str(table);
+    let pk = self.primary_key_from_engine_key(key)?;
+    let pk_js = to_js(&pk)?;
+    let row_js = to_js(row)?;
+    let (put_row, tx_value) = {
+      let handles = tx.handles.borrow();
+      (handles.put_row.clone(), handles.value.clone())
+    };
+    let _ = call_method3(put_row, tx_value, table_js, pk_js, row_js).await?;
+    Ok(())
+  }
+
+  async fn tx_insert_index_entry(
+    &self,
+    tx: &BackendTransaction,
+    index_name: &str,
+    key: &EngineKey,
+  ) -> BTreeResult<()> {
+    let (index_key, row_pk) = self.split_composite_index_key(index_name, key)?;
+    let index_js = JsValue::from_str(index_name);
+    let index_key_js = to_js(&index_key)?;
+    let row_pk_js = to_js(&row_pk)?;
+    let (add_index, tx_value) = {
+      let handles = tx.handles.borrow();
+      (handles.add_index.clone(), handles.value.clone())
+    };
+    let _ = call_method3(add_index, tx_value, index_js, index_key_js, row_pk_js).await?;
+    Ok(())
+  }
+
+  async fn tx_remove_table_schema(
+    &self,
+    tx: &BackendTransaction,
+    key: &EngineKey,
+  ) -> BTreeResult<Option<Vec<u8>>> {
+    let table = self.table_schema_name_from_engine_key(key)?;
+    let table_js = JsValue::from_str(&table);
+    let (delete_table_schema, tx_value) = {
+      let handles = tx.handles.borrow();
+      (handles.delete_table_schema.clone(), handles.value.clone())
+    };
+    let value = call_method1(delete_table_schema, tx_value, table_js).await?;
+    if value.is_null() || value.is_undefined() {
+      return Ok(None);
+    }
+    from_js(value)
+  }
+
+  async fn tx_remove_index_schema(
+    &self,
+    tx: &BackendTransaction,
+    key: &EngineKey,
+  ) -> BTreeResult<Option<Vec<u8>>> {
+    let index = self.index_schema_name_from_engine_key(key)?;
+    let index_js = JsValue::from_str(&index);
+    let (delete_index_schema, tx_value) = {
+      let handles = tx.handles.borrow();
+      (handles.delete_index_schema.clone(), handles.value.clone())
+    };
+    let value = call_method1(delete_index_schema, tx_value, index_js).await?;
+    self.maybe_remove_index_schema_width(INDEX_SCHEMAS_TREE, key);
+    if value.is_null() || value.is_undefined() {
+      return Ok(None);
+    }
+    from_js(value)
+  }
+
+  async fn tx_remove_row(
+    &self,
+    tx: &BackendTransaction,
+    table: &str,
+    key: &EngineKey,
+  ) -> BTreeResult<Option<Vec<u8>>> {
+    let table_js = JsValue::from_str(table);
+    let pk = self.primary_key_from_engine_key(key)?;
+    let pk_js = to_js(&pk)?;
+    let (delete_row, tx_value) = {
+      let handles = tx.handles.borrow();
+      (handles.delete_row.clone(), handles.value.clone())
+    };
+    let value = call_method2(delete_row, tx_value, table_js, pk_js).await?;
+    if value.is_null() || value.is_undefined() {
+      return Ok(None);
+    }
+    from_js(value)
+  }
+
+  async fn tx_remove_index_entry(
+    &self,
+    tx: &BackendTransaction,
+    index_name: &str,
+    key: &EngineKey,
+  ) -> BTreeResult<Option<Vec<u8>>> {
+    let (index_key, row_pk) = self.split_composite_index_key(index_name, key)?;
+    let index_js = JsValue::from_str(index_name);
+    let index_key_js = to_js(&index_key)?;
+    let row_pk_js = to_js(&row_pk)?;
+    let (remove_index, tx_value) = {
+      let handles = tx.handles.borrow();
+      (handles.remove_index.clone(), handles.value.clone())
+    };
+    let _ = call_method3(remove_index, tx_value, index_js, index_key_js, row_pk_js).await?;
+    Ok(None)
+  }
+
+  async fn tx_range_table_schemas(
+    &self,
+    tx: &BackendTransaction,
+  ) -> BTreeResult<Vec<(EngineKey, Vec<u8>)>> {
+    let (range_table_schemas, tx_value) = {
+      let handles = tx.handles.borrow();
+      (handles.range_table_schemas.clone(), handles.value.clone())
+    };
+    let value = call_method0(range_table_schemas, tx_value).await?;
+    let entries: Vec<TableSchemaEntry> = from_js(value)?;
+    Ok(
+      entries
+        .into_iter()
+        .map(|entry| {
+          (
+            <DefaultEncoding as KeyEncoding>::encode_values(&[db_engine::EngineValue::Text(
+              entry.table,
+            )]),
+            entry.row,
+          )
+        })
+        .collect(),
+    )
+  }
+
+  async fn tx_range_index_schemas(
+    &self,
+    tx: &BackendTransaction,
+  ) -> BTreeResult<Vec<(EngineKey, Vec<u8>)>> {
+    let (range_index_schemas, tx_value) = {
+      let handles = tx.handles.borrow();
+      (handles.range_index_schemas.clone(), handles.value.clone())
+    };
+    let value = call_method0(range_index_schemas, tx_value).await?;
+    let entries: Vec<IndexSchemaEntry> = from_js(value)?;
+    let out = entries
+      .into_iter()
+      .map(|entry| {
+        (
+          <DefaultEncoding as KeyEncoding>::encode_values(&[db_engine::EngineValue::Text(
+            entry.index,
+          )]),
+          entry.row,
+        )
+      })
+      .collect::<Vec<_>>();
+    for (key, row) in &out {
+      self.maybe_update_index_schema_widths(INDEX_SCHEMAS_TREE, key, row);
+    }
+    Ok(out)
+  }
+
+  async fn tx_range_rows<R>(
+    &self,
+    tx: &BackendTransaction,
+    table: &str,
+    range: &R,
+  ) -> BTreeResult<Vec<(EngineKey, Vec<u8>)>>
+  where
+    R: RangeBounds<EngineKey>,
+  {
+    let request = PrimaryKeyRangeRequest {
+      start: match range.start_bound() {
+        Bound::Included(key) | Bound::Excluded(key) => {
+          let pk = self.primary_key_from_engine_key(key)?;
+          Some(pk)
+        }
+        Bound::Unbounded => None,
+      },
+      start_inclusive: matches!(range.start_bound(), Bound::Included(_)),
+      end: match range.end_bound() {
+        Bound::Included(key) | Bound::Excluded(key) => {
+          let pk = self.primary_key_from_engine_key(key)?;
+          Some(pk)
+        }
+        Bound::Unbounded => None,
+      },
+      end_inclusive: matches!(range.end_bound(), Bound::Included(_)),
+    };
+
+    let table_js = JsValue::from_str(table);
+    let req_js = to_js(&request)?;
+    let (range_rows, tx_value) = {
+      let handles = tx.handles.borrow();
+      (handles.range_rows.clone(), handles.value.clone())
+    };
+    let value = call_method2(range_rows, tx_value, table_js, req_js).await?;
+    let rows: Vec<PrimaryKeyEntry> = from_js(value)?;
+    Ok(
+      rows
+        .into_iter()
+        .map(|entry| (entry.primary_key.to_engine_key(), entry.row))
+        .collect(),
+    )
+  }
+
+  async fn tx_range_index_entries<R>(
+    &self,
+    tx: &BackendTransaction,
+    index_name: &str,
+    range: &R,
+  ) -> BTreeResult<Vec<(EngineKey, Vec<u8>)>>
+  where
+    R: RangeBounds<EngineKey>,
+  {
+    let request = IndexRangeRequest {
+      start: match range.start_bound() {
+        Bound::Included(key) | Bound::Excluded(key) => self
+          .split_composite_index_key(index_name, key)
+          .ok()
+          .map(|(index_key, _)| index_key),
+        Bound::Unbounded => None,
+      },
+      start_inclusive: matches!(range.start_bound(), Bound::Included(_)),
+      end: match range.end_bound() {
+        Bound::Included(key) | Bound::Excluded(key) => self
+          .split_composite_index_key(index_name, key)
+          .ok()
+          .map(|(index_key, _)| index_key),
+        Bound::Unbounded => None,
+      },
+      end_inclusive: matches!(range.end_bound(), Bound::Included(_)),
+    };
+
+    let index_js = JsValue::from_str(index_name);
+    let req_js = to_js(&request)?;
+    let (range_index, tx_value) = {
+      let handles = tx.handles.borrow();
+      (handles.range_index.clone(), handles.value.clone())
+    };
+    let value = call_method2(range_index, tx_value, index_js, req_js).await?;
+    let entries: Vec<IndexEntry> = from_js(value)?;
+    Ok(
+      entries
+        .into_iter()
+        .map(|entry| {
+          (
+            self.compose_composite_index_key(&entry.index_key, entry.row_primary_key),
+            Vec::new(),
+          )
+        })
+        .collect(),
+    )
+  }
+
   async fn begin_backend_transaction(
     &self,
     commit_on_success: bool,
@@ -577,30 +1003,7 @@ impl StoreAdapterCallbacks {
       return Err(serde_error("beginTransaction returned null or undefined"));
     }
 
-    let handles = BackendTransactionHandles {
-      get_row: load_required_function(&value, "getRow").map_err(serde_error)?,
-      put_row: load_required_function(&value, "putRow").map_err(serde_error)?,
-      delete_row: load_required_function(&value, "deleteRow").map_err(serde_error)?,
-      range_rows: load_required_function(&value, "rangeRows").map_err(serde_error)?,
-      add_index: load_required_function(&value, "addIndex").map_err(serde_error)?,
-      remove_index: load_required_function(&value, "removeIndex").map_err(serde_error)?,
-      range_index: load_required_function(&value, "rangeIndex").map_err(serde_error)?,
-      get_table_schema: load_required_function(&value, "getTableSchema").map_err(serde_error)?,
-      put_table_schema: load_required_function(&value, "putTableSchema").map_err(serde_error)?,
-      delete_table_schema: load_required_function(&value, "deleteTableSchema")
-        .map_err(serde_error)?,
-      range_table_schemas: load_required_function(&value, "rangeTableSchemas")
-        .map_err(serde_error)?,
-      get_index_schema: load_required_function(&value, "getIndexSchema").map_err(serde_error)?,
-      put_index_schema: load_required_function(&value, "putIndexSchema").map_err(serde_error)?,
-      delete_index_schema: load_required_function(&value, "deleteIndexSchema")
-        .map_err(serde_error)?,
-      range_index_schemas: load_required_function(&value, "rangeIndexSchemas")
-        .map_err(serde_error)?,
-      commit: load_required_function(&value, "commit").map_err(serde_error)?,
-      rollback: load_required_function(&value, "rollback").map_err(serde_error)?,
-      value,
-    };
+    let handles = self.load_backend_transaction_handles(value)?;
 
     Ok(BackendTransaction {
       handles: Rc::new(RefCell::new(handles)),
@@ -613,72 +1016,12 @@ impl StoreAdapterCallbacks {
     tree: &str,
     key: &EngineKey,
   ) -> BTreeResult<Option<Vec<u8>>> {
-    if tree == TABLE_SCHEMAS_TREE {
-      let table = self.table_schema_name_from_engine_key(key)?;
-      let table_js = JsValue::from_str(&table);
-      let (get_table_schema, tx_value) = {
-        let handles = tx.handles.borrow();
-        (handles.get_table_schema.clone(), handles.value.clone())
-      };
-      let value = call_method1(get_table_schema, tx_value, table_js).await?;
-      if value.is_null() || value.is_undefined() {
-        return Ok(None);
-      }
-      return from_js(value);
+    match self.tree_kind(tree) {
+      StoreTree::TableSchemas => self.tx_get_table_schema(tx, key).await,
+      StoreTree::IndexSchemas => self.tx_get_index_schema(tx, key).await,
+      StoreTree::RowTable(table) => self.tx_get_row(tx, table, key).await,
+      StoreTree::IndexTable(index_name) => self.tx_get_index_entry(tx, index_name, key).await,
     }
-
-    if tree == INDEX_SCHEMAS_TREE {
-      let index = self.index_schema_name_from_engine_key(key)?;
-      let index_js = JsValue::from_str(&index);
-      let (get_index_schema, tx_value) = {
-        let handles = tx.handles.borrow();
-        (handles.get_index_schema.clone(), handles.value.clone())
-      };
-      let value = call_method1(get_index_schema, tx_value, index_js).await?;
-      if value.is_null() || value.is_undefined() {
-        return Ok(None);
-      }
-      return from_js(value);
-    }
-
-    if let Some(table) = self.row_table_name(tree) {
-      let table_js = JsValue::from_str(table);
-      let pk = self.primary_key_from_engine_key(key)?;
-      let pk_js = to_js(&pk)?;
-      let (get_row, tx_value) = {
-        let handles = tx.handles.borrow();
-        (handles.get_row.clone(), handles.value.clone())
-      };
-      let value = call_method2(get_row, tx_value, table_js, pk_js).await?;
-      if value.is_null() || value.is_undefined() {
-        return Ok(None);
-      }
-      return from_js(value);
-    }
-
-    if let Some(index_name) = self.index_name(tree) {
-      let (index_key, row_pk) = self.split_composite_index_key(index_name, key)?;
-      let request = IndexRangeRequest {
-        start: Some(index_key.clone()),
-        start_inclusive: true,
-        end: Some(index_key),
-        end_inclusive: true,
-      };
-      let index_js = JsValue::from_str(index_name);
-      let req_js = to_js(&request)?;
-      let (range_index, tx_value) = {
-        let handles = tx.handles.borrow();
-        (handles.range_index.clone(), handles.value.clone())
-      };
-      let value = call_method2(range_index, tx_value, index_js, req_js).await?;
-      let entries: Vec<IndexEntry> = from_js(value)?;
-      let found = entries
-        .into_iter()
-        .any(|entry| entry.row_primary_key == row_pk);
-      return Ok(found.then(Vec::new));
-    }
-
-    Err(serde_error(format!("unsupported tree name: {tree}")))
   }
 
   async fn tx_insert(
@@ -688,59 +1031,12 @@ impl StoreAdapterCallbacks {
     key: &EngineKey,
     row: &[u8],
   ) -> BTreeResult<()> {
-    if tree == TABLE_SCHEMAS_TREE {
-      let table = self.table_schema_name_from_engine_key(key)?;
-      let table_js = JsValue::from_str(&table);
-      let row_js = to_js(row)?;
-      let (put_table_schema, tx_value) = {
-        let handles = tx.handles.borrow();
-        (handles.put_table_schema.clone(), handles.value.clone())
-      };
-      let _ = call_method2(put_table_schema, tx_value, table_js, row_js).await?;
-      return Ok(());
+    match self.tree_kind(tree) {
+      StoreTree::TableSchemas => self.tx_insert_table_schema(tx, key, row).await,
+      StoreTree::IndexSchemas => self.tx_insert_index_schema(tx, key, row).await,
+      StoreTree::RowTable(table) => self.tx_insert_row(tx, table, key, row).await,
+      StoreTree::IndexTable(index_name) => self.tx_insert_index_entry(tx, index_name, key).await,
     }
-
-    if tree == INDEX_SCHEMAS_TREE {
-      let index = self.index_schema_name_from_engine_key(key)?;
-      let index_js = JsValue::from_str(&index);
-      let row_js = to_js(row)?;
-      let (put_index_schema, tx_value) = {
-        let handles = tx.handles.borrow();
-        (handles.put_index_schema.clone(), handles.value.clone())
-      };
-      let _ = call_method2(put_index_schema, tx_value, index_js, row_js).await?;
-      self.maybe_update_index_schema_widths(tree, key, row);
-      return Ok(());
-    }
-
-    if let Some(table) = self.row_table_name(tree) {
-      let table_js = JsValue::from_str(table);
-      let pk = self.primary_key_from_engine_key(key)?;
-      let pk_js = to_js(&pk)?;
-      let row_js = to_js(row)?;
-      let (put_row, tx_value) = {
-        let handles = tx.handles.borrow();
-        (handles.put_row.clone(), handles.value.clone())
-      };
-      let _ = call_method3(put_row, tx_value, table_js, pk_js, row_js).await?;
-      self.maybe_update_index_schema_widths(tree, key, row);
-      return Ok(());
-    }
-
-    if let Some(index_name) = self.index_name(tree) {
-      let (index_key, row_pk) = self.split_composite_index_key(index_name, key)?;
-      let index_js = JsValue::from_str(index_name);
-      let index_key_js = to_js(&index_key)?;
-      let row_pk_js = to_js(&row_pk)?;
-      let (add_index, tx_value) = {
-        let handles = tx.handles.borrow();
-        (handles.add_index.clone(), handles.value.clone())
-      };
-      let _ = call_method3(add_index, tx_value, index_js, index_key_js, row_pk_js).await?;
-      return Ok(());
-    }
-
-    Err(serde_error(format!("unsupported tree name: {tree}")))
   }
 
   async fn tx_remove(
@@ -749,66 +1045,12 @@ impl StoreAdapterCallbacks {
     tree: &str,
     key: &EngineKey,
   ) -> BTreeResult<Option<Vec<u8>>> {
-    if tree == TABLE_SCHEMAS_TREE {
-      let table = self.table_schema_name_from_engine_key(key)?;
-      let table_js = JsValue::from_str(&table);
-      let (delete_table_schema, tx_value) = {
-        let handles = tx.handles.borrow();
-        (handles.delete_table_schema.clone(), handles.value.clone())
-      };
-      let value = call_method1(delete_table_schema, tx_value, table_js).await?;
-      if value.is_null() || value.is_undefined() {
-        return Ok(None);
-      }
-      return from_js(value);
+    match self.tree_kind(tree) {
+      StoreTree::TableSchemas => self.tx_remove_table_schema(tx, key).await,
+      StoreTree::IndexSchemas => self.tx_remove_index_schema(tx, key).await,
+      StoreTree::RowTable(table) => self.tx_remove_row(tx, table, key).await,
+      StoreTree::IndexTable(index_name) => self.tx_remove_index_entry(tx, index_name, key).await,
     }
-
-    if tree == INDEX_SCHEMAS_TREE {
-      let index = self.index_schema_name_from_engine_key(key)?;
-      let index_js = JsValue::from_str(&index);
-      let (delete_index_schema, tx_value) = {
-        let handles = tx.handles.borrow();
-        (handles.delete_index_schema.clone(), handles.value.clone())
-      };
-      let value = call_method1(delete_index_schema, tx_value, index_js).await?;
-      self.maybe_remove_index_schema_width(tree, key);
-      if value.is_null() || value.is_undefined() {
-        return Ok(None);
-      }
-      return from_js(value);
-    }
-
-    if let Some(table) = self.row_table_name(tree) {
-      let table_js = JsValue::from_str(table);
-      let pk = self.primary_key_from_engine_key(key)?;
-      let pk_js = to_js(&pk)?;
-      let (delete_row, tx_value) = {
-        let handles = tx.handles.borrow();
-        (handles.delete_row.clone(), handles.value.clone())
-      };
-      let value = call_method2(delete_row, tx_value, table_js, pk_js).await?;
-      if value.is_null() || value.is_undefined() {
-        self.maybe_remove_index_schema_width(tree, key);
-        return Ok(None);
-      }
-      self.maybe_remove_index_schema_width(tree, key);
-      return from_js(value);
-    }
-
-    if let Some(index_name) = self.index_name(tree) {
-      let (index_key, row_pk) = self.split_composite_index_key(index_name, key)?;
-      let index_js = JsValue::from_str(index_name);
-      let index_key_js = to_js(&index_key)?;
-      let row_pk_js = to_js(&row_pk)?;
-      let (remove_index, tx_value) = {
-        let handles = tx.handles.borrow();
-        (handles.remove_index.clone(), handles.value.clone())
-      };
-      let _ = call_method3(remove_index, tx_value, index_js, index_key_js, row_pk_js).await?;
-      return Ok(None);
-    }
-
-    Err(serde_error(format!("unsupported tree name: {tree}")))
   }
 
   async fn tx_range<R>(
@@ -820,136 +1062,12 @@ impl StoreAdapterCallbacks {
   where
     R: RangeBounds<EngineKey>,
   {
-    if tree == TABLE_SCHEMAS_TREE {
-      let (range_table_schemas, tx_value) = {
-        let handles = tx.handles.borrow();
-        (handles.range_table_schemas.clone(), handles.value.clone())
-      };
-      let value = call_method0(range_table_schemas, tx_value).await?;
-      let entries: Vec<TableSchemaEntry> = from_js(value)?;
-      return Ok(
-        entries
-          .into_iter()
-          .map(|entry| {
-            (
-              <DefaultEncoding as KeyEncoding>::encode_values(&[db_engine::EngineValue::Text(
-                entry.table,
-              )]),
-              entry.row,
-            )
-          })
-          .collect(),
-      );
+    match self.tree_kind(tree) {
+      StoreTree::TableSchemas => self.tx_range_table_schemas(tx).await,
+      StoreTree::IndexSchemas => self.tx_range_index_schemas(tx).await,
+      StoreTree::RowTable(table) => self.tx_range_rows(tx, table, range).await,
+      StoreTree::IndexTable(index_name) => self.tx_range_index_entries(tx, index_name, range).await,
     }
-
-    if tree == INDEX_SCHEMAS_TREE {
-      let (range_index_schemas, tx_value) = {
-        let handles = tx.handles.borrow();
-        (handles.range_index_schemas.clone(), handles.value.clone())
-      };
-      let value = call_method0(range_index_schemas, tx_value).await?;
-      let entries: Vec<IndexSchemaEntry> = from_js(value)?;
-      let out = entries
-        .into_iter()
-        .map(|entry| {
-          (
-            <DefaultEncoding as KeyEncoding>::encode_values(&[db_engine::EngineValue::Text(
-              entry.index,
-            )]),
-            entry.row,
-          )
-        })
-        .collect::<Vec<_>>();
-      for (key, row) in &out {
-        self.maybe_update_index_schema_widths(tree, key, row);
-      }
-      return Ok(out);
-    }
-
-    if let Some(table) = self.row_table_name(tree) {
-      let request = PrimaryKeyRangeRequest {
-        start: match range.start_bound() {
-          Bound::Included(key) | Bound::Excluded(key) => {
-            let pk = self.primary_key_from_engine_key(key)?;
-            Some(pk)
-          }
-          Bound::Unbounded => None,
-        },
-        start_inclusive: matches!(range.start_bound(), Bound::Included(_)),
-        end: match range.end_bound() {
-          Bound::Included(key) | Bound::Excluded(key) => {
-            let pk = self.primary_key_from_engine_key(key)?;
-            Some(pk)
-          }
-          Bound::Unbounded => None,
-        },
-        end_inclusive: matches!(range.end_bound(), Bound::Included(_)),
-      };
-
-      let table_js = JsValue::from_str(table);
-      let req_js = to_js(&request)?;
-      let (range_rows, tx_value) = {
-        let handles = tx.handles.borrow();
-        (handles.range_rows.clone(), handles.value.clone())
-      };
-      let value = call_method2(range_rows, tx_value, table_js, req_js).await?;
-      let rows: Vec<PrimaryKeyEntry> = from_js(value)?;
-      let out = rows
-        .into_iter()
-        .map(|entry| (entry.primary_key.to_engine_key(), entry.row))
-        .collect::<Vec<_>>();
-
-      if tree == INDEX_SCHEMAS_TREE {
-        for (key, row) in &out {
-          self.maybe_update_index_schema_widths(tree, key, row);
-        }
-      }
-
-      return Ok(out);
-    }
-
-    if let Some(index_name) = self.index_name(tree) {
-      let request = IndexRangeRequest {
-        start: match range.start_bound() {
-          Bound::Included(key) | Bound::Excluded(key) => self
-            .split_composite_index_key(index_name, key)
-            .ok()
-            .map(|(index_key, _)| index_key),
-          Bound::Unbounded => None,
-        },
-        start_inclusive: matches!(range.start_bound(), Bound::Included(_)),
-        end: match range.end_bound() {
-          Bound::Included(key) | Bound::Excluded(key) => self
-            .split_composite_index_key(index_name, key)
-            .ok()
-            .map(|(index_key, _)| index_key),
-          Bound::Unbounded => None,
-        },
-        end_inclusive: matches!(range.end_bound(), Bound::Included(_)),
-      };
-
-      let index_js = JsValue::from_str(index_name);
-      let req_js = to_js(&request)?;
-      let (range_index, tx_value) = {
-        let handles = tx.handles.borrow();
-        (handles.range_index.clone(), handles.value.clone())
-      };
-      let value = call_method2(range_index, tx_value, index_js, req_js).await?;
-      let entries: Vec<IndexEntry> = from_js(value)?;
-      return Ok(
-        entries
-          .into_iter()
-          .map(|entry| {
-            (
-              self.compose_composite_index_key(&entry.index_key, entry.row_primary_key),
-              Vec::new(),
-            )
-          })
-          .collect(),
-      );
-    }
-
-    Err(serde_error(format!("unsupported tree name: {tree}")))
   }
 
   async fn callback_get(&self, tree: &str, key: &EngineKey) -> BTreeResult<Option<Vec<u8>>> {

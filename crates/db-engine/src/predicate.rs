@@ -222,40 +222,77 @@ pub fn eval_predicate(
   eval_ctx: &EvalContext,
 ) -> bool {
   match pred {
-    QualifiedPredicate::Equals(l, r) => eval_comparison_predicate(ComparisonOp::Eq, l, r, ctx),
-    QualifiedPredicate::NotEquals(l, r) => eval_comparison_predicate(ComparisonOp::Ne, l, r, ctx),
-    QualifiedPredicate::LessThan(l, r) => eval_comparison_predicate(ComparisonOp::Lt, l, r, ctx),
-    QualifiedPredicate::LessThanOrEquals(l, r) => {
-      eval_comparison_predicate(ComparisonOp::Le, l, r, ctx)
-    }
-    QualifiedPredicate::GreaterThan(l, r) => eval_comparison_predicate(ComparisonOp::Gt, l, r, ctx),
-    QualifiedPredicate::GreaterThanOrEquals(l, r) => {
-      eval_comparison_predicate(ComparisonOp::Ge, l, r, ctx)
-    }
-    QualifiedPredicate::IsNull(qc) => eval_null_predicate(qc, false, ctx),
-    QualifiedPredicate::IsNotNull(qc) => eval_null_predicate(qc, true, ctx),
-    QualifiedPredicate::InList {
-      expr,
-      list,
-      negated,
-    } => eval_in_list_predicate(expr, list, *negated, ctx),
-    QualifiedPredicate::InSubquery {
-      expr,
-      subquery,
-      negated,
-    } => eval_in_subquery_predicate(expr, subquery, *negated, ctx, eval_ctx),
-    QualifiedPredicate::And(l, r) => {
-      eval_predicate(l, ctx, eval_ctx) && eval_predicate(r, ctx, eval_ctx)
-    }
-    QualifiedPredicate::Or(l, r) => {
-      eval_predicate(l, ctx, eval_ctx) || eval_predicate(r, ctx, eval_ctx)
-    }
+    QualifiedPredicate::And(l, r) => eval_and_predicate(l, r, ctx, eval_ctx),
+    QualifiedPredicate::Or(l, r) => eval_or_predicate(l, r, ctx, eval_ctx),
     QualifiedPredicate::Not(p) => !eval_predicate(p, ctx, eval_ctx),
-    QualifiedPredicate::Like {
-      expr,
-      pattern,
-      negated,
-    } => eval_like_predicate(expr, pattern, *negated, ctx),
+    _ => eval_leaf_predicate(pred, ctx, eval_ctx),
+  }
+}
+
+fn eval_and_predicate(
+  left: &QualifiedPredicate,
+  right: &QualifiedPredicate,
+  ctx: &dyn RowContext,
+  eval_ctx: &EvalContext,
+) -> bool {
+  eval_predicate(left, ctx, eval_ctx) && eval_predicate(right, ctx, eval_ctx)
+}
+
+fn eval_or_predicate(
+  left: &QualifiedPredicate,
+  right: &QualifiedPredicate,
+  ctx: &dyn RowContext,
+  eval_ctx: &EvalContext,
+) -> bool {
+  eval_predicate(left, ctx, eval_ctx) || eval_predicate(right, ctx, eval_ctx)
+}
+
+fn eval_leaf_predicate(
+  pred: &QualifiedPredicate,
+  ctx: &dyn RowContext,
+  eval_ctx: &EvalContext,
+) -> bool {
+  pred.eval_leaf(ctx, eval_ctx)
+}
+
+impl QualifiedPredicate {
+  fn eval_leaf(&self, ctx: &dyn RowContext, eval_ctx: &EvalContext) -> bool {
+    if let Some((op, left, right)) = self.as_comparison() {
+      return eval_comparison_predicate(op, left, right, ctx);
+    }
+
+    match self {
+      QualifiedPredicate::IsNull(qc) => eval_null_predicate(qc, false, ctx),
+      QualifiedPredicate::IsNotNull(qc) => eval_null_predicate(qc, true, ctx),
+      QualifiedPredicate::InList {
+        expr,
+        list,
+        negated,
+      } => eval_in_list_predicate(expr, list, *negated, ctx),
+      QualifiedPredicate::InSubquery {
+        expr,
+        subquery,
+        negated,
+      } => eval_in_subquery_predicate(expr, subquery, *negated, ctx, eval_ctx),
+      QualifiedPredicate::Like {
+        expr,
+        pattern,
+        negated,
+      } => eval_like_predicate(expr, pattern, *negated, ctx),
+      _ => false,
+    }
+  }
+
+  fn as_comparison(&self) -> Option<(ComparisonOp, &QualifiedOperand, &QualifiedOperand)> {
+    match self {
+      QualifiedPredicate::Equals(l, r) => Some((ComparisonOp::Eq, l, r)),
+      QualifiedPredicate::NotEquals(l, r) => Some((ComparisonOp::Ne, l, r)),
+      QualifiedPredicate::LessThan(l, r) => Some((ComparisonOp::Lt, l, r)),
+      QualifiedPredicate::LessThanOrEquals(l, r) => Some((ComparisonOp::Le, l, r)),
+      QualifiedPredicate::GreaterThan(l, r) => Some((ComparisonOp::Gt, l, r)),
+      QualifiedPredicate::GreaterThanOrEquals(l, r) => Some((ComparisonOp::Ge, l, r)),
+      _ => None,
+    }
   }
 }
 
@@ -275,23 +312,74 @@ fn having_cmp(op: ComparisonOp, r: &RefOrAgg, v: &EngineValue, ctx: &GroupRowCon
 }
 
 pub fn eval_having_predicate(h: &HavingPredicate, ctx: &GroupRowContext<'_>) -> bool {
-  match h {
-    HavingPredicate::Equals(r, v) => having_cmp(ComparisonOp::Eq, r, v, ctx),
-    HavingPredicate::NotEquals(r, v) => having_cmp(ComparisonOp::Ne, r, v, ctx),
-    HavingPredicate::LessThan(r, v) => having_cmp(ComparisonOp::Lt, r, v, ctx),
-    HavingPredicate::LessThanOrEquals(r, v) => having_cmp(ComparisonOp::Le, r, v, ctx),
-    HavingPredicate::GreaterThan(r, v) => having_cmp(ComparisonOp::Gt, r, v, ctx),
-    HavingPredicate::GreaterThanOrEquals(r, v) => having_cmp(ComparisonOp::Ge, r, v, ctx),
-    HavingPredicate::IsNull(r) => {
-      matches!(resolve_having_ref(r, ctx), Some(EngineValue::Null))
+  h.matches(ctx)
+}
+
+impl HavingPredicate {
+  pub fn matches(&self, ctx: &GroupRowContext<'_>) -> bool {
+    match self {
+      HavingPredicate::And(l, r) => l.matches(ctx) && r.matches(ctx),
+      HavingPredicate::Or(l, r) => l.matches(ctx) || r.matches(ctx),
+      HavingPredicate::Not(p) => !p.matches(ctx),
+      _ => self.matches_leaf(ctx),
     }
-    HavingPredicate::IsNotNull(r) => match resolve_having_ref(r, ctx) {
-      Some(EngineValue::Null) | None => false,
-      Some(_) => true,
-    },
-    HavingPredicate::And(l, r) => eval_having_predicate(l, ctx) && eval_having_predicate(r, ctx),
-    HavingPredicate::Or(l, r) => eval_having_predicate(l, ctx) || eval_having_predicate(r, ctx),
-    HavingPredicate::Not(p) => !eval_having_predicate(p, ctx),
+  }
+
+  fn matches_leaf(&self, ctx: &GroupRowContext<'_>) -> bool {
+    if let Some((op, r, v)) = self.as_comparison() {
+      return self.matches_comparison(op, r, v, ctx);
+    }
+
+    match self {
+      HavingPredicate::IsNull(_) => self.matches_null(true, ctx),
+      HavingPredicate::IsNotNull(_) => self.matches_null(false, ctx),
+      _ => false,
+    }
+  }
+
+  fn matches_comparison(
+    &self,
+    op: ComparisonOp,
+    r: &RefOrAgg,
+    v: &EngineValue,
+    ctx: &GroupRowContext<'_>,
+  ) -> bool {
+    having_cmp(op, r, v, ctx)
+  }
+
+  fn matches_null(&self, null_expected: bool, ctx: &GroupRowContext<'_>) -> bool {
+    let r = self.ref_or_agg();
+    match resolve_having_ref(r, ctx) {
+      Some(EngineValue::Null) => null_expected,
+      Some(_) => !null_expected,
+      None => false,
+    }
+  }
+
+  fn as_comparison(&self) -> Option<(ComparisonOp, &RefOrAgg, &EngineValue)> {
+    match self {
+      HavingPredicate::Equals(r, v) => Some((ComparisonOp::Eq, r, v)),
+      HavingPredicate::NotEquals(r, v) => Some((ComparisonOp::Ne, r, v)),
+      HavingPredicate::LessThan(r, v) => Some((ComparisonOp::Lt, r, v)),
+      HavingPredicate::LessThanOrEquals(r, v) => Some((ComparisonOp::Le, r, v)),
+      HavingPredicate::GreaterThan(r, v) => Some((ComparisonOp::Gt, r, v)),
+      HavingPredicate::GreaterThanOrEquals(r, v) => Some((ComparisonOp::Ge, r, v)),
+      _ => None,
+    }
+  }
+
+  fn ref_or_agg(&self) -> &RefOrAgg {
+    match self {
+      HavingPredicate::Equals(r, _) => r,
+      HavingPredicate::NotEquals(r, _) => r,
+      HavingPredicate::LessThan(r, _) => r,
+      HavingPredicate::LessThanOrEquals(r, _) => r,
+      HavingPredicate::GreaterThan(r, _) => r,
+      HavingPredicate::GreaterThanOrEquals(r, _) => r,
+      HavingPredicate::IsNull(r) => r,
+      HavingPredicate::IsNotNull(r) => r,
+      _ => unreachable!(),
+    }
   }
 }
 

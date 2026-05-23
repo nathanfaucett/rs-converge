@@ -172,36 +172,60 @@ fn translate_having_binary(
   ctx: &HavingContext<'_>,
 ) -> Result<db_engine::HavingPredicate, TranslateError> {
   match op {
-    BinaryOperator::And => Ok(db_engine::HavingPredicate::And(
-      Box::new(expr_to_having_predicate(left, ctx)?),
-      Box::new(expr_to_having_predicate(right, ctx)?),
-    )),
-    BinaryOperator::Or => Ok(db_engine::HavingPredicate::Or(
-      Box::new(expr_to_having_predicate(left, ctx)?),
-      Box::new(expr_to_having_predicate(right, ctx)?),
-    )),
+    BinaryOperator::And => {
+      translate_having_logical(db_engine::HavingPredicate::And, left, right, ctx)
+    }
+    BinaryOperator::Or => {
+      translate_having_logical(db_engine::HavingPredicate::Or, left, right, ctx)
+    }
     BinaryOperator::Eq
     | BinaryOperator::NotEq
     | BinaryOperator::Lt
     | BinaryOperator::LtEq
     | BinaryOperator::Gt
-    | BinaryOperator::GtEq => {
-      let lref = resolve_ref(left, ctx)?;
-      let rval = resolve_having_literal(right, ctx)?;
-      Ok(match op {
-        BinaryOperator::Eq => db_engine::HavingPredicate::Equals(lref, rval),
-        BinaryOperator::NotEq => db_engine::HavingPredicate::NotEquals(lref, rval),
-        BinaryOperator::Lt => db_engine::HavingPredicate::LessThan(lref, rval),
-        BinaryOperator::LtEq => db_engine::HavingPredicate::LessThanOrEquals(lref, rval),
-        BinaryOperator::Gt => db_engine::HavingPredicate::GreaterThan(lref, rval),
-        BinaryOperator::GtEq => db_engine::HavingPredicate::GreaterThanOrEquals(lref, rval),
-        _ => unreachable!(),
-      })
-    }
+    | BinaryOperator::GtEq => translate_having_comparison(left, op, right, ctx),
     _ => Err(TranslateError::UnsupportedFeature(
       "unsupported binary operator in HAVING".into(),
     )),
   }
+}
+
+fn translate_having_logical<F>(
+  constructor: F,
+  left: &SqlExpr,
+  right: &SqlExpr,
+  ctx: &HavingContext<'_>,
+) -> Result<db_engine::HavingPredicate, TranslateError>
+where
+  F: Fn(
+    Box<db_engine::HavingPredicate>,
+    Box<db_engine::HavingPredicate>,
+  ) -> db_engine::HavingPredicate,
+{
+  Ok(constructor(
+    Box::new(expr_to_having_predicate(left, ctx)?),
+    Box::new(expr_to_having_predicate(right, ctx)?),
+  ))
+}
+
+fn translate_having_comparison(
+  left: &SqlExpr,
+  op: &BinaryOperator,
+  right: &SqlExpr,
+  ctx: &HavingContext<'_>,
+) -> Result<db_engine::HavingPredicate, TranslateError> {
+  let lref = resolve_ref(left, ctx)?;
+  let rval = resolve_having_literal(right, ctx)?;
+
+  Ok(match op {
+    BinaryOperator::Eq => db_engine::HavingPredicate::Equals(lref, rval),
+    BinaryOperator::NotEq => db_engine::HavingPredicate::NotEquals(lref, rval),
+    BinaryOperator::Lt => db_engine::HavingPredicate::LessThan(lref, rval),
+    BinaryOperator::LtEq => db_engine::HavingPredicate::LessThanOrEquals(lref, rval),
+    BinaryOperator::Gt => db_engine::HavingPredicate::GreaterThan(lref, rval),
+    BinaryOperator::GtEq => db_engine::HavingPredicate::GreaterThanOrEquals(lref, rval),
+    _ => unreachable!(),
+  })
 }
 
 fn translate_having_unary(
