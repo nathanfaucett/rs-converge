@@ -99,7 +99,161 @@ fn binary_predicate(
   })
 }
 
-/// Convert a sqlparser expression into a qualified predicate (used for JOINs, HAVING, etc.).
+fn translate_binary_expr(
+  left: &SqlExpr,
+  op: &BinaryOperator,
+  right: &SqlExpr,
+  alias_map: &HashMap<String, String>,
+  table_schemas: &HashMap<String, db_engine::TableSchema>,
+  resolver: &dyn crate::translate::SchemaResolver,
+  mapper: &dyn crate::translate::ValueMapper,
+) -> Result<db_engine::QualifiedPredicate, TranslateError> {
+  match op {
+    BinaryOperator::And => Ok(db_engine::QualifiedPredicate::And(
+      Box::new(expr_to_qualified_predicate(
+        left,
+        alias_map,
+        table_schemas,
+        resolver,
+        mapper,
+      )?),
+      Box::new(expr_to_qualified_predicate(
+        right,
+        alias_map,
+        table_schemas,
+        resolver,
+        mapper,
+      )?),
+    )),
+    BinaryOperator::Or => Ok(db_engine::QualifiedPredicate::Or(
+      Box::new(expr_to_qualified_predicate(
+        left,
+        alias_map,
+        table_schemas,
+        resolver,
+        mapper,
+      )?),
+      Box::new(expr_to_qualified_predicate(
+        right,
+        alias_map,
+        table_schemas,
+        resolver,
+        mapper,
+      )?),
+    )),
+    BinaryOperator::Eq
+    | BinaryOperator::NotEq
+    | BinaryOperator::Lt
+    | BinaryOperator::LtEq
+    | BinaryOperator::Gt
+    | BinaryOperator::GtEq => {
+      let left_op = resolve_operand(left, alias_map, table_schemas, mapper)?;
+      let right_op = resolve_operand(right, alias_map, table_schemas, mapper)?;
+      binary_predicate(op, left_op, right_op)
+    }
+    _ => Err(TranslateError::UnsupportedFeature(
+      "unsupported binary operator in WHERE".into(),
+    )),
+  }
+}
+
+fn translate_unary_expr(
+  op: &UnaryOperator,
+  expr: &SqlExpr,
+  alias_map: &HashMap<String, String>,
+  table_schemas: &HashMap<String, db_engine::TableSchema>,
+  resolver: &dyn crate::translate::SchemaResolver,
+  mapper: &dyn crate::translate::ValueMapper,
+) -> Result<db_engine::QualifiedPredicate, TranslateError> {
+  match op {
+    UnaryOperator::Not => Ok(db_engine::QualifiedPredicate::Not(Box::new(
+      expr_to_qualified_predicate(expr, alias_map, table_schemas, resolver, mapper)?,
+    ))),
+    _ => Err(TranslateError::UnsupportedFeature(
+      "unsupported unary operator in WHERE".into(),
+    )),
+  }
+}
+
+fn translate_in_list_expr(
+  in_expr: &SqlExpr,
+  list: &[SqlExpr],
+  negated: bool,
+  alias_map: &HashMap<String, String>,
+  table_schemas: &HashMap<String, db_engine::TableSchema>,
+  mapper: &dyn crate::translate::ValueMapper,
+) -> Result<db_engine::QualifiedPredicate, TranslateError> {
+  let qc = crate::translate::helpers::resolve_column_local(in_expr, alias_map, table_schemas)?;
+  let mut values: Vec<db_engine::EngineValue> = Vec::new();
+  for item in list {
+    if matches!(item, SqlExpr::Value(_) | SqlExpr::Cast { .. }) {
+      values.push(mapper.map_sql_value(item)?);
+    } else {
+      return Err(TranslateError::UnsupportedFeature(
+        "IN list only supports literal values in v1".into(),
+      ));
+    }
+  }
+  Ok(db_engine::QualifiedPredicate::InList {
+    expr: qc,
+    list: values,
+    negated,
+  })
+}
+
+fn translate_in_subquery_expr(
+  in_expr: &SqlExpr,
+  subquery: &sqlparser::ast::Query,
+  negated: bool,
+  resolver: &dyn crate::translate::SchemaResolver,
+  mapper: &dyn crate::translate::ValueMapper,
+  alias_map: &HashMap<String, String>,
+  table_schemas: &HashMap<String, db_engine::TableSchema>,
+) -> Result<db_engine::QualifiedPredicate, TranslateError> {
+  let qc = crate::translate::helpers::resolve_column_local(in_expr, alias_map, table_schemas)?;
+  let sub_sql = format!("{}", subquery);
+  let sub_q = crate::translate::parse_and_translate_with_mapper(&sub_sql, resolver, mapper)?;
+  Ok(db_engine::QualifiedPredicate::InSubquery {
+    expr: qc,
+    subquery: Box::new(sub_q),
+    negated,
+  })
+}
+
+fn translate_like_expr(
+  expr: &SqlExpr,
+  pattern: &SqlExpr,
+  negated: bool,
+  alias_map: &HashMap<String, String>,
+  table_schemas: &HashMap<String, db_engine::TableSchema>,
+  mapper: &dyn crate::translate::ValueMapper,
+) -> Result<db_engine::QualifiedPredicate, TranslateError> {
+  let expr_op = resolve_operand(expr, alias_map, table_schemas, mapper)?;
+  let pattern_op = resolve_operand(pattern, alias_map, table_schemas, mapper)?;
+  Ok(db_engine::QualifiedPredicate::Like {
+    expr: expr_op,
+    pattern: pattern_op,
+    negated,
+  })
+}
+
+fn translate_ilike_expr(
+  expr: &SqlExpr,
+  pattern: &SqlExpr,
+  negated: bool,
+  alias_map: &HashMap<String, String>,
+  table_schemas: &HashMap<String, db_engine::TableSchema>,
+  mapper: &dyn crate::translate::ValueMapper,
+) -> Result<db_engine::QualifiedPredicate, TranslateError> {
+  let expr_op = resolve_operand(expr, alias_map, table_schemas, mapper)?;
+  let pattern_op = resolve_operand(pattern, alias_map, table_schemas, mapper)?;
+  Ok(db_engine::QualifiedPredicate::Like {
+    expr: db_engine::QualifiedOperand::Lower(Box::new(expr_op)),
+    pattern: db_engine::QualifiedOperand::Lower(Box::new(pattern_op)),
+    negated,
+  })
+}
+
 pub fn expr_to_qualified_predicate(
   expr: &SqlExpr,
   alias_map: &HashMap<String, String>,
@@ -107,141 +261,49 @@ pub fn expr_to_qualified_predicate(
   resolver: &dyn crate::translate::SchemaResolver,
   mapper: &dyn crate::translate::ValueMapper,
 ) -> Result<db_engine::QualifiedPredicate, TranslateError> {
-  // helper to resolve identifier -> QualifiedColumn
-  let resolve_qc_local = |expr: &SqlExpr| -> Result<db_engine::QualifiedColumn, TranslateError> {
-    crate::translate::helpers::resolve_column_local(expr, alias_map, table_schemas)
-  };
-
   match expr {
     SqlExpr::BinaryOp { left, op, right } => {
-      use sqlparser::ast::BinaryOperator;
-      match op {
-        BinaryOperator::And => Ok(db_engine::QualifiedPredicate::And(
-          Box::new(expr_to_qualified_predicate(
-            left,
-            alias_map,
-            table_schemas,
-            resolver,
-            mapper,
-          )?),
-          Box::new(expr_to_qualified_predicate(
-            right,
-            alias_map,
-            table_schemas,
-            resolver,
-            mapper,
-          )?),
-        )),
-        BinaryOperator::Or => Ok(db_engine::QualifiedPredicate::Or(
-          Box::new(expr_to_qualified_predicate(
-            left,
-            alias_map,
-            table_schemas,
-            resolver,
-            mapper,
-          )?),
-          Box::new(expr_to_qualified_predicate(
-            right,
-            alias_map,
-            table_schemas,
-            resolver,
-            mapper,
-          )?),
-        )),
-        BinaryOperator::Eq
-        | BinaryOperator::NotEq
-        | BinaryOperator::Lt
-        | BinaryOperator::LtEq
-        | BinaryOperator::Gt
-        | BinaryOperator::GtEq => {
-          let left_op = resolve_operand(left, alias_map, table_schemas, mapper)?;
-          let right_op = resolve_operand(right, alias_map, table_schemas, mapper)?;
-          binary_predicate(op, left_op, right_op)
-        }
-        _ => Err(TranslateError::UnsupportedFeature(
-          "unsupported binary operator in WHERE".into(),
-        )),
-      }
+      translate_binary_expr(left, op, right, alias_map, table_schemas, resolver, mapper)
     }
-    SqlExpr::UnaryOp { op, expr } => match op {
-      UnaryOperator::Not => Ok(db_engine::QualifiedPredicate::Not(Box::new(
-        expr_to_qualified_predicate(expr, alias_map, table_schemas, resolver, mapper)?,
-      ))),
-      _ => Err(TranslateError::UnsupportedFeature(
-        "unsupported unary operator in WHERE".into(),
-      )),
-    },
+    SqlExpr::UnaryOp { op, expr } => {
+      translate_unary_expr(op, expr, alias_map, table_schemas, resolver, mapper)
+    }
     SqlExpr::InList {
       expr: in_expr,
       list,
       negated,
-    } => {
-      let qc = resolve_qc_local(in_expr)?;
-      let mut values: Vec<db_engine::EngineValue> = Vec::new();
-      for item in list {
-        if matches!(item, SqlExpr::Value(_) | SqlExpr::Cast { .. }) {
-          values.push(mapper.map_sql_value(item)?);
-        } else {
-          return Err(TranslateError::UnsupportedFeature(
-            "IN list only supports literal values in v1".into(),
-          ));
-        }
-      }
-      Ok(db_engine::QualifiedPredicate::InList {
-        expr: qc,
-        list: values,
-        negated: *negated,
-      })
-    }
+    } => translate_in_list_expr(in_expr, list, *negated, alias_map, table_schemas, mapper),
     SqlExpr::InSubquery {
       expr: in_expr,
       subquery,
       negated,
-    } => {
-      let qc = resolve_qc_local(in_expr)?;
-      // translate subquery to EngineQuery; reject correlated queries via resolver errors
-      let sub_sql = format!("{}", subquery);
-      let sub_q = crate::translate::parse_and_translate_with_mapper(&sub_sql, resolver, mapper)?;
-      Ok(db_engine::QualifiedPredicate::InSubquery {
-        expr: qc,
-        subquery: Box::new(sub_q),
-        negated: *negated,
-      })
-    }
-    SqlExpr::IsNull(inner) => Ok(db_engine::QualifiedPredicate::IsNull(resolve_qc_local(
-      inner,
-    )?)),
-    SqlExpr::IsNotNull(inner) => Ok(db_engine::QualifiedPredicate::IsNotNull(resolve_qc_local(
-      inner,
-    )?)),
+    } => translate_in_subquery_expr(
+      in_expr,
+      subquery,
+      *negated,
+      resolver,
+      mapper,
+      alias_map,
+      table_schemas,
+    ),
+    SqlExpr::IsNull(inner) => Ok(db_engine::QualifiedPredicate::IsNull(
+      crate::translate::helpers::resolve_column_local(inner, alias_map, table_schemas)?,
+    )),
+    SqlExpr::IsNotNull(inner) => Ok(db_engine::QualifiedPredicate::IsNotNull(
+      crate::translate::helpers::resolve_column_local(inner, alias_map, table_schemas)?,
+    )),
     SqlExpr::Like {
       negated,
       expr,
       pattern,
       ..
-    } => {
-      let expr_op = resolve_operand(expr, alias_map, table_schemas, mapper)?;
-      let pattern_op = resolve_operand(pattern, alias_map, table_schemas, mapper)?;
-      Ok(db_engine::QualifiedPredicate::Like {
-        expr: expr_op,
-        pattern: pattern_op,
-        negated: *negated,
-      })
-    }
+    } => translate_like_expr(expr, pattern, *negated, alias_map, table_schemas, mapper),
     SqlExpr::ILike {
       negated,
       expr,
       pattern,
       ..
-    } => {
-      let expr_op = resolve_operand(expr, alias_map, table_schemas, mapper)?;
-      let pattern_op = resolve_operand(pattern, alias_map, table_schemas, mapper)?;
-      Ok(db_engine::QualifiedPredicate::Like {
-        expr: db_engine::QualifiedOperand::Lower(Box::new(expr_op)),
-        pattern: db_engine::QualifiedOperand::Lower(Box::new(pattern_op)),
-        negated: *negated,
-      })
-    }
+    } => translate_ilike_expr(expr, pattern, *negated, alias_map, table_schemas, mapper),
     _ => Err(TranslateError::UnsupportedFeature(
       "unsupported WHERE expression".into(),
     )),

@@ -13,8 +13,8 @@ use hashbrown::HashMap;
 use sqlparser::ast::{
   AssignmentTarget, BinaryOperator, ColumnOption, CreateIndex, CreateTable, DataType,
   Delete as SqlDelete, Expr as SqlExpr, FromTable, FunctionArg, FunctionArgExpr, FunctionArguments,
-  GroupByExpr, JoinConstraint, JoinOperator, LimitClause, ObjectName, ObjectType, Query,
-  SelectItem, SetExpr, Statement, TableConstraint, TableFactor, Update as SqlUpdate,
+  GroupByExpr, JoinConstraint, JoinOperator, LimitClause, ObjectName, ObjectType, OrderBy, Query,
+  Select, SelectItem, SetExpr, Statement, TableConstraint, TableFactor, Update as SqlUpdate,
   UpdateTableFromKind, Value as SqlValue,
 };
 use sqlparser::dialect::GenericDialect;
@@ -593,163 +593,239 @@ pub fn translate_statement(
   mapper: &dyn ValueMapper,
 ) -> Result<db_engine::EngineQuery, TranslateError> {
   match stmt {
-    Statement::Query(boxed_q) => {
-      let Query {
-        body,
-        order_by,
-        limit_clause,
-        ..
-      } = &**boxed_q;
-      match &**body {
-        SetExpr::Select(select) => {
-          if select.from.len() != 1 {
-            return Err(TranslateError::UnsupportedFeature(
-              "only single FROM with optional JOINs supported".into(),
-            ));
-          }
-
-          let from = &select.from[0];
-
-          let mut alias_map: HashMap<String, String> = HashMap::new();
-          let mut referenced_tables: Vec<String> = Vec::new();
-          let mut table_schemas: HashMap<String, db_engine::TableSchema> = HashMap::new();
-
-          let base_table = parse_from_clause(
-            from,
-            resolver,
-            &mut alias_map,
-            &mut referenced_tables,
-            &mut table_schemas,
-          )?;
-
-          let joins = parse_joins(
-            &from.joins,
-            &mut alias_map,
-            &mut referenced_tables,
-            &mut table_schemas,
-            resolver,
-            &base_table,
-          )?;
-
-          let (projection_qc, aggregates, proj_alias_map) = parse_projection(
-            &select.projection,
-            &alias_map,
-            &referenced_tables,
-            &table_schemas,
-          )?;
-
-          let group_by = parse_group_by(
-            &select.group_by,
-            &alias_map,
-            &referenced_tables,
-            &table_schemas,
-          )?;
-
-          let order_by_vec = parse_order_by(
-            order_by,
-            &proj_alias_map,
-            &alias_map,
-            &referenced_tables,
-            &table_schemas,
-          )?;
-
-          let (limit_val, offset_val) = parse_limit_clause(limit_clause)?;
-
-          // WHERE/predicate: build a qualified predicate for extended use
-          let qualified_pred = if let Some(selection) = &select.selection {
-            Some(expr_to_qualified_predicate(
-              selection,
-              &alias_map,
-              &table_schemas,
-              resolver,
-              mapper,
-            )?)
-          } else {
-            None
-          };
-
-          // HAVING support: translate having expression (after aggregates/group_by known)
-          let having_pred = if let Some(h) = &select.having {
-            let ctx = having_module::HavingContext {
-              group_by: &group_by,
-              aggregates: &aggregates,
-              proj_alias_map: &proj_alias_map,
-              alias_map: &alias_map,
-              table_schemas: &table_schemas,
-              resolver,
-              mapper,
-            };
-            Some(having_module::expr_to_having_predicate(h, &ctx)?)
-          } else {
-            None
-          };
-
-          let mut options = db_engine::SelectOptions {
-            joins,
-            aggregates,
-            group_by,
-            order_by: order_by_vec,
-            limit: limit_val,
-            offset: offset_val,
-            distinct: false,
-            having: None,
-          };
-          options.having = having_pred;
-
-          // Detect DISTINCT
-          if let Some(_distinct) = &select.distinct {
-            options.distinct = true;
-          }
-
-          // Decide between simple Select and SelectEx
-          let want_simple = options.joins.is_empty()
-            && options.aggregates.is_empty()
-            && options.group_by.is_empty()
-            && options.order_by.is_empty()
-            && options.limit.is_none()
-            && options.offset.is_none()
-            && !options.distinct;
-
-          if want_simple {
-            // simple projection must only reference base_table columns
-            let mut simple_proj: Vec<usize> = Vec::new();
-            for qc in projection_qc {
-              if qc.table != base_table {
-                return Err(TranslateError::UnsupportedFeature(
-                  "projection references non-base table but no JOIN present".into(),
-                ));
-              }
-              simple_proj.push(qc.column_index);
-            }
-            return Ok(db_engine::EngineQuery::select_simple(
-              base_table,
-              simple_proj,
-              qualified_pred,
-            ));
-          }
-
-          // Use extended select
-          let final_projection = if !options.aggregates.is_empty() || !options.group_by.is_empty() {
-            Vec::new()
-          } else {
-            projection_qc
-          };
-
-          Ok(db_engine::EngineQuery::Select {
-            table: base_table,
-            projection: final_projection,
-            predicate: qualified_pred,
-            options: Box::new(options),
-          })
-        }
-        _ => Err(TranslateError::UnsupportedStatement),
-      }
-    }
+    Statement::Query(boxed_q) => translate_query(boxed_q, resolver, mapper),
     Statement::Update(update) => translate_update(update, resolver, mapper),
     Statement::Delete(delete) => translate_delete(delete, resolver, mapper),
     Statement::Insert(insert) => translate_insert(insert, resolver, mapper),
     _ => Err(TranslateError::UnsupportedStatement),
   }
+}
+
+fn translate_query(
+  query: &Query,
+  resolver: &dyn SchemaResolver,
+  mapper: &dyn ValueMapper,
+) -> Result<db_engine::EngineQuery, TranslateError> {
+  let Query {
+    body,
+    order_by,
+    limit_clause,
+    ..
+  } = query;
+
+  match &**body {
+    SetExpr::Select(select) => {
+      translate_select_query(select, order_by, limit_clause, resolver, mapper)
+    }
+    _ => Err(TranslateError::UnsupportedStatement),
+  }
+}
+
+fn translate_select_query(
+  select: &Select,
+  order_by: &Option<OrderBy>,
+  limit_clause: &Option<LimitClause>,
+  resolver: &dyn SchemaResolver,
+  mapper: &dyn ValueMapper,
+) -> Result<db_engine::EngineQuery, TranslateError> {
+  if select.from.len() != 1 {
+    return Err(TranslateError::UnsupportedFeature(
+      "only single FROM with optional JOINs supported".into(),
+    ));
+  }
+
+  let from = &select.from[0];
+
+  let mut alias_map: HashMap<String, String> = HashMap::new();
+  let mut referenced_tables: Vec<String> = Vec::new();
+  let mut table_schemas: HashMap<String, db_engine::TableSchema> = HashMap::new();
+
+  let base_table = parse_from_clause(
+    from,
+    resolver,
+    &mut alias_map,
+    &mut referenced_tables,
+    &mut table_schemas,
+  )?;
+
+  let joins = parse_joins(
+    &from.joins,
+    &mut alias_map,
+    &mut referenced_tables,
+    &mut table_schemas,
+    resolver,
+    &base_table,
+  )?;
+
+  let (projection_qc, aggregates, proj_alias_map) = parse_projection(
+    &select.projection,
+    &alias_map,
+    &referenced_tables,
+    &table_schemas,
+  )?;
+
+  let group_by = parse_group_by(
+    &select.group_by,
+    &alias_map,
+    &referenced_tables,
+    &table_schemas,
+  )?;
+
+  let order_by_vec = parse_order_by(
+    order_by,
+    &proj_alias_map,
+    &alias_map,
+    &referenced_tables,
+    &table_schemas,
+  )?;
+
+  let (limit_val, offset_val) = parse_limit_clause(limit_clause)?;
+
+  let qualified_pred = parse_select_predicate(
+    &select.selection,
+    &alias_map,
+    &table_schemas,
+    resolver,
+    mapper,
+  )?;
+
+  let having_pred = parse_select_having(
+    &select.having,
+    &group_by,
+    &aggregates,
+    &proj_alias_map,
+    &alias_map,
+    &table_schemas,
+    resolver,
+    mapper,
+  )?;
+
+  let options = build_select_options(
+    joins,
+    aggregates,
+    group_by,
+    order_by_vec,
+    limit_val,
+    offset_val,
+    select.distinct.is_some(),
+    having_pred,
+  );
+
+  if select_is_simple(&options) {
+    return translate_simple_select(base_table, projection_qc, qualified_pred);
+  }
+
+  let final_projection = if !options.aggregates.is_empty() || !options.group_by.is_empty() {
+    Vec::new()
+  } else {
+    projection_qc
+  };
+
+  Ok(db_engine::EngineQuery::Select {
+    table: base_table,
+    projection: final_projection,
+    predicate: qualified_pred,
+    options: Box::new(options),
+  })
+}
+
+fn parse_select_predicate(
+  selection: &Option<SqlExpr>,
+  alias_map: &HashMap<String, String>,
+  table_schemas: &HashMap<String, db_engine::TableSchema>,
+  resolver: &dyn SchemaResolver,
+  mapper: &dyn ValueMapper,
+) -> Result<Option<db_engine::QualifiedPredicate>, TranslateError> {
+  if let Some(expression) = selection {
+    Ok(Some(expr_to_qualified_predicate(
+      expression,
+      alias_map,
+      table_schemas,
+      resolver,
+      mapper,
+    )?))
+  } else {
+    Ok(None)
+  }
+}
+
+fn parse_select_having(
+  having: &Option<SqlExpr>,
+  group_by: &Vec<db_engine::QualifiedColumn>,
+  aggregates: &Vec<db_engine::Aggregate>,
+  proj_alias_map: &HashMap<String, db_engine::QualifiedColumn>,
+  alias_map: &HashMap<String, String>,
+  table_schemas: &HashMap<String, db_engine::TableSchema>,
+  resolver: &dyn SchemaResolver,
+  mapper: &dyn ValueMapper,
+) -> Result<Option<db_engine::HavingPredicate>, TranslateError> {
+  if let Some(h) = having {
+    let ctx = having_module::HavingContext {
+      group_by,
+      aggregates,
+      proj_alias_map,
+      alias_map,
+      table_schemas,
+      resolver,
+      mapper,
+    };
+    Ok(Some(having_module::expr_to_having_predicate(h, &ctx)?))
+  } else {
+    Ok(None)
+  }
+}
+
+fn build_select_options(
+  joins: Vec<db_engine::JoinClause>,
+  aggregates: Vec<db_engine::Aggregate>,
+  group_by: Vec<db_engine::QualifiedColumn>,
+  order_by: Vec<db_engine::OrderBy>,
+  limit: Option<usize>,
+  offset: Option<usize>,
+  distinct: bool,
+  having: Option<db_engine::HavingPredicate>,
+) -> db_engine::SelectOptions {
+  db_engine::SelectOptions {
+    joins,
+    aggregates,
+    group_by,
+    order_by,
+    limit,
+    offset,
+    distinct,
+    having,
+  }
+}
+
+fn select_is_simple(options: &db_engine::SelectOptions) -> bool {
+  options.joins.is_empty()
+    && options.aggregates.is_empty()
+    && options.group_by.is_empty()
+    && options.order_by.is_empty()
+    && options.limit.is_none()
+    && options.offset.is_none()
+    && !options.distinct
+}
+
+fn translate_simple_select(
+  base_table: String,
+  projection_qc: Vec<db_engine::QualifiedColumn>,
+  qualified_pred: Option<db_engine::QualifiedPredicate>,
+) -> Result<db_engine::EngineQuery, TranslateError> {
+  let mut simple_proj: Vec<usize> = Vec::new();
+  for qc in projection_qc {
+    if qc.table != base_table {
+      return Err(TranslateError::UnsupportedFeature(
+        "projection references non-base table but no JOIN present".into(),
+      ));
+    }
+    simple_proj.push(qc.column_index);
+  }
+  Ok(db_engine::EngineQuery::select_simple(
+    base_table,
+    simple_proj,
+    qualified_pred,
+  ))
 }
 
 fn translate_update(
@@ -1590,49 +1666,91 @@ fn parse_aggregate_function(
   }
 
   match first {
-    "count" => match &args[0] {
-      FunctionArg::Unnamed(FunctionArgExpr::Wildcard) => {
-        aggregates.push(db_engine::Aggregate::Count(None));
-        Ok(())
-      }
-      FunctionArg::Unnamed(FunctionArgExpr::Expr(arg_expr)) => {
-        let qc = helpers::resolve_column(arg_expr, alias_map, referenced_tables, table_schemas)?;
-        aggregates.push(db_engine::Aggregate::Count(Some(qc.clone())));
-        if let Some(alias) = alias_name {
-          proj_alias_map.insert(alias.to_string(), qc);
-        }
-        Ok(())
-      }
-      FunctionArg::Unnamed(FunctionArgExpr::QualifiedWildcard(_)) => Err(
-        TranslateError::UnsupportedFeature("qualified wildcard in aggregate not supported".into()),
-      ),
-      _ => Err(TranslateError::UnsupportedFeature(
-        "unsupported COUNT args".into(),
-      )),
-    },
-    "sum" | "min" | "max" | "avg" => match &args[0] {
-      FunctionArg::Unnamed(FunctionArgExpr::Expr(arg_expr)) => {
-        let qc = helpers::resolve_column(arg_expr, alias_map, referenced_tables, table_schemas)?;
-        match first {
-          "sum" => aggregates.push(db_engine::Aggregate::Sum(qc.clone())),
-          "min" => aggregates.push(db_engine::Aggregate::Min(qc.clone())),
-          "max" => aggregates.push(db_engine::Aggregate::Max(qc.clone())),
-          "avg" => aggregates.push(db_engine::Aggregate::Avg(qc.clone())),
-          _ => {}
-        }
-        if let Some(alias) = alias_name {
-          proj_alias_map.insert(alias.to_string(), qc);
-        }
-        Ok(())
-      }
-      _ => Err(TranslateError::UnsupportedFeature(
-        "unsupported aggregate arg".into(),
-      )),
-    },
+    "count" => parse_count_aggregate(
+      &args[0],
+      alias_name,
+      alias_map,
+      referenced_tables,
+      table_schemas,
+      aggregates,
+      proj_alias_map,
+    ),
+    "sum" | "min" | "max" | "avg" => parse_scalar_aggregate(
+      first,
+      &args[0],
+      alias_name,
+      alias_map,
+      referenced_tables,
+      table_schemas,
+      aggregates,
+      proj_alias_map,
+    ),
     _ => Err(TranslateError::UnsupportedFeature(format!(
       "unsupported function: {}",
       first,
     ))),
+  }
+}
+
+fn parse_count_aggregate(
+  arg: &FunctionArg,
+  alias_name: Option<&str>,
+  alias_map: &HashMap<String, String>,
+  referenced_tables: &[String],
+  table_schemas: &HashMap<String, db_engine::TableSchema>,
+  aggregates: &mut Vec<db_engine::Aggregate>,
+  proj_alias_map: &mut HashMap<String, db_engine::QualifiedColumn>,
+) -> Result<(), TranslateError> {
+  match arg {
+    FunctionArg::Unnamed(FunctionArgExpr::Wildcard) => {
+      aggregates.push(db_engine::Aggregate::Count(None));
+      Ok(())
+    }
+    FunctionArg::Unnamed(FunctionArgExpr::Expr(arg_expr)) => {
+      let qc = helpers::resolve_column(arg_expr, alias_map, referenced_tables, table_schemas)?;
+      aggregates.push(db_engine::Aggregate::Count(Some(qc.clone())));
+      if let Some(alias) = alias_name {
+        proj_alias_map.insert(alias.to_string(), qc);
+      }
+      Ok(())
+    }
+    FunctionArg::Unnamed(FunctionArgExpr::QualifiedWildcard(_)) => Err(
+      TranslateError::UnsupportedFeature("qualified wildcard in aggregate not supported".into()),
+    ),
+    _ => Err(TranslateError::UnsupportedFeature(
+      "unsupported COUNT args".into(),
+    )),
+  }
+}
+
+fn parse_scalar_aggregate(
+  func_name: &str,
+  arg: &FunctionArg,
+  alias_name: Option<&str>,
+  alias_map: &HashMap<String, String>,
+  referenced_tables: &[String],
+  table_schemas: &HashMap<String, db_engine::TableSchema>,
+  aggregates: &mut Vec<db_engine::Aggregate>,
+  proj_alias_map: &mut HashMap<String, db_engine::QualifiedColumn>,
+) -> Result<(), TranslateError> {
+  match arg {
+    FunctionArg::Unnamed(FunctionArgExpr::Expr(arg_expr)) => {
+      let qc = helpers::resolve_column(arg_expr, alias_map, referenced_tables, table_schemas)?;
+      match func_name {
+        "sum" => aggregates.push(db_engine::Aggregate::Sum(qc.clone())),
+        "min" => aggregates.push(db_engine::Aggregate::Min(qc.clone())),
+        "max" => aggregates.push(db_engine::Aggregate::Max(qc.clone())),
+        "avg" => aggregates.push(db_engine::Aggregate::Avg(qc.clone())),
+        _ => {}
+      }
+      if let Some(alias) = alias_name {
+        proj_alias_map.insert(alias.to_string(), qc);
+      }
+      Ok(())
+    }
+    _ => Err(TranslateError::UnsupportedFeature(
+      "unsupported aggregate arg".into(),
+    )),
   }
 }
 
@@ -1713,95 +1831,39 @@ fn parse_limit_clause(
     match lc {
       LimitClause::LimitOffset { limit, offset, .. } => {
         if let Some(lim_expr) = limit {
-          match lim_expr {
-            SqlExpr::Value(v) => match &v.value {
-              SqlValue::Number(s, _) => {
-                limit_val =
-                  Some(s.parse::<usize>().map_err(|_| {
-                    TranslateError::UnsupportedFeature("invalid LIMIT value".into())
-                  })?);
-              }
-              _ => {
-                return Err(TranslateError::UnsupportedFeature(
-                  "unsupported LIMIT expression".into(),
-                ));
-              }
-            },
-            _ => {
-              return Err(TranslateError::UnsupportedFeature(
-                "unsupported LIMIT expression".into(),
-              ));
-            }
-          }
+          limit_val = Some(parse_limit_or_offset_expr(lim_expr, "LIMIT")?);
         }
         if let Some(off_struct) = offset {
-          match &off_struct.value {
-            SqlExpr::Value(v) => match &v.value {
-              SqlValue::Number(s, _) => {
-                offset_val = Some(s.parse::<usize>().map_err(|_| {
-                  TranslateError::UnsupportedFeature("invalid OFFSET value".into())
-                })?);
-              }
-              _ => {
-                return Err(TranslateError::UnsupportedFeature(
-                  "unsupported OFFSET expression".into(),
-                ));
-              }
-            },
-            _ => {
-              return Err(TranslateError::UnsupportedFeature(
-                "unsupported OFFSET expression".into(),
-              ));
-            }
-          }
+          offset_val = Some(parse_limit_or_offset_expr(&off_struct.value, "OFFSET")?);
         }
       }
       LimitClause::OffsetCommaLimit { offset, limit } => {
-        match offset {
-          SqlExpr::Value(v) => match &v.value {
-            SqlValue::Number(s, _) => {
-              offset_val =
-                Some(s.parse::<usize>().map_err(|_| {
-                  TranslateError::UnsupportedFeature("invalid OFFSET value".into())
-                })?);
-            }
-            _ => {
-              return Err(TranslateError::UnsupportedFeature(
-                "unsupported OFFSET expression".into(),
-              ));
-            }
-          },
-          _ => {
-            return Err(TranslateError::UnsupportedFeature(
-              "unsupported OFFSET expression".into(),
-            ));
-          }
-        }
-        match limit {
-          SqlExpr::Value(v) => match &v.value {
-            SqlValue::Number(s, _) => {
-              limit_val = Some(
-                s.parse::<usize>()
-                  .map_err(|_| TranslateError::UnsupportedFeature("invalid LIMIT value".into()))?,
-              );
-            }
-            _ => {
-              return Err(TranslateError::UnsupportedFeature(
-                "unsupported LIMIT expression".into(),
-              ));
-            }
-          },
-          _ => {
-            return Err(TranslateError::UnsupportedFeature(
-              "unsupported LIMIT expression".into(),
-            ));
-          }
-        }
+        offset_val = Some(parse_limit_or_offset_expr(offset, "OFFSET")?);
+        limit_val = Some(parse_limit_or_offset_expr(limit, "LIMIT")?);
       }
     }
   }
 
   Ok((limit_val, offset_val))
+}
+
+fn parse_limit_or_offset_expr(expr: &SqlExpr, label: &str) -> Result<usize, TranslateError> {
+  match expr {
+    SqlExpr::Value(v) => match &v.value {
+      SqlValue::Number(s, _) => Ok(
+        s.parse::<usize>()
+          .map_err(|_| TranslateError::UnsupportedFeature(format!("invalid {} value", label)))?,
+      ),
+      _ => Err(TranslateError::UnsupportedFeature(format!(
+        "unsupported {} expression",
+        label
+      ))),
+    },
+    _ => Err(TranslateError::UnsupportedFeature(format!(
+      "unsupported {} expression",
+      label
+    ))),
+  }
 }
 
 #[cfg(test)]

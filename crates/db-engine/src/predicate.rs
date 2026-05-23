@@ -2,7 +2,7 @@ use alloc::{string::String, vec::Vec};
 use hashbrown::{HashMap, HashSet};
 
 use crate::{
-  EngineKey, EngineRow, EngineValue, IndexSchema,
+  EngineKey, EngineQuery, EngineRow, EngineValue, IndexSchema,
   query::{HavingPredicate, QualifiedColumn, QualifiedOperand, QualifiedPredicate, RefOrAgg},
 };
 use db_types::key_encoding::{DefaultEncoding, KeyEncoding};
@@ -145,77 +145,105 @@ fn eval_binary_op(op: ComparisonOp, left: Option<EngineValue>, right: Option<Eng
   }
 }
 
+fn eval_comparison_predicate(
+  op: ComparisonOp,
+  left: &QualifiedOperand,
+  right: &QualifiedOperand,
+  ctx: &dyn RowContext,
+) -> bool {
+  eval_binary_op(op, resolve_operand(left, ctx), resolve_operand(right, ctx))
+}
+
+fn eval_null_predicate(qc: &QualifiedColumn, negated: bool, ctx: &dyn RowContext) -> bool {
+  let is_null = matches!(
+    ctx.get_value(&qc.table, qc.column_index),
+    Some(EngineValue::Null)
+  );
+
+  if negated { !is_null } else { is_null }
+}
+
+fn eval_in_list_predicate(
+  expr: &QualifiedColumn,
+  list: &[EngineValue],
+  negated: bool,
+  ctx: &dyn RowContext,
+) -> bool {
+  let found = match ctx.get_value(&expr.table, expr.column_index) {
+    Some(v) => list.iter().any(|x| x == v),
+    None => false,
+  };
+
+  if negated { !found } else { found }
+}
+
+fn eval_in_subquery_predicate(
+  expr: &QualifiedColumn,
+  subquery: &EngineQuery,
+  negated: bool,
+  ctx: &dyn RowContext,
+  eval_ctx: &EvalContext,
+) -> bool {
+  let lv = ctx.get_value(&expr.table, expr.column_index).cloned();
+  let key = format!("{:?}", subquery);
+  let found = match (lv, eval_ctx.subquery_cache.get(&key)) {
+    (Some(v), Some(s)) => s.contains(&v),
+    _ => false,
+  };
+
+  if negated { !found } else { found }
+}
+
+fn eval_like_predicate(
+  expr: &QualifiedOperand,
+  pattern: &QualifiedOperand,
+  negated: bool,
+  ctx: &dyn RowContext,
+) -> bool {
+  let text = match resolve_operand(expr, ctx) {
+    Some(EngineValue::Text(s)) => s,
+    Some(EngineValue::Null) | None => return false,
+    Some(v) => format!("{:?}", v),
+  };
+
+  let pat = match resolve_operand(pattern, ctx) {
+    Some(EngineValue::Text(s)) => s,
+    Some(EngineValue::Null) | None => return false,
+    Some(v) => format!("{:?}", v),
+  };
+
+  let matched = like_matches(&text, &pat);
+  if negated { !matched } else { matched }
+}
+
 pub fn eval_predicate(
   pred: &QualifiedPredicate,
   ctx: &dyn RowContext,
   eval_ctx: &EvalContext,
 ) -> bool {
   match pred {
-    QualifiedPredicate::Equals(l, r) => {
-      let lv = resolve_operand(l, ctx);
-      let rv = resolve_operand(r, ctx);
-      eval_binary_op(ComparisonOp::Eq, lv, rv)
-    }
-    QualifiedPredicate::NotEquals(l, r) => {
-      let lv = resolve_operand(l, ctx);
-      let rv = resolve_operand(r, ctx);
-      eval_binary_op(ComparisonOp::Ne, lv, rv)
-    }
-    QualifiedPredicate::LessThan(l, r) => {
-      let lv = resolve_operand(l, ctx);
-      let rv = resolve_operand(r, ctx);
-      eval_binary_op(ComparisonOp::Lt, lv, rv)
-    }
+    QualifiedPredicate::Equals(l, r) => eval_comparison_predicate(ComparisonOp::Eq, l, r, ctx),
+    QualifiedPredicate::NotEquals(l, r) => eval_comparison_predicate(ComparisonOp::Ne, l, r, ctx),
+    QualifiedPredicate::LessThan(l, r) => eval_comparison_predicate(ComparisonOp::Lt, l, r, ctx),
     QualifiedPredicate::LessThanOrEquals(l, r) => {
-      let lv = resolve_operand(l, ctx);
-      let rv = resolve_operand(r, ctx);
-      eval_binary_op(ComparisonOp::Le, lv, rv)
+      eval_comparison_predicate(ComparisonOp::Le, l, r, ctx)
     }
-    QualifiedPredicate::GreaterThan(l, r) => {
-      let lv = resolve_operand(l, ctx);
-      let rv = resolve_operand(r, ctx);
-      eval_binary_op(ComparisonOp::Gt, lv, rv)
-    }
+    QualifiedPredicate::GreaterThan(l, r) => eval_comparison_predicate(ComparisonOp::Gt, l, r, ctx),
     QualifiedPredicate::GreaterThanOrEquals(l, r) => {
-      let lv = resolve_operand(l, ctx);
-      let rv = resolve_operand(r, ctx);
-      eval_binary_op(ComparisonOp::Ge, lv, rv)
+      eval_comparison_predicate(ComparisonOp::Ge, l, r, ctx)
     }
-    QualifiedPredicate::IsNull(qc) => {
-      matches!(
-        ctx.get_value(&qc.table, qc.column_index),
-        Some(EngineValue::Null)
-      )
-    }
-    QualifiedPredicate::IsNotNull(qc) => match ctx.get_value(&qc.table, qc.column_index) {
-      Some(EngineValue::Null) => false,
-      Some(_) => true,
-      None => false,
-    },
+    QualifiedPredicate::IsNull(qc) => eval_null_predicate(qc, false, ctx),
+    QualifiedPredicate::IsNotNull(qc) => eval_null_predicate(qc, true, ctx),
     QualifiedPredicate::InList {
       expr,
       list,
       negated,
-    } => {
-      let found = match ctx.get_value(&expr.table, expr.column_index) {
-        Some(v) => list.iter().any(|x| x == v),
-        None => false,
-      };
-      if *negated { !found } else { found }
-    }
+    } => eval_in_list_predicate(expr, list, *negated, ctx),
     QualifiedPredicate::InSubquery {
       expr,
       subquery,
       negated,
-    } => {
-      let lv = ctx.get_value(&expr.table, expr.column_index).cloned();
-      let key = format!("{:?}", subquery);
-      let found = match (lv, eval_ctx.subquery_cache.get(&key)) {
-        (Some(v), Some(s)) => s.contains(&v),
-        _ => false,
-      };
-      if *negated { !found } else { found }
-    }
+    } => eval_in_subquery_predicate(expr, subquery, *negated, ctx, eval_ctx),
     QualifiedPredicate::And(l, r) => {
       eval_predicate(l, ctx, eval_ctx) && eval_predicate(r, ctx, eval_ctx)
     }
@@ -227,20 +255,7 @@ pub fn eval_predicate(
       expr,
       pattern,
       negated,
-    } => {
-      let text = match resolve_operand(expr, ctx) {
-        Some(EngineValue::Text(s)) => s,
-        Some(EngineValue::Null) | None => return false,
-        Some(v) => format!("{:?}", v),
-      };
-      let pat = match resolve_operand(pattern, ctx) {
-        Some(EngineValue::Text(s)) => s,
-        Some(EngineValue::Null) | None => return false,
-        Some(v) => format!("{:?}", v),
-      };
-      let matched = like_matches(&text, &pat);
-      if *negated { !matched } else { matched }
-    }
+    } => eval_like_predicate(expr, pattern, *negated, ctx),
   }
 }
 

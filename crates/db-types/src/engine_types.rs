@@ -77,42 +77,91 @@ impl Eq for EngineValue {}
 
 impl Hash for EngineValue {
   fn hash<H: Hasher>(&self, state: &mut H) {
+    state.write_u8(self.discriminant_byte());
     match self {
-      EngineValue::Null => {
-        state.write_u8(0);
-      }
-      EngineValue::Integer(value) => {
-        state.write_u8(1);
-        state.write_i64(*value);
-      }
-      EngineValue::Float(value) => {
-        state.write_u8(2);
-        let canonical = if *value == 0.0 {
-          0_u64
-        } else if value.is_nan() {
-          f64::NAN.to_bits()
-        } else {
-          value.to_bits()
-        };
-        state.write_u64(canonical);
-      }
-      EngineValue::Text(value) => {
-        state.write_u8(3);
-        value.hash(state);
-      }
-      EngineValue::Uuid(value) => {
-        state.write_u8(4);
-        value.hash(state);
-      }
-      EngineValue::Blob(value) => {
-        state.write_u8(5);
-        value.hash(state);
-      }
-      EngineValue::Json(value) => {
-        state.write_u8(6);
-        value.hash(state);
-      }
+      EngineValue::Null => {}
+      EngineValue::Integer(value) => state.write_i64(*value),
+      EngineValue::Float(value) => state.write_u64(canonical_float_bits(*value)),
+      EngineValue::Text(value) => value.hash(state),
+      EngineValue::Uuid(value) => value.hash(state),
+      EngineValue::Blob(value) => value.hash(state),
+      EngineValue::Json(value) => value.hash(state),
     }
+  }
+}
+
+impl EngineValue {
+  fn discriminant_byte(&self) -> u8 {
+    match self {
+      EngineValue::Null => 0,
+      EngineValue::Integer(_) => 1,
+      EngineValue::Float(_) => 2,
+      EngineValue::Text(_) => 3,
+      EngineValue::Uuid(_) => 4,
+      EngineValue::Blob(_) => 5,
+      EngineValue::Json(_) => 6,
+    }
+  }
+
+  fn type_precedence(&self) -> u8 {
+    match self {
+      EngineValue::Null => 0,
+      EngineValue::Integer(_) => 1,
+      EngineValue::Float(_) => 2,
+      EngineValue::Text(_) => 3,
+      EngineValue::Uuid(_) => 4,
+      EngineValue::Blob(_) => 5,
+      EngineValue::Json(_) => 6,
+    }
+  }
+
+  fn cmp_same_type(&self, other: &Self) -> Ordering {
+    match (self, other) {
+      (EngineValue::Null, EngineValue::Null) => Ordering::Equal,
+      (EngineValue::Integer(left), EngineValue::Integer(right)) => left.cmp(right),
+      (EngineValue::Float(left), EngineValue::Float(right)) => compare_floats(*left, *right),
+      (EngineValue::Text(left), EngineValue::Text(right)) => left.cmp(right),
+      (EngineValue::Uuid(left), EngineValue::Uuid(right)) => left.cmp(right),
+      (EngineValue::Blob(left), EngineValue::Blob(right)) => left.cmp(right),
+      (EngineValue::Json(left), EngineValue::Json(right)) => left.cmp(right),
+      _ => self.type_precedence().cmp(&other.type_precedence()),
+    }
+  }
+
+  fn fmt_uuid(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    if let EngineValue::Uuid(value) = self {
+      for (i, byte) in value.iter().enumerate() {
+        if i == 4 || i == 6 || i == 8 || i == 10 {
+          write!(f, "-")?;
+        }
+        write!(f, "{:02x}", byte)?;
+      }
+      Ok(())
+    } else {
+      Err(fmt::Error)
+    }
+  }
+
+  fn fmt_blob(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    if let EngineValue::Blob(value) = self {
+      write!(f, "0x")?;
+      for byte in value {
+        write!(f, "{:02x}", byte)?;
+      }
+      Ok(())
+    } else {
+      Err(fmt::Error)
+    }
+  }
+}
+
+fn canonical_float_bits(value: f64) -> u64 {
+  if value == 0.0 {
+    0_u64
+  } else if value.is_nan() {
+    f64::NAN.to_bits()
+  } else {
+    value.to_bits()
   }
 }
 
@@ -141,44 +190,13 @@ fn compare_floats(left: f64, right: f64) -> Ordering {
 impl Ord for EngineValue {
   fn cmp(&self, other: &Self) -> Ordering {
     match (self, other) {
-      (EngineValue::Null, EngineValue::Null) => Ordering::Equal,
-      (EngineValue::Null, _) => Ordering::Less,
-      (_, EngineValue::Null) => Ordering::Greater,
-      (EngineValue::Integer(left), EngineValue::Integer(right)) => left.cmp(right),
-      (EngineValue::Float(left), EngineValue::Float(right)) => compare_floats(*left, *right),
       (EngineValue::Integer(left), EngineValue::Float(right)) => {
         compare_floats(*left as f64, *right)
       }
       (EngineValue::Float(left), EngineValue::Integer(right)) => {
         compare_floats(*left, *right as f64)
       }
-      (EngineValue::Text(left), EngineValue::Text(right)) => left.cmp(right),
-      (EngineValue::Uuid(left), EngineValue::Uuid(right)) => left.cmp(right),
-      (EngineValue::Blob(left), EngineValue::Blob(right)) => left.cmp(right),
-      (EngineValue::Json(left), EngineValue::Json(right)) => left.cmp(right),
-      (EngineValue::Integer(_), EngineValue::Text(_)) => Ordering::Less,
-      (EngineValue::Integer(_), EngineValue::Uuid(_)) => Ordering::Less,
-      (EngineValue::Integer(_), EngineValue::Blob(_)) => Ordering::Less,
-      (EngineValue::Integer(_), EngineValue::Json(_)) => Ordering::Less,
-      (EngineValue::Float(_), EngineValue::Text(_)) => Ordering::Less,
-      (EngineValue::Float(_), EngineValue::Uuid(_)) => Ordering::Less,
-      (EngineValue::Float(_), EngineValue::Blob(_)) => Ordering::Less,
-      (EngineValue::Float(_), EngineValue::Json(_)) => Ordering::Less,
-      (EngineValue::Text(_), EngineValue::Integer(_)) => Ordering::Greater,
-      (EngineValue::Text(_), EngineValue::Float(_)) => Ordering::Greater,
-      (EngineValue::Text(_), EngineValue::Uuid(_)) => Ordering::Less,
-      (EngineValue::Text(_), EngineValue::Blob(_)) => Ordering::Less,
-      (EngineValue::Text(_), EngineValue::Json(_)) => Ordering::Less,
-      (EngineValue::Uuid(_), EngineValue::Blob(_)) => Ordering::Less,
-      (EngineValue::Uuid(_), EngineValue::Json(_)) => Ordering::Less,
-      (EngineValue::Blob(_), EngineValue::Json(_)) => Ordering::Less,
-      (EngineValue::Json(_), EngineValue::Integer(_)) => Ordering::Greater,
-      (EngineValue::Json(_), EngineValue::Float(_)) => Ordering::Greater,
-      (EngineValue::Json(_), EngineValue::Text(_)) => Ordering::Greater,
-      (EngineValue::Json(_), EngineValue::Uuid(_)) => Ordering::Greater,
-      (EngineValue::Json(_), EngineValue::Blob(_)) => Ordering::Greater,
-      (EngineValue::Uuid(_), _) => Ordering::Greater,
-      (EngineValue::Blob(_), _) => Ordering::Greater,
+      _ => self.cmp_same_type(other),
     }
   }
 }
@@ -189,22 +207,8 @@ impl fmt::Display for EngineValue {
       EngineValue::Integer(value) => write!(f, "{}", value),
       EngineValue::Float(value) => write!(f, "{}", value),
       EngineValue::Text(value) => write!(f, "{}", value),
-      EngineValue::Uuid(value) => {
-        for (i, byte) in value.iter().enumerate() {
-          if i == 4 || i == 6 || i == 8 || i == 10 {
-            write!(f, "-")?;
-          }
-          write!(f, "{:02x}", byte)?;
-        }
-        Ok(())
-      }
-      EngineValue::Blob(value) => {
-        write!(f, "0x")?;
-        for byte in value {
-          write!(f, "{:02x}", byte)?;
-        }
-        Ok(())
-      }
+      EngineValue::Uuid(_) => self.fmt_uuid(f),
+      EngineValue::Blob(_) => self.fmt_blob(f),
       EngineValue::Json(value) => write!(f, "{}", value),
       EngineValue::Null => write!(f, "NULL"),
     }
