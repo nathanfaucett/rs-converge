@@ -547,6 +547,45 @@ mod tests {
       );
     });
   }
+
+  #[test]
+  fn row_trees_with_same_uuid_key_do_not_collide() {
+    block_on(async {
+      let store = store();
+      let key = key(vec![EngineValue::Uuid(
+        *uuid::Uuid::from_u128(1).as_bytes(),
+      )]);
+      let alice = row(vec![EngineValue::Text("alice".into())]);
+      let bob = row(vec![EngineValue::Text("bob".into())]);
+
+      {
+        let mut tx = store.begin_transaction().await.expect("begin users");
+        tx.insert("t:users", key.clone(), alice.clone())
+          .await
+          .expect("insert users");
+        tx.commit().await.expect("commit users");
+      }
+
+      {
+        let mut tx = store.begin_transaction().await.expect("begin orders");
+        tx.insert("t:orders", key.clone(), bob.clone())
+          .await
+          .expect("insert orders");
+        tx.commit().await.expect("commit orders");
+      }
+
+      let mut read = store.begin_transaction().await.expect("read");
+      assert_eq!(
+        read.get("t:users", &key).await.expect("get user"),
+        Some(alice)
+      );
+      assert_eq!(
+        read.get("t:orders", &key).await.expect("get order"),
+        Some(bob)
+      );
+    });
+  }
+
   #[test]
   fn named_transaction_range_returns_all_rows() {
     block_on(async {

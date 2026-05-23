@@ -14,16 +14,17 @@ use db_core::{
   BTree, BTreeError, BTreeExecutor, BTreeTransaction, NamedTreeProvider, NamedTreeTransaction,
 };
 use db_types::{
-  EngineKey, EngineValue,
+  EngineKey, EngineValue, StoreKey,
   key_encoding::{DefaultEncoding, RowEncoding},
 };
 
 use super::AutomergeEngineStore;
-use super::doc_payload::{clear_doc_fields, read_row_columns, set_row_columns};
-use super::key_in_range;
-use super::named_routing::{
-  doc_id_for_tree_key, is_row_tree, row_key_from_doc_id, tree_uuid_range,
+use super::doc_payload::{
+  clear_doc_fields, read_row_columns, read_store_key_metadata, set_row_columns,
+  set_store_key_metadata,
 };
+use super::key_in_range;
+use super::named_routing::{doc_id_for_tree_key, is_row_tree, tree_uuid_range};
 
 const NAMED_KEY_FIELD: &str = "named_key";
 const NAMED_VALUE_FIELD: &str = "value";
@@ -144,6 +145,13 @@ fn doc_tree(doc: &AutoCommit) -> Option<String> {
   }
 }
 
+fn row_key_from_doc(doc: &AutoCommit) -> Result<EngineKey, BTreeError> {
+  match read_store_key_metadata(doc)? {
+    Some(StoreKey::TableRow { primary_key, .. }) => Ok(primary_key),
+    _ => Err(BTreeError::UnsupportedOperation),
+  }
+}
+
 fn set_doc_tree(mut doc: AutoCommit, tree: &str) -> Result<AutoCommit, BTreeError> {
   doc
     .put(&automerge::ROOT, "tree", tree)
@@ -220,6 +228,14 @@ where
     if is_row_tree(tree) {
       let row = decode_row_bytes(&value)?;
       let mut doc = existing.unwrap_or_default();
+      clear_doc_fields(&mut doc)?;
+      set_store_key_metadata(
+        &mut doc,
+        &StoreKey::TableRow {
+          table_name: tree.strip_prefix("t:").unwrap_or(tree).to_string(),
+          primary_key: key.clone(),
+        },
+      )?;
       set_row_columns(&mut doc, &row)?;
       set_doc_tree(doc, tree)
     } else {
@@ -332,11 +348,7 @@ where
     R: core::ops::RangeBounds<EngineKey> + Send + 'a,
   {
     let row_tree = is_row_tree(tree);
-    let (tree_start, tree_end) = if row_tree {
-      (Uuid::from_u128(0), Uuid::from_u128(u128::MAX))
-    } else {
-      tree_uuid_range(tree)
-    };
+    let (tree_start, tree_end) = tree_uuid_range(tree);
     let tree_name = tree.to_string();
     let inner = &self.inner;
     stream! {
@@ -345,7 +357,7 @@ where
 
       let mut entries: alloc::vec::Vec<(EngineKey, Vec<u8>)> = alloc::vec::Vec::new();
       while let Some(item) = doc_stream.next().await {
-        let (doc_id, doc) = item?;
+        let (_, doc) = item?;
         if row_tree && doc_tree(&doc).as_deref() != Some(tree_name.as_str()) {
           continue;
         }
@@ -359,7 +371,7 @@ where
           if row.is_empty() {
             continue;
           }
-          entries.push((row_key_from_doc_id(doc_id), encode_row_bytes(&row)));
+          entries.push((row_key_from_doc(&doc)?, encode_row_bytes(&row)));
         } else {
           if let Ok(true) = is_named_tombstone(&doc) {
             continue;
