@@ -8,7 +8,6 @@
 - Prefer explicit imports and minimal dependencies.
 - Avoid glob imports and hard-coded absolute paths.
 - No non-essential comments; prefer refactoring over comments.
-- Use `cargo hack test --feature-powerset --all-targets` to run tests to ensure all features combinations are tested.
 
 ## Module Organization
 
@@ -29,3 +28,14 @@
 - Follow Rust's standard formatting and style guidelines.
 - Use `clippy` for linting and adhere to its recommendations.
 - Use `rustfmt` for consistent code formatting.
+
+## Testing
+
+- Write unit tests for all public functions and critical internal logic.
+- Use integration tests for testing public API behavior and interactions between modules.
+- Use `cargo hack test --feature-powerset --all-targets` to run tests to ensure all features combinations are tested.
+
+## CRAP (Complexity, Risk, and Priority)
+
+- Assess new features and changes for complexity, risk, and priority before implementation.
+- Use `cargo crap --all-targets` to evaluate code complexity and identify areas for refactoring.
