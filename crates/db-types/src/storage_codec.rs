@@ -106,6 +106,9 @@ mod tests {
     assert_eq!(decoded, value);
   }
 
+  #[cfg(not(feature = "std"))]
+  use alloc::vec;
+
   #[test]
   fn engine_row_round_trips() {
     let value = vec![

@@ -246,6 +246,8 @@ impl IndexSchema {
 mod tests {
   use super::*;
   use crate::key_encoding::{DefaultEncoding, KeyEncoding};
+  #[cfg(not(feature = "std"))]
+  use alloc::vec;
 
   fn sample_table() -> TableSchema {
     TableSchema {

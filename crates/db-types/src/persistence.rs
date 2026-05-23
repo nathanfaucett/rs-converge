@@ -237,6 +237,8 @@ mod tests {
   use crate::engine_types::EngineType;
   use crate::key_encoding::{DefaultEncoding, KeyEncoding};
   use crate::schema::ColumnSchema;
+  #[cfg(not(feature = "std"))]
+  use alloc::vec;
 
   #[test]
   fn schema_entry_keys_use_text_scalars() {

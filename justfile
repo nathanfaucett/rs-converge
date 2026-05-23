@@ -30,6 +30,9 @@ check:
 test:
     cargo test --workspace
 
+hack-test:
+    cargo hack test --feature-powerset --workspace --all-targets
+
 clippy:
     cargo clippy --workspace --all-targets -- -D warnings
 
@@ -50,9 +53,6 @@ fmt:
 
 fmt-check:
     cargo fmt --all -- --check
-
-hack-test:
-    cargo hack test --feature-powerset --workspace --all-targets
 
 clean:
     cargo clean

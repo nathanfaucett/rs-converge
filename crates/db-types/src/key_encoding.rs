@@ -175,6 +175,8 @@ impl RowEncoding for DefaultEncoding {
 #[cfg(test)]
 mod tests {
   use super::*;
+  #[cfg(not(feature = "std"))]
+  use alloc::vec;
 
   #[test]
   fn test_encode_decode_scalar() {
