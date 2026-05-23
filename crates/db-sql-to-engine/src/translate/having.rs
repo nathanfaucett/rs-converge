@@ -32,33 +32,81 @@ fn resolve_qc_for_having(
   crate::translate::helpers::resolve_column_local(expr, alias_map, table_schemas)
 }
 
+fn function_name(func: &sqlparser::ast::Function) -> String {
+  func.name.to_string().to_lowercase()
+}
+
+fn resolve_having_arg(
+  arg: &FunctionArg,
+  ctx: &HavingContext<'_>,
+) -> Result<Option<db_engine::QualifiedColumn>, TranslateError> {
+  match arg {
+    FunctionArg::Unnamed(FunctionArgExpr::Expr(arg_expr)) => Ok(Some(resolve_qc_for_having(
+      arg_expr,
+      ctx.alias_map,
+      ctx.table_schemas,
+    )?)),
+    FunctionArg::Unnamed(FunctionArgExpr::Wildcard) => Ok(None),
+    _ => Err(TranslateError::UnsupportedFeature(
+      "unsupported aggregate arg in HAVING".into(),
+    )),
+  }
+}
+
+fn aggregate_name(ag: &db_engine::Aggregate) -> &'static str {
+  match ag {
+    db_engine::Aggregate::Count(_) => "count",
+    db_engine::Aggregate::Sum(_) => "sum",
+    db_engine::Aggregate::Min(_) => "min",
+    db_engine::Aggregate::Max(_) => "max",
+    db_engine::Aggregate::Avg(_) => "avg",
+  }
+}
+
+fn aggregate_arg_matches(
+  ag: &db_engine::Aggregate,
+  arg_qc: &Option<db_engine::QualifiedColumn>,
+) -> bool {
+  match ag {
+    db_engine::Aggregate::Count(opt) => match (opt, arg_qc) {
+      (None, None) => true,
+      (Some(a), Some(q)) => a == q,
+      _ => false,
+    },
+    db_engine::Aggregate::Sum(a)
+    | db_engine::Aggregate::Min(a)
+    | db_engine::Aggregate::Max(a)
+    | db_engine::Aggregate::Avg(a) => Some(a) == arg_qc.as_ref(),
+  }
+}
+
+fn aggregate_matches(
+  ag: &db_engine::Aggregate,
+  func_name: &str,
+  arg_qc: &Option<db_engine::QualifiedColumn>,
+) -> bool {
+  func_name == aggregate_name(ag) && aggregate_arg_matches(ag, arg_qc)
+}
+
 fn find_agg_index(
   ctx: &HavingContext<'_>,
   func_name: &str,
   arg_qc: Option<db_engine::QualifiedColumn>,
 ) -> Option<usize> {
-  for (i, ag) in ctx.aggregates.iter().enumerate() {
-    match (ag, func_name) {
-      (db_engine::Aggregate::Count(opt), "count") => match (opt, &arg_qc) {
-        (None, None) => return Some(i),
-        (Some(a), Some(q)) if a == q => return Some(i),
-        _ => {}
-      },
-      (db_engine::Aggregate::Sum(a), "sum") if Some(a) == arg_qc.as_ref() => return Some(i),
-      (db_engine::Aggregate::Min(a), "min") if Some(a) == arg_qc.as_ref() => return Some(i),
-      (db_engine::Aggregate::Max(a), "max") if Some(a) == arg_qc.as_ref() => return Some(i),
-      (db_engine::Aggregate::Avg(a), "avg") if Some(a) == arg_qc.as_ref() => return Some(i),
-      _ => {}
+  ctx.aggregates.iter().enumerate().find_map(|(i, ag)| {
+    if aggregate_matches(ag, func_name, &arg_qc) {
+      Some(i)
+    } else {
+      None
     }
-  }
-  None
+  })
 }
 
 fn resolve_aggregate_ref(
   func: &sqlparser::ast::Function,
   ctx: &HavingContext<'_>,
 ) -> Result<db_engine::RefOrAgg, TranslateError> {
-  let fname = func.name.to_string().to_lowercase();
+  let fname = function_name(func);
   let first = fname.split('.').next().unwrap_or("");
   let args = match &func.args {
     FunctionArguments::List(list) => &list.args[..],
@@ -69,24 +117,14 @@ fn resolve_aggregate_ref(
       ));
     }
   };
-  if args.len() != 1 && !(first == "count" && args.len() == 1) {
+
+  if args.len() != 1 {
     return Err(TranslateError::UnsupportedFeature(
       "aggregate in HAVING must take one argument".into(),
     ));
   }
-  let arg_opt = match &args[0] {
-    FunctionArg::Unnamed(FunctionArgExpr::Expr(arg_expr)) => Some(resolve_qc_for_having(
-      arg_expr,
-      ctx.alias_map,
-      ctx.table_schemas,
-    )?),
-    FunctionArg::Unnamed(FunctionArgExpr::Wildcard) => None,
-    _ => {
-      return Err(TranslateError::UnsupportedFeature(
-        "unsupported aggregate arg in HAVING".into(),
-      ));
-    }
-  };
+
+  let arg_opt = resolve_having_arg(&args[0], ctx)?;
   if let Some(idx) = find_agg_index(ctx, first, arg_opt.clone()) {
     Ok(db_engine::RefOrAgg::AggregateIndex(idx))
   } else {
@@ -101,13 +139,18 @@ fn resolve_projection_alias_ref(
   ctx: &HavingContext<'_>,
 ) -> Result<db_engine::RefOrAgg, TranslateError> {
   if let Some(qc) = ctx.proj_alias_map.get(&ident.value) {
-    for (i, ag) in ctx.aggregates.iter().enumerate() {
-      match ag {
+    if let Some(index) = ctx
+      .aggregates
+      .iter()
+      .enumerate()
+      .find_map(|(i, ag)| match ag {
         db_engine::Aggregate::Count(opt) => {
           if let Some(arg) = opt
             && arg == qc
           {
-            return Ok(db_engine::RefOrAgg::AggregateIndex(i));
+            Some(i)
+          } else {
+            None
           }
         }
         db_engine::Aggregate::Sum(a)
@@ -115,11 +158,16 @@ fn resolve_projection_alias_ref(
         | db_engine::Aggregate::Max(a)
         | db_engine::Aggregate::Avg(a) => {
           if a == qc {
-            return Ok(db_engine::RefOrAgg::AggregateIndex(i));
+            Some(i)
+          } else {
+            None
           }
         }
-      }
+      })
+    {
+      return Ok(db_engine::RefOrAgg::AggregateIndex(index));
     }
+
     Ok(db_engine::RefOrAgg::Column(qc.clone()))
   } else {
     let qc = resolve_qc_for_having(
@@ -208,6 +256,22 @@ where
   ))
 }
 
+fn having_predicate_from_comparison(
+  op: &BinaryOperator,
+  lref: db_engine::RefOrAgg,
+  rval: db_engine::EngineValue,
+) -> db_engine::HavingPredicate {
+  match op {
+    BinaryOperator::Eq => db_engine::HavingPredicate::Equals(lref, rval),
+    BinaryOperator::NotEq => db_engine::HavingPredicate::NotEquals(lref, rval),
+    BinaryOperator::Lt => db_engine::HavingPredicate::LessThan(lref, rval),
+    BinaryOperator::LtEq => db_engine::HavingPredicate::LessThanOrEquals(lref, rval),
+    BinaryOperator::Gt => db_engine::HavingPredicate::GreaterThan(lref, rval),
+    BinaryOperator::GtEq => db_engine::HavingPredicate::GreaterThanOrEquals(lref, rval),
+    _ => unreachable!(),
+  }
+}
+
 fn translate_having_comparison(
   left: &SqlExpr,
   op: &BinaryOperator,
@@ -216,16 +280,7 @@ fn translate_having_comparison(
 ) -> Result<db_engine::HavingPredicate, TranslateError> {
   let lref = resolve_ref(left, ctx)?;
   let rval = resolve_having_literal(right, ctx)?;
-
-  Ok(match op {
-    BinaryOperator::Eq => db_engine::HavingPredicate::Equals(lref, rval),
-    BinaryOperator::NotEq => db_engine::HavingPredicate::NotEquals(lref, rval),
-    BinaryOperator::Lt => db_engine::HavingPredicate::LessThan(lref, rval),
-    BinaryOperator::LtEq => db_engine::HavingPredicate::LessThanOrEquals(lref, rval),
-    BinaryOperator::Gt => db_engine::HavingPredicate::GreaterThan(lref, rval),
-    BinaryOperator::GtEq => db_engine::HavingPredicate::GreaterThanOrEquals(lref, rval),
-    _ => unreachable!(),
-  })
+  Ok(having_predicate_from_comparison(op, lref, rval))
 }
 
 fn translate_having_unary(
@@ -257,5 +312,77 @@ pub fn expr_to_having_predicate(
     _ => Err(TranslateError::UnsupportedFeature(
       "unsupported HAVING expression".into(),
     )),
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use db_engine::{ColumnSchema, EngineType, RefOrAgg, TableSchema};
+  use sqlparser::ast::Ident;
+
+  struct StubResolver;
+  impl crate::translate::SchemaResolver for StubResolver {
+    fn describe_table(&self, _name: &str) -> Option<TableSchema> {
+      None
+    }
+  }
+
+  #[test]
+  fn having_predicate_from_comparison_builds_predicate() {
+    let lref = RefOrAgg::Column(db_engine::QualifiedColumn {
+      table: "t".into(),
+      column_index: 0,
+    });
+    let rval = db_engine::EngineValue::Integer(1);
+
+    let pred = having_predicate_from_comparison(&BinaryOperator::Eq, lref, rval.clone());
+
+    match pred {
+      db_engine::HavingPredicate::Equals(r, v) => {
+        match r {
+          RefOrAgg::Column(qc) => assert_eq!(qc.column_index, 0),
+          _ => panic!("expected column ref"),
+        }
+        assert_eq!(v, rval);
+      }
+      _ => panic!("expected Equals predicate"),
+    }
+  }
+
+  #[test]
+  fn expr_to_having_predicate_resolves_is_null() {
+    let table_schema = TableSchema {
+      name: "t".into(),
+      columns: vec![ColumnSchema {
+        name: "name".into(),
+        data_type: EngineType::Text,
+      }],
+      primary_key: vec![],
+    };
+    let mut table_schemas = HashMap::new();
+    table_schemas.insert("t".into(), table_schema);
+
+    let group_by = Vec::new();
+    let aggregates = Vec::new();
+    let proj_alias_map = HashMap::new();
+    let alias_map = HashMap::new();
+    let mapper = crate::translate::DefaultValueMapper;
+    let resolver = StubResolver;
+    let ctx = HavingContext {
+      group_by: &group_by,
+      aggregates: &aggregates,
+      proj_alias_map: &proj_alias_map,
+      alias_map: &alias_map,
+      table_schemas: &table_schemas,
+      resolver: &resolver,
+      mapper: &mapper,
+    };
+
+    let expr = SqlExpr::IsNull(Box::new(SqlExpr::Identifier(Ident::new("name"))));
+
+    let predicate = expr_to_having_predicate(&expr, &ctx).expect("should translate HAVING expr");
+
+    assert!(matches!(predicate, db_engine::HavingPredicate::IsNull(_)));
   }
 }

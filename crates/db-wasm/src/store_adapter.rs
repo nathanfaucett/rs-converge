@@ -1,11 +1,12 @@
 use async_stream::stream;
 use core::fmt;
+use core::future::Future;
 use core::ops::{Bound, RangeBounds};
 use db_core::{BTreeError, BTreeResult, MaybeSend, NamedTreeProvider, NamedTreeTransaction};
 use db_engine::{EngineKey, PrimaryKey};
 use db_types::key_encoding::{DefaultEncoding, KeyEncoding, RowEncoding};
 use db_types::persistence::decode_index_schema_row;
-use futures::Stream;
+use futures::{Stream, future::LocalBoxFuture};
 use js_sys::{Function, JSON, Promise, Reflect};
 use serde::de::{DeserializeOwned, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
@@ -238,6 +239,83 @@ struct BackendTransactionHandles {
   rollback: Function,
 }
 
+impl BackendTransactionHandles {
+  fn load_handles<const N: usize>(value: &JsValue, names: [&str; N]) -> BTreeResult<[Function; N]> {
+    let mut handles = Vec::with_capacity(N);
+    for name in names {
+      handles.push(load_required_function(value, name).map_err(serde_error)?);
+    }
+    handles
+      .try_into()
+      .map_err(|_| serde_error("internal handle loading error"))
+  }
+
+  fn load_row_handles(value: &JsValue) -> BTreeResult<[Function; 4]> {
+    Self::load_handles(value, ["getRow", "putRow", "deleteRow", "rangeRows"])
+  }
+
+  fn load_index_handles(value: &JsValue) -> BTreeResult<[Function; 3]> {
+    Self::load_handles(value, ["addIndex", "removeIndex", "rangeIndex"])
+  }
+
+  fn load_schema_handles(value: &JsValue) -> BTreeResult<[Function; 8]> {
+    Self::load_handles(
+      value,
+      [
+        "getTableSchema",
+        "putTableSchema",
+        "deleteTableSchema",
+        "rangeTableSchemas",
+        "getIndexSchema",
+        "putIndexSchema",
+        "deleteIndexSchema",
+        "rangeIndexSchemas",
+      ],
+    )
+  }
+
+  fn load_tx_handles(value: &JsValue) -> BTreeResult<[Function; 2]> {
+    Self::load_handles(value, ["commit", "rollback"])
+  }
+
+  fn load_from_js(value: JsValue) -> BTreeResult<Self> {
+    let [get_row, put_row, delete_row, range_rows] = Self::load_row_handles(&value)?;
+    let [add_index, remove_index, range_index] = Self::load_index_handles(&value)?;
+    let [
+      get_table_schema,
+      put_table_schema,
+      delete_table_schema,
+      range_table_schemas,
+      get_index_schema,
+      put_index_schema,
+      delete_index_schema,
+      range_index_schemas,
+    ] = Self::load_schema_handles(&value)?;
+    let [commit, rollback] = Self::load_tx_handles(&value)?;
+
+    Ok(Self {
+      value,
+      get_row,
+      put_row,
+      delete_row,
+      range_rows,
+      add_index,
+      remove_index,
+      range_index,
+      get_table_schema,
+      put_table_schema,
+      delete_table_schema,
+      range_table_schemas,
+      get_index_schema,
+      put_index_schema,
+      delete_index_schema,
+      range_index_schemas,
+      commit,
+      rollback,
+    })
+  }
+}
+
 struct BackendTransaction {
   handles: Rc<RefCell<BackendTransactionHandles>>,
 }
@@ -466,6 +544,23 @@ where
   start_ok && end_ok
 }
 
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use db_engine::EngineValue;
+
+  #[test]
+  fn key_in_range_inclusive_and_exclusive_bounds() {
+    let key = <DefaultEncoding as KeyEncoding>::encode_values(&[EngineValue::Text("m".into())]);
+    let start = <DefaultEncoding as KeyEncoding>::encode_values(&[EngineValue::Text("a".into())]);
+    let end = <DefaultEncoding as KeyEncoding>::encode_values(&[EngineValue::Text("z".into())]);
+
+    assert!(key_in_range(&key, &(start.clone()..=end.clone())));
+    assert!(key_in_range(&key, &(start.clone()..)));
+    assert!(!key_in_range(&key, &(..end.clone())));
+  }
+}
+
 impl StoreAdapterCallbacks {
   fn row_table_name<'a>(&self, tree: &'a str) -> Option<&'a str> {
     if self.index_name(tree).is_some() {
@@ -515,6 +610,74 @@ impl StoreAdapterCallbacks {
     match values.as_slice() {
       [db_engine::EngineValue::Uuid(bytes)] => Ok(PrimaryKey::new(*bytes)),
       _ => Err(serde_error("row primary key must be UUID scalar")),
+    }
+  }
+
+  fn tx_handles(&self, tx: &BackendTransaction) -> (BackendTransactionHandles, JsValue) {
+    let handles = tx.handles.borrow();
+    (handles.clone(), handles.value.clone())
+  }
+
+  fn primary_key_range_request<R>(&self, range: &R) -> BTreeResult<PrimaryKeyRangeRequest>
+  where
+    R: RangeBounds<EngineKey>,
+  {
+    Ok(PrimaryKeyRangeRequest {
+      start: match range.start_bound() {
+        Bound::Included(key) | Bound::Excluded(key) => Some(self.primary_key_from_engine_key(key)?),
+        Bound::Unbounded => None,
+      },
+      start_inclusive: matches!(range.start_bound(), Bound::Included(_)),
+      end: match range.end_bound() {
+        Bound::Included(key) | Bound::Excluded(key) => Some(self.primary_key_from_engine_key(key)?),
+        Bound::Unbounded => None,
+      },
+      end_inclusive: matches!(range.end_bound(), Bound::Included(_)),
+    })
+  }
+
+  fn index_range_request<R>(&self, index_name: &str, range: &R) -> BTreeResult<IndexRangeRequest>
+  where
+    R: RangeBounds<EngineKey>,
+  {
+    Ok(IndexRangeRequest {
+      start: match range.start_bound() {
+        Bound::Included(key) | Bound::Excluded(key) => self
+          .split_composite_index_key(index_name, key)
+          .ok()
+          .map(|(index_key, _)| index_key),
+        Bound::Unbounded => None,
+      },
+      start_inclusive: matches!(range.start_bound(), Bound::Included(_)),
+      end: match range.end_bound() {
+        Bound::Included(key) | Bound::Excluded(key) => self
+          .split_composite_index_key(index_name, key)
+          .ok()
+          .map(|(index_key, _)| index_key),
+        Bound::Unbounded => None,
+      },
+      end_inclusive: matches!(range.end_bound(), Bound::Included(_)),
+    })
+  }
+
+  async fn with_tx<R, F>(&self, commit_on_success: bool, f: F) -> BTreeResult<R>
+  where
+    for<'a> F: FnOnce(&'a BackendTransaction) -> LocalBoxFuture<'a, BTreeResult<R>>,
+  {
+    let tx = self.begin_backend_transaction(commit_on_success).await?;
+    match f(&tx).await {
+      Ok(value) => {
+        if commit_on_success {
+          tx.commit().await?;
+        } else {
+          tx.rollback().await?;
+        }
+        Ok(value)
+      }
+      Err(err) => {
+        let _ = tx.rollback().await;
+        Err(err)
+      }
     }
   }
 
@@ -574,38 +737,6 @@ impl StoreAdapterCallbacks {
     {
       let _ = guard.remove(index_name);
     }
-  }
-
-  fn load_backend_transaction_handles(
-    &self,
-    value: JsValue,
-  ) -> BTreeResult<BackendTransactionHandles> {
-    macro_rules! load_fn {
-      ($name:expr) => {
-        load_required_function(&value, $name).map_err(serde_error)?
-      };
-    }
-
-    Ok(BackendTransactionHandles {
-      value,
-      get_row: load_fn!("getRow"),
-      put_row: load_fn!("putRow"),
-      delete_row: load_fn!("deleteRow"),
-      range_rows: load_fn!("rangeRows"),
-      add_index: load_fn!("addIndex"),
-      remove_index: load_fn!("removeIndex"),
-      range_index: load_fn!("rangeIndex"),
-      get_table_schema: load_fn!("getTableSchema"),
-      put_table_schema: load_fn!("putTableSchema"),
-      delete_table_schema: load_fn!("deleteTableSchema"),
-      range_table_schemas: load_fn!("rangeTableSchemas"),
-      get_index_schema: load_fn!("getIndexSchema"),
-      put_index_schema: load_fn!("putIndexSchema"),
-      delete_index_schema: load_fn!("deleteIndexSchema"),
-      range_index_schemas: load_fn!("rangeIndexSchemas"),
-      commit: load_fn!("commit"),
-      rollback: load_fn!("rollback"),
-    })
   }
 
   async fn tx_get_table_schema(
@@ -899,24 +1030,7 @@ impl StoreAdapterCallbacks {
   where
     R: RangeBounds<EngineKey>,
   {
-    let request = PrimaryKeyRangeRequest {
-      start: match range.start_bound() {
-        Bound::Included(key) | Bound::Excluded(key) => {
-          let pk = self.primary_key_from_engine_key(key)?;
-          Some(pk)
-        }
-        Bound::Unbounded => None,
-      },
-      start_inclusive: matches!(range.start_bound(), Bound::Included(_)),
-      end: match range.end_bound() {
-        Bound::Included(key) | Bound::Excluded(key) => {
-          let pk = self.primary_key_from_engine_key(key)?;
-          Some(pk)
-        }
-        Bound::Unbounded => None,
-      },
-      end_inclusive: matches!(range.end_bound(), Bound::Included(_)),
-    };
+    let request = self.primary_key_range_request(range)?;
 
     let table_js = JsValue::from_str(table);
     let req_js = to_js(&request)?;
@@ -943,24 +1057,7 @@ impl StoreAdapterCallbacks {
   where
     R: RangeBounds<EngineKey>,
   {
-    let request = IndexRangeRequest {
-      start: match range.start_bound() {
-        Bound::Included(key) | Bound::Excluded(key) => self
-          .split_composite_index_key(index_name, key)
-          .ok()
-          .map(|(index_key, _)| index_key),
-        Bound::Unbounded => None,
-      },
-      start_inclusive: matches!(range.start_bound(), Bound::Included(_)),
-      end: match range.end_bound() {
-        Bound::Included(key) | Bound::Excluded(key) => self
-          .split_composite_index_key(index_name, key)
-          .ok()
-          .map(|(index_key, _)| index_key),
-        Bound::Unbounded => None,
-      },
-      end_inclusive: matches!(range.end_bound(), Bound::Included(_)),
-    };
+    let request = self.index_range_request(index_name, range)?;
 
     let index_js = JsValue::from_str(index_name);
     let req_js = to_js(&request)?;
@@ -1003,7 +1100,7 @@ impl StoreAdapterCallbacks {
       return Err(serde_error("beginTransaction returned null or undefined"));
     }
 
-    let handles = self.load_backend_transaction_handles(value)?;
+    let handles = BackendTransactionHandles::load_from_js(value)?;
 
     Ok(BackendTransaction {
       handles: Rc::new(RefCell::new(handles)),
@@ -1071,10 +1168,23 @@ impl StoreAdapterCallbacks {
   }
 
   async fn callback_get(&self, tree: &str, key: &EngineKey) -> BTreeResult<Option<Vec<u8>>> {
+    let tree = tree.to_string();
+    let key = key.clone();
     let tx = self.begin_backend_transaction(false).await?;
-    match self.tx_get(&tx, tree, key).await {
+    let result = self.tx_get(&tx, &tree, &key).await;
+    let _ = tx.rollback().await;
+    result
+  }
+
+  async fn callback_insert(&self, tree: &str, key: &EngineKey, row: &[u8]) -> BTreeResult<()> {
+    let tree = tree.to_string();
+    let key = key.clone();
+    let row = row.to_vec();
+    let tx = self.begin_backend_transaction(true).await?;
+    let result = self.tx_insert(&tx, &tree, &key, &row).await;
+    match result {
       Ok(value) => {
-        tx.rollback().await?;
+        tx.commit().await?;
         Ok(value)
       }
       Err(err) => {
@@ -1084,20 +1194,12 @@ impl StoreAdapterCallbacks {
     }
   }
 
-  async fn callback_insert(&self, tree: &str, key: &EngineKey, row: &[u8]) -> BTreeResult<()> {
-    let tx = self.begin_backend_transaction(true).await?;
-    match self.tx_insert(&tx, tree, key, row).await {
-      Ok(()) => tx.commit().await,
-      Err(err) => {
-        let _ = tx.rollback().await;
-        Err(err)
-      }
-    }
-  }
-
   async fn callback_remove(&self, tree: &str, key: &EngineKey) -> BTreeResult<Option<Vec<u8>>> {
+    let tree = tree.to_string();
+    let key = key.clone();
     let tx = self.begin_backend_transaction(true).await?;
-    match self.tx_remove(&tx, tree, key).await {
+    let result = self.tx_remove(&tx, &tree, &key).await;
+    match result {
       Ok(value) => {
         tx.commit().await?;
         Ok(value)
@@ -1113,17 +1215,11 @@ impl StoreAdapterCallbacks {
   where
     R: RangeBounds<EngineKey>,
   {
+    let tree = tree.to_string();
     let tx = self.begin_backend_transaction(false).await?;
-    match self.tx_range(&tx, tree, range).await {
-      Ok(value) => {
-        tx.rollback().await?;
-        Ok(value)
-      }
-      Err(err) => {
-        let _ = tx.rollback().await;
-        Err(err)
-      }
-    }
+    let result = self.tx_range(&tx, &tree, range).await;
+    let _ = tx.rollback().await;
+    result
   }
 }
 

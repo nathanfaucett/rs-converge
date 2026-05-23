@@ -231,6 +231,19 @@ pub struct SelectOptions {
   pub having: Option<HavingPredicate>,
 }
 
+impl SelectOptions {
+  pub fn is_simple(&self) -> bool {
+    self.joins.is_empty()
+      && self.aggregates.is_empty()
+      && self.group_by.is_empty()
+      && self.order_by.is_empty()
+      && self.limit.is_none()
+      && self.offset.is_none()
+      && !self.distinct
+      && self.having.is_none()
+  }
+}
+
 #[derive(Debug, Clone)]
 #[cfg_attr(
   feature = "wasm",
@@ -512,5 +525,20 @@ mod tests {
       EngineQuery::Select { .. } => {}
       _ => panic!("expected Select variant"),
     }
+  }
+
+  #[test]
+  fn select_options_is_simple_and_non_simple() {
+    let mut options = SelectOptions::default();
+    assert!(options.is_simple());
+
+    options.order_by.push(OrderBy {
+      expr: QualifiedColumn {
+        table: "users".into(),
+        column_index: 0,
+      },
+      direction: SortDirection::Asc,
+    });
+    assert!(!options.is_simple());
   }
 }

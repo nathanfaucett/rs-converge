@@ -253,7 +253,7 @@ impl Aggregator {
     out_rows
   }
 
-  fn apply_order_by(&self, out_rows: &mut Vec<EngineRow>) -> Result<(), EngineError> {
+  fn apply_order_by(&self, out_rows: &mut [EngineRow]) -> Result<(), EngineError> {
     if self.order_by.is_empty() {
       return Ok(());
     }

@@ -104,15 +104,7 @@ impl EngineValue {
   }
 
   fn type_precedence(&self) -> u8 {
-    match self {
-      EngineValue::Null => 0,
-      EngineValue::Integer(_) => 1,
-      EngineValue::Float(_) => 2,
-      EngineValue::Text(_) => 3,
-      EngineValue::Uuid(_) => 4,
-      EngineValue::Blob(_) => 5,
-      EngineValue::Json(_) => 6,
-    }
+    self.discriminant_byte()
   }
 
   fn cmp_same_type(&self, other: &Self) -> Ordering {
@@ -128,15 +120,27 @@ impl EngineValue {
     }
   }
 
+  fn fmt_uuid_bytes(bytes: &[u8], f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    for (i, byte) in bytes.iter().enumerate() {
+      if matches!(i, 4 | 6 | 8 | 10) {
+        write!(f, "-")?;
+      }
+      write!(f, "{:02x}", byte)?;
+    }
+    Ok(())
+  }
+
+  fn fmt_blob_bytes(bytes: &[u8], f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(f, "0x")?;
+    for byte in bytes {
+      write!(f, "{:02x}", byte)?;
+    }
+    Ok(())
+  }
+
   fn fmt_uuid(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     if let EngineValue::Uuid(value) = self {
-      for (i, byte) in value.iter().enumerate() {
-        if i == 4 || i == 6 || i == 8 || i == 10 {
-          write!(f, "-")?;
-        }
-        write!(f, "{:02x}", byte)?;
-      }
-      Ok(())
+      Self::fmt_uuid_bytes(value, f)
     } else {
       Err(fmt::Error)
     }
@@ -144,11 +148,7 @@ impl EngineValue {
 
   fn fmt_blob(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     if let EngineValue::Blob(value) = self {
-      write!(f, "0x")?;
-      for byte in value {
-        write!(f, "{:02x}", byte)?;
-      }
-      Ok(())
+      Self::fmt_blob_bytes(value, f)
     } else {
       Err(fmt::Error)
     }

@@ -519,40 +519,29 @@ fn sql_type_to_engine_type(data_type: &DataType) -> Result<db_engine::EngineType
   Ok(ty)
 }
 
-/// Translate a `sqlparser` `CREATE INDEX` into an engine `IndexSchema`.
-fn translate_create_index(
-  create_index: &CreateIndex,
-  resolver: &dyn SchemaResolver,
-) -> Result<db_engine::IndexSchema, TranslateError> {
-  let table_name = object_name_to_string(&create_index.table_name);
-  let table_schema = resolver
-    .describe_table(&table_name)
-    .ok_or_else(|| TranslateError::UnknownTable(table_name.clone()))?;
-
-  let index_name = if let Some(name) = &create_index.name {
-    object_name_to_string(name)
-  } else {
-    return Err(TranslateError::UnsupportedFeature(
-      "CREATE INDEX without explicit name is unsupported".into(),
-    ));
-  };
-
-  let mut column_indices = Vec::new();
-  for index_column in &create_index.columns {
-    let column_name = match &index_column.column.expr {
-      SqlExpr::Identifier(ident) => ident.value.clone(),
-      SqlExpr::CompoundIdentifier(idents) => idents
+fn resolve_index_column_name(expr: &SqlExpr) -> Result<String, TranslateError> {
+  match expr {
+    SqlExpr::Identifier(ident) => Ok(ident.value.clone()),
+    SqlExpr::CompoundIdentifier(idents) => Ok(
+      idents
         .iter()
         .map(|ident| ident.value.clone())
         .collect::<Vec<_>>()
         .join("."),
-      other => {
-        return Err(TranslateError::UnsupportedFeature(format!(
-          "unsupported index column expression: {other:?}"
-        )));
-      }
-    };
+    ),
+    other => Err(TranslateError::UnsupportedFeature(format!(
+      "unsupported index column expression: {other:?}"
+    ))),
+  }
+}
 
+fn resolve_index_column_indices(
+  create_index: &CreateIndex,
+  table_schema: &db_engine::TableSchema,
+) -> Result<Vec<usize>, TranslateError> {
+  let mut column_indices = Vec::with_capacity(create_index.columns.len());
+  for index_column in &create_index.columns {
+    let column_name = resolve_index_column_name(&index_column.column.expr)?;
     let idx = table_schema
       .columns
       .iter()
@@ -566,6 +555,29 @@ fn translate_create_index(
       "CREATE INDEX must specify at least one column".into(),
     ));
   }
+
+  Ok(column_indices)
+}
+
+/// Translate a `sqlparser` `CREATE INDEX` into an engine `IndexSchema`.
+fn translate_create_index(
+  create_index: &CreateIndex,
+  resolver: &dyn SchemaResolver,
+) -> Result<db_engine::IndexSchema, TranslateError> {
+  let table_name = object_name_to_string(&create_index.table_name);
+  let table_schema = resolver
+    .describe_table(&table_name)
+    .ok_or_else(|| TranslateError::UnknownTable(table_name.clone()))?;
+
+  let index_name = create_index
+    .name
+    .as_ref()
+    .map(object_name_to_string)
+    .ok_or_else(|| {
+      TranslateError::UnsupportedFeature("CREATE INDEX without explicit name is unsupported".into())
+    })?;
+
+  let column_indices = resolve_index_column_indices(create_index, &table_schema)?;
 
   Ok(db_engine::IndexSchema {
     name: index_name,

@@ -378,14 +378,14 @@ impl HavingPredicate {
 
   fn ref_or_agg(&self) -> &RefOrAgg {
     match self {
-      HavingPredicate::Equals(r, _) => r,
-      HavingPredicate::NotEquals(r, _) => r,
-      HavingPredicate::LessThan(r, _) => r,
-      HavingPredicate::LessThanOrEquals(r, _) => r,
-      HavingPredicate::GreaterThan(r, _) => r,
-      HavingPredicate::GreaterThanOrEquals(r, _) => r,
-      HavingPredicate::IsNull(r) => r,
-      HavingPredicate::IsNotNull(r) => r,
+      HavingPredicate::Equals(r, _)
+      | HavingPredicate::NotEquals(r, _)
+      | HavingPredicate::LessThan(r, _)
+      | HavingPredicate::LessThanOrEquals(r, _)
+      | HavingPredicate::GreaterThan(r, _)
+      | HavingPredicate::GreaterThanOrEquals(r, _)
+      | HavingPredicate::IsNull(r)
+      | HavingPredicate::IsNotNull(r) => r,
       _ => unreachable!(),
     }
   }
@@ -676,6 +676,36 @@ mod tests {
       table: "t",
       row: &row,
     };
+    assert!(eval_predicate(&pred, &ctx, &EvalContext::empty()));
+  }
+
+  #[test]
+  fn like_match_patterns() {
+    assert!(like_matches("hello", "h%o"));
+    assert!(like_matches("hello", "h_llo"));
+    assert!(like_matches("hello", "%llo"));
+    assert!(!like_matches("hello", "h_oo"));
+    assert!(like_matches("", "%"));
+    assert!(!like_matches("", "_"));
+  }
+
+  #[test]
+  fn eval_like_predicate_for_column_text() {
+    let row = vec![EngineValue::Text("hello".into())];
+    let ctx = SingleRowContext {
+      table: "t",
+      row: &row,
+    };
+
+    let pred = QualifiedPredicate::Like {
+      expr: QualifiedOperand::Column(QualifiedColumn {
+        table: "t".into(),
+        column_index: 0,
+      }),
+      pattern: QualifiedOperand::Value(EngineValue::Text("h%o".into())),
+      negated: false,
+    };
+
     assert!(eval_predicate(&pred, &ctx, &EvalContext::empty()));
   }
 }

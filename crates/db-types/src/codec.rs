@@ -42,33 +42,49 @@ pub fn decode_engine_type(cursor: &mut Cursor<'_>) -> Result<EngineType, DecodeE
   }
 }
 
+fn encode_engine_value_null<S: BufferSink>(sink: &mut S) {
+  sink.push_bytes(&[0]);
+}
+
+fn encode_engine_value_integer<S: BufferSink>(sink: &mut S, integer: i64) {
+  sink.push_bytes(&[1]);
+  encode_i64_into_sink(sink, integer);
+}
+
+fn encode_engine_value_float<S: BufferSink>(sink: &mut S, float: f64) {
+  sink.push_bytes(&[2]);
+  canonical_f64_bits_into_sink(sink, float);
+}
+
+fn encode_engine_value_text<S: BufferSink>(sink: &mut S, text: &str) {
+  sink.push_bytes(&[3]);
+  encode_string_into_sink(sink, text);
+}
+
+fn encode_engine_value_blob<S: BufferSink>(sink: &mut S, bytes: &[u8]) {
+  sink.push_bytes(&[4]);
+  encode_bytes_into_sink(sink, bytes);
+}
+
+fn encode_engine_value_uuid<S: BufferSink>(sink: &mut S, bytes: &[u8]) {
+  sink.push_bytes(&[5]);
+  sink.push_bytes(bytes);
+}
+
+fn encode_engine_value_json<S: BufferSink>(sink: &mut S, json: &str) {
+  sink.push_bytes(&[6]);
+  encode_string_into_sink(sink, json);
+}
+
 pub fn encode_engine_value_into_sink<S: BufferSink>(sink: &mut S, value: &EngineValue) {
   match value {
-    EngineValue::Null => sink.push_bytes(&[0]),
-    EngineValue::Integer(integer) => {
-      sink.push_bytes(&[1]);
-      encode_i64_into_sink(sink, *integer);
-    }
-    EngineValue::Float(float) => {
-      sink.push_bytes(&[2]);
-      canonical_f64_bits_into_sink(sink, *float);
-    }
-    EngineValue::Text(text) => {
-      sink.push_bytes(&[3]);
-      encode_string_into_sink(sink, text);
-    }
-    EngineValue::Blob(bytes) => {
-      sink.push_bytes(&[4]);
-      encode_bytes_into_sink(sink, bytes);
-    }
-    EngineValue::Uuid(bytes) => {
-      sink.push_bytes(&[5]);
-      sink.push_bytes(bytes);
-    }
-    EngineValue::Json(json) => {
-      sink.push_bytes(&[6]);
-      encode_string_into_sink(sink, json);
-    }
+    EngineValue::Null => encode_engine_value_null(sink),
+    EngineValue::Integer(integer) => encode_engine_value_integer(sink, *integer),
+    EngineValue::Float(float) => encode_engine_value_float(sink, *float),
+    EngineValue::Text(text) => encode_engine_value_text(sink, text),
+    EngineValue::Blob(bytes) => encode_engine_value_blob(sink, bytes),
+    EngineValue::Uuid(bytes) => encode_engine_value_uuid(sink, bytes),
+    EngineValue::Json(json) => encode_engine_value_json(sink, json),
   }
 }
 
@@ -301,4 +317,30 @@ pub fn encode_store_key(buffer: &mut Vec<u8>, value: &StoreKey) {
 
 pub fn encode_store_value(buffer: &mut Vec<u8>, value: &StoreValue) {
   encode_with_version(buffer, |b| encode_store_value_into_sink(b, value));
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::engine_types::EngineValue;
+
+  #[test]
+  fn encode_engine_value_into_sink_variants() {
+    let uuid = [1_u8; 16];
+    let values = vec![
+      EngineValue::Null,
+      EngineValue::Integer(42),
+      EngineValue::Float(3.14),
+      EngineValue::Text("hello".into()),
+      EngineValue::Blob(vec![0, 1, 2, 3]),
+      EngineValue::Uuid(uuid),
+      EngineValue::Json("{\"x\":1}".into()),
+    ];
+
+    for value in values {
+      let mut out = Vec::new();
+      encode_engine_value_into_sink(&mut out, &value);
+      assert!(!out.is_empty(), "encoded bytes should not be empty");
+    }
+  }
 }

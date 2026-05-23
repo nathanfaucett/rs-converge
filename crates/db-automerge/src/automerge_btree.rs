@@ -100,6 +100,31 @@ where
 
     Some(state)
   }
+
+  async fn remove_document_keys_atomic(
+    &mut self,
+    start: DocumentChangeKey,
+    end: DocumentChangeKey,
+  ) -> Result<(), BTreeError> {
+    let mut tx = self.inner.transaction().await?;
+    let keys_to_remove = collect_range_keys(tx.range(start.clone()..=end.clone())).await?;
+    for key in keys_to_remove {
+      tx.remove(&key).await?;
+    }
+    tx.commit().await
+  }
+
+  async fn remove_document_keys_fallback(
+    &mut self,
+    start: DocumentChangeKey,
+    end: DocumentChangeKey,
+  ) -> Result<(), BTreeError> {
+    let keys_to_remove = collect_range_keys(self.inner.range(start..=end)).await?;
+    for key in keys_to_remove {
+      let _ = self.inner.remove(&key).await;
+    }
+    Ok(())
+  }
 }
 
 #[allow(clippy::needless_lifetimes)]
@@ -138,28 +163,14 @@ where
     Q: Borrow<Uuid> + MaybeSend + 'a,
   {
     let doc_id = *key.borrow();
-    // capture previous state
     let prev = self.get_document(doc_id).await;
-
-    // Prefer atomic removal via transaction on the underlying tree.
     let (start, end) = document_entry_bounds(doc_id);
 
-    match self.inner.transaction().await {
-      Ok(mut tx) => {
-        let keys_to_remove = collect_range_keys(tx.range(start.clone()..=end.clone())).await?;
-        for k in keys_to_remove {
-          tx.remove(&k).await?;
-        }
-        tx.commit().await?;
-      }
-      Err(_) => {
-        // Fallback: non-atomic removal by iterating the main tree.
-        let keys_to_remove =
-          collect_range_keys(self.inner.range(start.clone()..=end.clone())).await?;
-        for k in keys_to_remove {
-          let _ = self.inner.remove(&k).await;
-        }
-      }
+    if let Err(_) = self
+      .remove_document_keys_atomic(start.clone(), end.clone())
+      .await
+    {
+      let _ = self.remove_document_keys_fallback(start, end).await;
     }
 
     match prev {

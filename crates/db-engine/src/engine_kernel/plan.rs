@@ -85,16 +85,7 @@ impl LogicalPlan {
 
   pub fn is_simple_select(&self) -> bool {
     match self {
-      LogicalPlan::Select { options, .. } => {
-        options.joins.is_empty()
-          && options.aggregates.is_empty()
-          && options.group_by.is_empty()
-          && options.order_by.is_empty()
-          && options.limit.is_none()
-          && options.offset.is_none()
-          && !options.distinct
-          && options.having.is_none()
-      }
+      LogicalPlan::Select { options, .. } => options.is_simple(),
       _ => false,
     }
   }
