@@ -14,20 +14,17 @@ use db_types::{StoreKey, StoreValue};
 mod doc_payload;
 mod named;
 mod named_routing;
-mod snapshot;
 
 use doc_payload::{
   is_direct_document, is_tombstone, read_direct_document_entry, read_row_columns,
   read_store_key_metadata, set_doc_value, set_row_columns, set_store_key_metadata, set_tombstone,
-  snapshot_bytes,
 };
 pub use named::{AutomergeNamedTransaction, AutomergeNamedTree, AutomergeNamedTreeTransaction};
-use snapshot::{StoreSnapshotAdapter, find_entry, key_in_range, parse_entries};
 
 /// Automerge-backed engine store: each logical collection (table/index/schema)
 /// is represented by an Automerge `AutoCommit` document stored in the
-/// `AutomergeBTree<B>` backend. Engine-level keys/values are encoded into a
-/// single snapshot blob inside the document and decoded on read.
+/// `AutomergeBTree<B>` backend. Engine-level keys/values are encoded as direct
+/// Automerge document fields and decoded on read.
 #[derive(Clone)]
 pub struct AutomergeEngineStore<B>
 where
@@ -167,12 +164,24 @@ fn is_table_row_key(key: &StoreKey) -> bool {
   matches!(key, StoreKey::TableRow { .. })
 }
 
-fn parse_snapshot(buf: &[u8]) -> Result<Vec<(StoreKey, StoreValue)>, BTreeError> {
-  parse_entries::<StoreSnapshotAdapter>(buf)
-}
+fn key_in_range<K, R>(key: &K, range: &R) -> bool
+where
+  K: Ord,
+  R: core::ops::RangeBounds<K>,
+{
+  use core::ops::Bound;
 
-fn find_in_snapshot(buf: &[u8], needle: &StoreKey) -> Result<Option<StoreValue>, BTreeError> {
-  find_entry::<StoreSnapshotAdapter>(buf, needle)
+  let start = match range.start_bound() {
+    Bound::Included(lower) => key >= lower,
+    Bound::Excluded(lower) => key > lower,
+    Bound::Unbounded => true,
+  };
+  let end = match range.end_bound() {
+    Bound::Included(upper) => key <= upper,
+    Bound::Excluded(upper) => key < upper,
+    Bound::Unbounded => true,
+  };
+  start && end
 }
 
 fn doc_with_row(
@@ -252,10 +261,7 @@ where
             return Ok(Some(value));
           }
 
-          match snapshot_bytes(&doc)? {
-            Some(bytes) => find_in_snapshot(&bytes, &key),
-            None => Ok(None),
-          }
+          Ok(None)
         }
       }
     }
@@ -320,13 +326,7 @@ where
         return Ok(None);
       }
 
-      let prev = if let Some(value) = read_direct_document_entry(&doc)? {
-        Some(value)
-      } else if let Some(bytes) = snapshot_bytes(&doc)? {
-        find_in_snapshot(&bytes, &key)?
-      } else {
-        None
-      };
+      let prev = read_direct_document_entry(&doc)?;
 
       let prev = if let Some(value) = prev {
         value
@@ -363,19 +363,6 @@ where
                 yield Ok((key, value));
               }
             }
-          }
-          continue;
-        }
-        if let Some(bytes) = snapshot_bytes(&doc)? {
-          match parse_snapshot(&bytes) {
-            Ok(pairs) => {
-              for (k, v) in pairs.into_iter() {
-                if key_in_range(&k, &range) {
-                  yield Ok((k, v));
-                }
-              }
-            }
-            Err(e) => yield Err(e),
           }
         }
       }
@@ -491,6 +478,7 @@ where
 #[cfg(test)]
 mod tests {
   use super::*;
+  use automerge::{ReadDoc, ScalarValue, Value};
   use db_core::{NamedTreeProvider, NamedTreeTransaction, block_on};
   use db_in_memory::InMemoryBTree;
   use db_types::key_encoding::{DefaultEncoding, KeyEncoding, RowEncoding};
@@ -702,6 +690,71 @@ mod tests {
       assert_eq!(
         read.get(&index_entry_key).await.expect("get index entry"),
         Some(index_entry_value)
+      );
+    });
+  }
+
+  #[test]
+  fn non_row_named_tree_stores_direct_automerge_document() {
+    block_on(async {
+      let store = store();
+      let key1 = key(vec![EngineValue::Integer(1)]);
+      let row1 = row(vec![EngineValue::Text("alice".into())]);
+
+      let mut tx = store.begin_transaction().await.expect("begin");
+      tx.insert("users", key1.clone(), row1.clone())
+        .await
+        .expect("insert");
+      tx.commit().await.expect("commit");
+
+      let docs = collect_documents(&store).await.expect("collect docs");
+      let doc_id = super::named_routing::doc_id_for_tree_key("users", &key1).expect("doc id");
+      let doc = docs.get(&doc_id).expect("doc exists");
+
+      assert!(doc.get(&automerge::ROOT, "snapshot").unwrap().is_none());
+      assert!(doc.get(&automerge::ROOT, "named_key").unwrap().is_some());
+      assert!(doc.get(&automerge::ROOT, "value").unwrap().is_some());
+      assert!(doc.get(&automerge::ROOT, "deleted").unwrap().is_none());
+    });
+  }
+
+  #[test]
+  fn non_row_named_tree_tombstone_records_deleted_document() {
+    block_on(async {
+      let store = store();
+      let key1 = key(vec![EngineValue::Integer(1)]);
+      let row1 = row(vec![EngineValue::Text("alice".into())]);
+
+      {
+        let mut tx = store.begin_transaction().await.expect("begin");
+        tx.insert("users", key1.clone(), row1.clone())
+          .await
+          .expect("insert");
+        tx.commit().await.expect("commit");
+      }
+
+      {
+        let mut tx = store.begin_transaction().await.expect("begin remove");
+        let removed = tx.remove("users", &key1).await.expect("remove");
+        assert_eq!(removed, Some(row1));
+        tx.commit().await.expect("commit remove");
+      }
+
+      let mut read = store.begin_transaction().await.expect("read");
+      assert_eq!(
+        read.get("users", &key1).await.expect("get after remove"),
+        None
+      );
+
+      let docs = collect_documents(&store).await.expect("collect docs");
+      let doc_id = super::named_routing::doc_id_for_tree_key("users", &key1).expect("doc id");
+      let doc = docs.get(&doc_id).expect("doc exists");
+
+      assert!(doc.get(&automerge::ROOT, "snapshot").unwrap().is_none());
+      assert!(doc.get(&automerge::ROOT, "named_key").unwrap().is_some());
+      assert_eq!(doc.get(&automerge::ROOT, "value").unwrap(), None);
+      assert!(
+        matches!(doc.get(&automerge::ROOT, "deleted").unwrap(), Some((Value::Scalar(scalar), _)) if scalar.as_ref() == &ScalarValue::Boolean(true))
       );
     });
   }

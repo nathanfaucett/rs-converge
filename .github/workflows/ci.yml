@@ -25,6 +25,9 @@ jobs:
           override: true
           components: rustfmt, clippy
 
+      - name: Install just
+        run: cargo install just --locked
+
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -35,10 +38,10 @@ jobs:
           key: ${{ runner.os }}-cargo-lint-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Rust fmt check
-        run: cargo fmt --all -- --check
+        run: just fmt-check
 
       - name: Cargo clippy
-        run: cargo clippy --all -- -D warnings
+        run: just clippy
 
   cargo-tests:
     name: Cargo tests
@@ -54,6 +57,9 @@ jobs:
           toolchain: stable
           profile: minimal
           override: true
+
+      - name: Install just
+        run: cargo install just --locked
 
       - name: Install cargo-hack
         run: cargo install cargo-hack --locked
@@ -71,4 +77,4 @@ jobs:
         run: rustc --version && cargo --version
 
       - name: Test feature combinations
-        run: cargo hack test --feature-powerset --workspace --all-targets
+        run: just hack-test

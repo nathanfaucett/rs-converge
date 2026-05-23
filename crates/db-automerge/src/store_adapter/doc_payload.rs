@@ -4,7 +4,6 @@ use automerge::ReadDoc;
 use automerge::ScalarValue;
 use automerge::Value;
 use automerge::transaction::Transactable;
-use base64::{Engine as _, engine::general_purpose};
 use db_core::{BTreeError, decode_with_version};
 use db_types::codec::{decode_store_key, decode_store_value, encode_store_key, encode_store_value};
 use db_types::key_encoding::{DefaultEncoding, RowEncoding};
@@ -14,7 +13,6 @@ const ROW_FIELD: &str = "row";
 const STORE_KEY_FIELD: &str = "store_key";
 const VALUE_FIELD: &str = "value";
 const TOMBSTONE_FIELD: &str = "deleted";
-const SNAPSHOT_FIELD: &str = "snapshot";
 
 fn encode_row_cell(value: &EngineValue) -> Vec<u8> {
   <DefaultEncoding as RowEncoding>::encode_values(core::slice::from_ref(value))
@@ -40,7 +38,7 @@ fn scalar_bytes(value: Value<'_>) -> Result<Vec<u8>, BTreeError> {
 }
 
 pub(crate) fn clear_doc_fields(doc: &mut AutoCommit) -> Result<(), BTreeError> {
-  for field in [ROW_FIELD, VALUE_FIELD, TOMBSTONE_FIELD, SNAPSHOT_FIELD] {
+  for field in [ROW_FIELD, VALUE_FIELD, TOMBSTONE_FIELD] {
     if let Ok(Some(_)) = doc.get(&automerge::ROOT, field) {
       doc
         .delete(&automerge::ROOT, field)
@@ -176,39 +174,6 @@ pub(crate) fn read_store_key_metadata(doc: &AutoCommit) -> Result<Option<StoreKe
   decode_with_version(&bytes, decode_store_key)
     .map(Some)
     .map_err(BTreeError::other)
-}
-
-pub(crate) fn decode_snapshot_base64(value: impl ToString) -> Result<Vec<u8>, BTreeError> {
-  let text = value.to_string();
-  let encoded = text
-    .strip_prefix('"')
-    .and_then(|s| s.strip_suffix('"'))
-    .unwrap_or(&text);
-
-  general_purpose::STANDARD
-    .decode(encoded.as_bytes())
-    .map_err(BTreeError::other)
-}
-
-pub(crate) fn encode_snapshot_base64(bytes: &[u8]) -> String {
-  general_purpose::STANDARD.encode(bytes)
-}
-
-pub(crate) fn snapshot_bytes(doc: &AutoCommit) -> Result<Option<Vec<u8>>, BTreeError> {
-  if let Ok(Some((value, _id))) = doc.get(&automerge::ROOT, SNAPSHOT_FIELD) {
-    Ok(Some(decode_snapshot_base64(value)?))
-  } else {
-    Ok(None)
-  }
-}
-
-pub(crate) fn snapshot_doc(snapshot: &[u8]) -> Result<AutoCommit, BTreeError> {
-  let snapshot_str = encode_snapshot_base64(snapshot);
-  let mut doc = AutoCommit::new();
-  doc
-    .put(&automerge::ROOT, SNAPSHOT_FIELD, snapshot_str)
-    .map_err(BTreeError::other)?;
-  Ok(doc)
 }
 
 pub(crate) fn is_direct_document(doc: &AutoCommit) -> Result<bool, BTreeError> {

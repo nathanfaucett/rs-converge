@@ -3,6 +3,8 @@ use std::borrow::Borrow;
 use async_stream::stream;
 use automerge::AutoCommit;
 use automerge::ReadDoc;
+use automerge::ScalarValue;
+use automerge::Value;
 use automerge::transaction::Transactable;
 use futures::{StreamExt, pin_mut};
 use uuid::Uuid;
@@ -17,28 +19,107 @@ use db_types::{
 };
 
 use super::AutomergeEngineStore;
-use super::doc_payload::{
-  encode_snapshot_base64, read_row_columns, set_row_columns, snapshot_bytes, snapshot_doc,
-};
+use super::doc_payload::{clear_doc_fields, read_row_columns, set_row_columns};
+use super::key_in_range;
 use super::named_routing::{
   doc_id_for_tree_key, is_row_tree, row_key_from_doc_id, tree_uuid_range,
 };
-use super::snapshot::{EngineSnapshotAdapter, find_entry, key_in_range, parse_entries, set_entry};
 
-fn parse_named_snapshot(buf: &[u8]) -> Result<Vec<(EngineKey, Vec<u8>)>, BTreeError> {
-  parse_entries::<EngineSnapshotAdapter>(buf)
+const NAMED_KEY_FIELD: &str = "named_key";
+const NAMED_VALUE_FIELD: &str = "value";
+const NAMED_TOMBSTONE_FIELD: &str = "deleted";
+
+fn scalar_bytes(value: Value<'_>) -> Result<Vec<u8>, BTreeError> {
+  match value {
+    Value::Scalar(scalar) => match scalar.as_ref() {
+      ScalarValue::Bytes(bytes) => Ok(bytes.to_vec()),
+      _ => Err(BTreeError::UnsupportedOperation),
+    },
+    _ => Err(BTreeError::UnsupportedOperation),
+  }
 }
 
-fn find_in_named_snapshot(buf: &[u8], needle: &EngineKey) -> Result<Option<Vec<u8>>, BTreeError> {
-  find_entry::<EngineSnapshotAdapter>(buf, needle)
+fn set_named_key_metadata(doc: &mut AutoCommit, key: &EngineKey) -> Result<(), BTreeError> {
+  if let Ok(Some(_)) = doc.get(&automerge::ROOT, NAMED_KEY_FIELD) {
+    doc
+      .delete(&automerge::ROOT, NAMED_KEY_FIELD)
+      .map_err(BTreeError::other)?;
+  }
+  doc
+    .put(&automerge::ROOT, NAMED_KEY_FIELD, key.clone())
+    .map_err(BTreeError::other)?;
+  Ok(())
 }
 
-fn set_in_named_snapshot(
-  buf: Option<&[u8]>,
-  key: EngineKey,
-  row: Vec<u8>,
-) -> Result<Vec<u8>, BTreeError> {
-  set_entry::<EngineSnapshotAdapter>(buf, &key, &row)
+fn set_named_value(doc: &mut AutoCommit, value: &[u8]) -> Result<(), BTreeError> {
+  if let Ok(Some(_)) = doc.get(&automerge::ROOT, NAMED_VALUE_FIELD) {
+    doc
+      .delete(&automerge::ROOT, NAMED_VALUE_FIELD)
+      .map_err(BTreeError::other)?;
+  }
+  doc
+    .put(&automerge::ROOT, NAMED_VALUE_FIELD, value.to_vec())
+    .map_err(BTreeError::other)?;
+  Ok(())
+}
+
+fn set_named_tombstone(doc: &mut AutoCommit) -> Result<(), BTreeError> {
+  if let Ok(Some(_)) = doc.get(&automerge::ROOT, NAMED_TOMBSTONE_FIELD) {
+    doc
+      .delete(&automerge::ROOT, NAMED_TOMBSTONE_FIELD)
+      .map_err(BTreeError::other)?;
+  }
+  doc
+    .put(&automerge::ROOT, NAMED_TOMBSTONE_FIELD, true)
+    .map_err(BTreeError::other)?;
+  Ok(())
+}
+
+fn is_named_tombstone(doc: &AutoCommit) -> Result<bool, BTreeError> {
+  if let Ok(Some((value, _id))) = doc.get(&automerge::ROOT, NAMED_TOMBSTONE_FIELD) {
+    return match value {
+      Value::Scalar(scalar) => match scalar.as_ref() {
+        ScalarValue::Boolean(b) => Ok(*b),
+        _ => Err(BTreeError::UnsupportedOperation),
+      },
+      _ => Err(BTreeError::UnsupportedOperation),
+    };
+  }
+  Ok(false)
+}
+
+fn read_named_value_bytes(doc: &AutoCommit) -> Result<Option<Vec<u8>>, BTreeError> {
+  if let Ok(Some((value, _id))) = doc.get(&automerge::ROOT, NAMED_VALUE_FIELD) {
+    return Ok(Some(scalar_bytes(value)?));
+  }
+  Ok(None)
+}
+
+fn read_named_key_metadata(doc: &AutoCommit) -> Result<Option<EngineKey>, BTreeError> {
+  if let Ok(Some((value, _id))) = doc.get(&automerge::ROOT, NAMED_KEY_FIELD) {
+    return Ok(Some(scalar_bytes(value)?));
+  }
+  Ok(None)
+}
+
+fn build_named_doc(
+  existing: Option<AutoCommit>,
+  key: &EngineKey,
+  value: &[u8],
+) -> Result<AutoCommit, BTreeError> {
+  let mut doc = existing.unwrap_or_default();
+  clear_doc_fields(&mut doc)?;
+  set_named_key_metadata(&mut doc, key)?;
+  set_named_value(&mut doc, value)?;
+  Ok(doc)
+}
+
+fn build_named_tombstone(existing: AutoCommit, key: &EngineKey) -> Result<AutoCommit, BTreeError> {
+  let mut doc = existing;
+  clear_doc_fields(&mut doc)?;
+  set_named_key_metadata(&mut doc, key)?;
+  set_named_tombstone(&mut doc)?;
+  Ok(doc)
 }
 
 fn decode_row_bytes(row: &[u8]) -> Result<Vec<EngineValue>, BTreeError> {
@@ -115,10 +196,10 @@ where
         }
       }))
     } else {
-      let Some(bytes) = snapshot_bytes(&doc)? else {
+      if is_named_tombstone(&doc)? {
         return Ok(None);
-      };
-      find_in_named_snapshot(&bytes, key)
+      }
+      read_named_value_bytes(&doc)
     }
   }
 }
@@ -154,49 +235,31 @@ where
     } else {
       None
     };
-    let new_snapshot = if row_values.is_some() {
-      Vec::new()
-    } else {
-      let existing_bytes = match &existing {
-        Some(doc) => snapshot_bytes(doc)?,
-        None => None,
-      };
-      set_in_named_snapshot(existing_bytes.as_deref(), key, value)?
-    };
 
     let new_doc = if let Some(doc) = existing {
-      let mut updated = doc;
       if let Some(row) = row_values.as_ref() {
+        let mut updated = doc;
         set_row_columns(&mut updated, row)?;
+        if is_row_tree(tree) {
+          set_doc_tree(updated, tree)?
+        } else {
+          updated
+        }
       } else {
-        updated
-          .put(
-            &automerge::ROOT,
-            "snapshot",
-            encode_snapshot_base64(&new_snapshot),
-          )
-          .map_err(BTreeError::other)?;
+        build_named_doc(Some(doc), &key, &value)?
       }
-      if is_row_tree(tree) {
-        set_doc_tree(updated, tree)?
-      } else {
-        updated
-      }
-    } else {
-      let mut created = if row_values.is_some() {
-        AutoCommit::new()
-      } else {
-        snapshot_doc(&new_snapshot)?
-      };
-      if let Some(row) = row_values.as_ref() {
-        set_row_columns(&mut created, row)?;
-      }
+    } else if let Some(row) = row_values.as_ref() {
+      let mut created = AutoCommit::new();
+      set_row_columns(&mut created, row)?;
       if is_row_tree(tree) {
         set_doc_tree(created, tree)?
       } else {
         created
       }
+    } else {
+      build_named_doc(None, &key, &value)?
     };
+
     self.inner.insert(doc_id, new_doc).await
   }
 
@@ -221,27 +284,19 @@ where
         }
       })
     } else {
-      let bytes = snapshot_bytes(&existing)?;
-      if let Some(ref b) = bytes {
-        find_in_named_snapshot(b, key)?
-      } else {
-        None
+      if is_named_tombstone(&existing)? {
+        return Ok(None);
       }
+      read_named_value_bytes(&existing)?
     };
     if removed.is_some() {
-      let mut tombstone = existing;
-      if is_row_tree(tree) {
-        set_row_columns(&mut tombstone, &[])?;
+      let tombstone = if is_row_tree(tree) {
+        let mut next = existing;
+        set_row_columns(&mut next, &[])?;
+        set_doc_tree(next, tree)?
       } else {
-        // Tombstone: update the snapshot to empty so the delete is recorded as
-        // an Automerge operation and propagates causally to peers on sync.
-        tombstone
-          .put(&automerge::ROOT, "snapshot", encode_snapshot_base64(&[]))
-          .map_err(BTreeError::other)?;
-      }
-      if is_row_tree(tree) {
-        tombstone = set_doc_tree(tombstone, tree)?;
-      }
+        build_named_tombstone(existing, key)?
+      };
       self.inner.insert(doc_id, tombstone).await?;
     }
     Ok(removed)
@@ -286,15 +341,20 @@ where
           }
           entries.push((row_key_from_doc_id(doc_id), encode_row_bytes(&row)));
         } else {
-          let bytes = match snapshot_bytes(&doc) {
-            Ok(Some(b)) => b,
+          if let Ok(true) = is_named_tombstone(&doc) {
+            continue;
+          }
+          let key = match read_named_key_metadata(&doc) {
+            Ok(Some(key)) => key,
             Ok(None) => continue,
             Err(e) => { yield Err(e); return; }
           };
-          match parse_named_snapshot(&bytes) {
-            Ok(pairs) => entries.extend(pairs),
+          let value = match read_named_value_bytes(&doc) {
+            Ok(Some(value)) => value,
+            Ok(None) => continue,
             Err(e) => { yield Err(e); return; }
-          }
+          };
+          entries.push((key, value));
         }
       }
       entries.sort_by(|(a, _), (b, _)| a.cmp(b));
