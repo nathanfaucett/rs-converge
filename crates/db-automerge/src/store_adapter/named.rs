@@ -115,63 +115,12 @@ fn build_named_doc(
   Ok(doc)
 }
 
-pub(super) fn build_named_doc_with_store_key(
-  existing: Option<AutoCommit>,
-  store_key: &StoreKey,
-  key: &EngineKey,
-  value: &[u8],
-) -> Result<AutoCommit, BTreeError> {
-  let mut doc = existing.unwrap_or_default();
-  clear_doc_fields(&mut doc)?;
-  set_named_key_metadata(&mut doc, key)?;
-  set_store_key_metadata(&mut doc, store_key)?;
-  set_named_value(&mut doc, value)?;
-  Ok(doc)
-}
-
-pub(super) fn build_named_tombstone_with_store_key(
-  existing: AutoCommit,
-  store_key: &StoreKey,
-  key: &EngineKey,
-) -> Result<AutoCommit, BTreeError> {
-  let mut doc = existing;
-  clear_doc_fields(&mut doc)?;
-  set_named_key_metadata(&mut doc, key)?;
-  set_store_key_metadata(&mut doc, store_key)?;
-  set_named_tombstone(&mut doc)?;
-  Ok(doc)
-}
-
 fn build_named_tombstone(existing: AutoCommit, key: &EngineKey) -> Result<AutoCommit, BTreeError> {
   let mut doc = existing;
   clear_doc_fields(&mut doc)?;
   set_named_key_metadata(&mut doc, key)?;
   set_named_tombstone(&mut doc)?;
   Ok(doc)
-}
-
-pub(super) fn build_named_tree_document(
-  tree: &str,
-  key: &EngineKey,
-  value: Vec<u8>,
-  existing: Option<AutoCommit>,
-) -> Result<AutoCommit, BTreeError> {
-  if is_row_tree(tree) {
-    let row = decode_row_bytes(&value)?;
-    let mut doc = existing.unwrap_or_default();
-    clear_doc_fields(&mut doc)?;
-    set_store_key_metadata(
-      &mut doc,
-      &StoreKey::TableRow {
-        table_name: tree.strip_prefix("t:").unwrap_or(tree).to_string(),
-        primary_key: key.clone(),
-      },
-    )?;
-    set_row_columns(&mut doc, &row)?;
-    set_doc_tree(doc, tree)
-  } else {
-    build_named_doc(existing, key, &value)
-  }
 }
 
 fn decode_row_bytes(row: &[u8]) -> Result<Vec<EngineValue>, BTreeError> {
