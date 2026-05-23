@@ -1431,12 +1431,30 @@ fn translate_returning_item(
       )
     }
     SelectItem::UnnamedExpr(expr) => {
-      let returning_expr = sql_expr_to_update_value_expr(expr, alias_map, table_schemas, mapper)?;
+      let returning_expr =
+        match sql_expr_to_update_value_expr(expr, alias_map, table_schemas, mapper) {
+          Ok(expr) => expr,
+          Err(TranslateError::UnknownTable(_)) | Err(TranslateError::UnknownColumn(_)) => {
+            return Err(TranslateError::UnsupportedFeature(
+              "RETURNING can reference only target table columns".into(),
+            ));
+          }
+          Err(err) => return Err(err),
+        };
       ensure_returning_expr_uses_target(&returning_expr, target_table)?;
       Ok(vec![returning_expr])
     }
     SelectItem::ExprWithAlias { expr, .. } => {
-      let returning_expr = sql_expr_to_update_value_expr(expr, alias_map, table_schemas, mapper)?;
+      let returning_expr =
+        match sql_expr_to_update_value_expr(expr, alias_map, table_schemas, mapper) {
+          Ok(expr) => expr,
+          Err(TranslateError::UnknownTable(_)) | Err(TranslateError::UnknownColumn(_)) => {
+            return Err(TranslateError::UnsupportedFeature(
+              "RETURNING can reference only target table columns".into(),
+            ));
+          }
+          Err(err) => return Err(err),
+        };
       ensure_returning_expr_uses_target(&returning_expr, target_table)?;
       Ok(vec![returning_expr])
     }
@@ -2729,6 +2747,240 @@ mod tests {
       }
       other => panic!("unexpected statement: {:?}", other),
     }
+  }
+
+  #[test]
+  fn translate_create_table_requires_primary_key() {
+    let resolver = DummyResolver {
+      tables: HashMap::new(),
+    };
+
+    let err = parse_and_translate_statement("CREATE TABLE users (id UUID, name TEXT);", &resolver)
+      .expect_err("CREATE TABLE without PRIMARY KEY should be rejected");
+
+    assert!(matches!(
+      err,
+      TranslateError::UnsupportedFeature(message)
+      if message.contains("CREATE TABLE must define exactly one PRIMARY KEY column")
+    ));
+  }
+
+  #[test]
+  fn translate_create_table_rejects_composite_primary_key() {
+    let resolver = DummyResolver {
+      tables: HashMap::new(),
+    };
+
+    let err = parse_and_translate_statement(
+      "CREATE TABLE users (id UUID, name TEXT, PRIMARY KEY (id, name));",
+      &resolver,
+    )
+    .expect_err("composite primary key should be rejected");
+
+    assert!(matches!(
+      err,
+      TranslateError::UnsupportedFeature(message)
+      if message.contains("CREATE TABLE must define exactly one PRIMARY KEY column")
+    ));
+  }
+
+  #[test]
+  fn translate_select_distinct_translates() {
+    let mut tables = HashMap::new();
+    tables.insert(
+      "users".into(),
+      TableSchema {
+        name: "users".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "city".into(),
+            data_type: EngineType::Text,
+          },
+        ],
+        primary_key: vec![0],
+      },
+    );
+
+    let resolver = DummyResolver { tables };
+    let q = parse_and_translate("SELECT DISTINCT city FROM users;", &resolver)
+      .expect("translate distinct select");
+
+    match q {
+      EngineQuery::Select { options, .. } => {
+        assert!(options.distinct);
+        assert_eq!(options.group_by.len(), 0);
+      }
+      other => panic!("unexpected query kind: {:?}", other),
+    }
+  }
+
+  #[test]
+  fn translate_insert_select_is_rejected() {
+    let mut tables = HashMap::new();
+    tables.insert(
+      "items".into(),
+      TableSchema {
+        name: "items".into(),
+        columns: vec![ColumnSchema {
+          name: "id".into(),
+          data_type: EngineType::Integer,
+        }],
+        primary_key: vec![0],
+      },
+    );
+
+    let resolver = DummyResolver { tables };
+    let err = parse_and_translate("INSERT INTO items (id) SELECT id FROM items;", &resolver)
+      .expect_err("INSERT ... SELECT should be rejected");
+
+    assert!(
+      matches!(err, TranslateError::UnsupportedFeature(message) if message.contains("only INSERT ... VALUES (...) is supported"))
+    );
+  }
+
+  #[test]
+  fn translate_update_limit_is_rejected() {
+    let mut tables = HashMap::new();
+    tables.insert(
+      "users".into(),
+      TableSchema {
+        name: "users".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "score".into(),
+            data_type: EngineType::Integer,
+          },
+        ],
+        primary_key: vec![0],
+      },
+    );
+
+    let resolver = DummyResolver { tables };
+    let err = parse_and_translate(
+      "UPDATE users SET score = 1 WHERE id = 1 LIMIT 1;",
+      &resolver,
+    )
+    .expect_err("UPDATE LIMIT should be rejected");
+
+    assert!(
+      matches!(err, TranslateError::UnsupportedFeature(message) if message.contains("UPDATE LIMIT is not supported"))
+    );
+  }
+
+  #[test]
+  fn translate_delete_order_by_is_rejected() {
+    let mut tables = HashMap::new();
+    tables.insert(
+      "users".into(),
+      TableSchema {
+        name: "users".into(),
+        columns: vec![ColumnSchema {
+          name: "id".into(),
+          data_type: EngineType::Integer,
+        }],
+        primary_key: vec![0],
+      },
+    );
+
+    let resolver = DummyResolver { tables };
+    let err = parse_and_translate("DELETE FROM users ORDER BY id;", &resolver)
+      .expect_err("DELETE ORDER BY should be rejected");
+
+    assert!(
+      matches!(err, TranslateError::UnsupportedFeature(message) if message.contains("DELETE ORDER BY is not supported"))
+    );
+  }
+
+  #[test]
+  fn translate_returning_non_target_table_is_rejected() {
+    let mut tables = HashMap::new();
+    tables.insert(
+      "users".into(),
+      TableSchema {
+        name: "users".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "name".into(),
+            data_type: EngineType::Text,
+          },
+        ],
+        primary_key: vec![0],
+      },
+    );
+    tables.insert(
+      "teams".into(),
+      TableSchema {
+        name: "teams".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Integer,
+          },
+          ColumnSchema {
+            name: "name".into(),
+            data_type: EngineType::Text,
+          },
+        ],
+        primary_key: vec![0],
+      },
+    );
+
+    let resolver = DummyResolver { tables };
+    let err = parse_and_translate("DELETE FROM users RETURNING teams.name;", &resolver)
+      .expect_err("RETURNING non-target table should be rejected");
+
+    assert!(
+      matches!(err, TranslateError::UnsupportedFeature(message) if message.contains("RETURNING can reference only target table columns"))
+    );
+  }
+
+  #[test]
+  fn translate_returning_qualified_wildcard_other_table_is_rejected() {
+    let mut tables = HashMap::new();
+    tables.insert(
+      "users".into(),
+      TableSchema {
+        name: "users".into(),
+        columns: vec![ColumnSchema {
+          name: "id".into(),
+          data_type: EngineType::Integer,
+        }],
+        primary_key: vec![0],
+      },
+    );
+    tables.insert(
+      "teams".into(),
+      TableSchema {
+        name: "teams".into(),
+        columns: vec![ColumnSchema {
+          name: "id".into(),
+          data_type: EngineType::Integer,
+        }],
+        primary_key: vec![0],
+      },
+    );
+
+    let resolver = DummyResolver { tables };
+    let err = parse_and_translate("DELETE FROM users RETURNING teams.*;", &resolver)
+      .expect_err("RETURNING qualified wildcard on other table should be rejected");
+
+    assert!(matches!(
+      err,
+      TranslateError::UnsupportedFeature(message)
+      if message.contains("RETURNING can reference only target table columns")
+    ));
   }
 
   #[test]
