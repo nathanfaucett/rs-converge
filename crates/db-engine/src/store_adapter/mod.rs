@@ -1,20 +1,13 @@
 #![allow(clippy::manual_async_fn)]
 
-use crate::{EngineError, EngineKey, EngineRow};
-use db_core::NamedTreeTransaction;
-use futures::{StreamExt, pin_mut};
-
 mod backend_contract;
-mod contract;
 mod engine_store;
 mod helpers;
 mod named_tree;
+mod named_tree_backend;
 mod transaction;
 
 pub use backend_contract::{BackendCapability, TransactionContract};
-pub(crate) use contract::{
-  decode_row_bytes, encode_row_bytes, primary_key_from_engine_key, schema_decode_error,
-};
 pub use engine_store::{EngineStore, NamedTreeEngineStore};
 pub(crate) use helpers::{
   collect_table_rows, delete_row, find_conflicting_index_entry, remove_index_entries,
@@ -22,21 +15,6 @@ pub(crate) use helpers::{
 };
 pub use helpers::{fetch_rows_by_primary_keys, lookup_primary_keys_by_index_predicate};
 pub use transaction::{EngineStoreReadTransaction, EngineStoreTransaction};
-
-async fn collect_tree_rows<T>(tx: &T, tree_name: &str) -> Result<Vec<EngineRow>, EngineError>
-where
-  T: NamedTreeTransaction<EngineKey, Vec<u8>>,
-{
-  let stream = tx.range(tree_name, ..);
-  pin_mut!(stream);
-
-  let mut rows = Vec::new();
-  while let Some(item) = stream.next().await {
-    let (_key, row_bytes) = item.map_err(EngineError::from)?;
-    rows.push(decode_row_bytes(&row_bytes)?);
-  }
-  Ok(rows)
-}
 
 #[cfg(test)]
 mod tests {

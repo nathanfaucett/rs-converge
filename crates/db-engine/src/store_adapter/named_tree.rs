@@ -9,9 +9,9 @@ use db_types::persistence::{
 };
 use futures::{Stream, StreamExt, pin_mut};
 
-use super::{
-  collect_tree_rows, decode_row_bytes, encode_row_bytes, primary_key_from_engine_key,
-  schema_decode_error,
+use super::named_tree_backend::{
+  collect_tree_rows, decode_row_bytes, encode_row_bytes, get_bytes, insert_bytes,
+  primary_key_from_engine_key, range_bytes, remove_bytes, schema_decode_error,
 };
 
 pub struct NamedTreeEngineTransaction<T>
@@ -34,7 +34,7 @@ where
     tree: &'a str,
     key: &'a EngineKey,
   ) -> Result<Option<Vec<u8>>, EngineError> {
-    self.inner.get(tree, key).await.map_err(EngineError::from)
+    get_bytes(&mut self.inner, tree, key).await
   }
 
   async fn insert_bytes<'a>(
@@ -43,11 +43,7 @@ where
     key: EngineKey,
     value: Vec<u8>,
   ) -> Result<(), EngineError> {
-    self
-      .inner
-      .insert(tree, key, value)
-      .await
-      .map_err(EngineError::from)
+    insert_bytes(&mut self.inner, tree, key, value).await
   }
 
   async fn remove_bytes<'a>(
@@ -55,25 +51,14 @@ where
     tree: &'a str,
     key: &'a EngineKey,
   ) -> Result<Option<Vec<u8>>, EngineError> {
-    self
-      .inner
-      .remove(tree, key)
-      .await
-      .map_err(EngineError::from)
+    remove_bytes(&mut self.inner, tree, key).await
   }
 
   fn range_bytes(
     &self,
     tree: String,
   ) -> impl Stream<Item = Result<(EngineKey, Vec<u8>), EngineError>> + '_ {
-    let inner = &self.inner;
-    stream! {
-      let s = inner.range(&tree, ..);
-      pin_mut!(s);
-      while let Some(item) = s.next().await {
-        yield item.map_err(EngineError::from);
-      }
-    }
+    range_bytes(&self.inner, tree)
   }
 }
 
