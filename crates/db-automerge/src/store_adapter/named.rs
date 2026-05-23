@@ -5,7 +5,6 @@ use automerge::AutoCommit;
 use automerge::ReadDoc;
 use automerge::transaction::Transactable;
 use futures::{StreamExt, pin_mut};
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::automerge_btree::{AutomergeBTree, AutomergeEntry, DocumentChangeKey};
@@ -14,14 +13,17 @@ use db_core::{
 };
 use db_types::{
   EngineKey, EngineValue,
-  key_encoding::{DefaultEncoding, KeyEncoding, RowEncoding},
+  key_encoding::{DefaultEncoding, RowEncoding},
 };
 
 use super::AutomergeEngineStore;
-use super::snapshot::{
-  EngineSnapshotAdapter, encode_snapshot_base64, find_entry, key_in_range, parse_entries,
-  read_row_columns, set_entry, set_row_columns, snapshot_bytes, snapshot_doc,
+use super::doc_payload::{
+  encode_snapshot_base64, read_row_columns, set_row_columns, snapshot_bytes, snapshot_doc,
 };
+use super::named_routing::{
+  doc_id_for_tree_key, is_row_tree, row_key_from_doc_id, tree_uuid_range,
+};
+use super::snapshot::{EngineSnapshotAdapter, find_entry, key_in_range, parse_entries, set_entry};
 
 fn parse_named_snapshot(buf: &[u8]) -> Result<Vec<(EngineKey, Vec<u8>)>, BTreeError> {
   parse_entries::<EngineSnapshotAdapter>(buf)
@@ -39,36 +41,12 @@ fn set_in_named_snapshot(
   set_entry::<EngineSnapshotAdapter>(buf, &key, &row)
 }
 
-fn is_row_tree(tree: &str) -> bool {
-  tree.starts_with("t:")
-}
-
-fn key_uuid(key: &EngineKey) -> Result<Uuid, BTreeError> {
-  // Decode the bytes to get the UUID value
-  let values = <DefaultEncoding as KeyEncoding>::decode_values(key)
-    .map_err(|_| BTreeError::UnsupportedOperation)?;
-
-  if values.len() != 1 {
-    return Err(BTreeError::UnsupportedOperation);
-  }
-
-  match &values[0] {
-    EngineValue::Uuid(bytes) => Ok(Uuid::from_bytes(*bytes)),
-    _ => Err(BTreeError::UnsupportedOperation),
-  }
-}
-
 fn decode_row_bytes(row: &[u8]) -> Result<Vec<EngineValue>, BTreeError> {
   <DefaultEncoding as RowEncoding>::decode_values(row).map_err(BTreeError::other)
 }
 
 fn encode_row_bytes(row: &[EngineValue]) -> Vec<u8> {
   <DefaultEncoding as RowEncoding>::encode_values(row)
-}
-
-fn row_key_from_doc_id(doc_id: Uuid) -> EngineKey {
-  // Encode the UUID as a single-value key
-  <DefaultEncoding as KeyEncoding>::encode_values(&[EngineValue::Uuid(*doc_id.as_bytes())])
 }
 
 fn doc_tree(doc: &AutoCommit) -> Option<String> {
@@ -90,50 +68,6 @@ fn set_doc_tree(mut doc: AutoCommit, tree: &str) -> Result<AutoCommit, BTreeErro
     .put(&automerge::ROOT, "tree", tree)
     .map_err(BTreeError::other)?;
   Ok(doc)
-}
-
-/// Derive a UUID for a specific row in a named tree.
-/// Layout: first 8 bytes = SHA-256("named:", tree)[0..8]
-///         last  8 bytes = SHA-256(encoded_key)[0..8]
-/// This keeps all rows for a given tree contiguous in UUID space.
-fn hashed_doc_id(tree: &str, key: &EngineKey) -> Uuid {
-  let mut hasher = Sha256::new();
-  hasher.update(b"named:");
-  hasher.update(tree.as_bytes());
-  let tree_digest = hasher.finalize_reset();
-
-  // Just hash the key bytes directly (they're already encoded)
-  hasher.update(key);
-  let key_digest = hasher.finalize();
-
-  let mut bytes = [0u8; 16];
-  bytes[..8].copy_from_slice(&tree_digest[..8]);
-  bytes[8..].copy_from_slice(&key_digest[..8]);
-  Uuid::from_bytes(bytes)
-}
-
-/// UUID range covering all rows stored for `tree`.
-fn tree_uuid_range(tree: &str) -> (Uuid, Uuid) {
-  let mut hasher = Sha256::new();
-  hasher.update(b"named:");
-  hasher.update(tree.as_bytes());
-  let digest = hasher.finalize();
-
-  let mut start_bytes = [0u8; 16];
-  let mut end_bytes = [0u8; 16];
-  start_bytes[..8].copy_from_slice(&digest[..8]);
-  end_bytes[..8].copy_from_slice(&digest[..8]);
-  end_bytes[8..].fill(0xff);
-
-  (Uuid::from_bytes(start_bytes), Uuid::from_bytes(end_bytes))
-}
-
-fn doc_id_for_tree_key(tree: &str, key: &EngineKey) -> Result<Uuid, BTreeError> {
-  if is_row_tree(tree) {
-    key_uuid(key)
-  } else {
-    Ok(hashed_doc_id(tree, key))
-  }
 }
 
 #[derive(Clone)]

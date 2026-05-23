@@ -11,15 +11,18 @@ use crate::automerge_btree::{AutomergeBTree, AutomergeEntry, DocumentChangeKey};
 use db_core::{BTree, BTreeError, BTreeExecutor, BTreeTransaction};
 use db_types::{StoreKey, StoreValue};
 
+mod doc_payload;
 mod named;
+mod named_routing;
 mod snapshot;
 
-pub use named::{AutomergeNamedTransaction, AutomergeNamedTree, AutomergeNamedTreeTransaction};
-use snapshot::{
-  StoreSnapshotAdapter, find_entry, is_tombstone, key_in_range, parse_entries, read_doc_value,
-  read_row_columns, read_store_key_metadata, set_doc_value, set_row_columns,
-  set_store_key_metadata, set_tombstone, snapshot_bytes,
+use doc_payload::{
+  is_direct_document, is_tombstone, read_direct_document_entry, read_row_columns,
+  read_store_key_metadata, set_doc_value, set_row_columns, set_store_key_metadata, set_tombstone,
+  snapshot_bytes,
 };
+pub use named::{AutomergeNamedTransaction, AutomergeNamedTree, AutomergeNamedTreeTransaction};
+use snapshot::{StoreSnapshotAdapter, find_entry, key_in_range, parse_entries};
 
 /// Automerge-backed engine store: each logical collection (table/index/schema)
 /// is represented by an Automerge `AutoCommit` document stored in the
@@ -202,26 +205,6 @@ fn doc_with_tombstone(
   set_store_key_metadata(&mut doc, key)?;
   set_tombstone(&mut doc)?;
   Ok(doc)
-}
-
-fn is_direct_document(doc: &AutoCommit) -> Result<bool, BTreeError> {
-  if read_store_key_metadata(doc)?.is_none() {
-    return Ok(false);
-  }
-  if is_tombstone(doc)? {
-    return Ok(true);
-  }
-  if read_row_columns(doc)?.is_some() {
-    return Ok(true);
-  }
-  if read_doc_value(doc)?.is_some() {
-    return Ok(true);
-  }
-  Ok(false)
-}
-
-fn read_direct_document_entry(doc: &AutoCommit) -> Result<Option<StoreValue>, BTreeError> {
-  read_doc_value(doc)
 }
 
 pub struct AutomergeEngineStoreTransaction<B>
