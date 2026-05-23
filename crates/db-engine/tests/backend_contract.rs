@@ -28,10 +28,8 @@ impl EngineStore for InvalidContractStore {
   type Transaction =
     <NamedTreeEngineStore<InMemoryNamedBTree<db_engine::EngineKey, Vec<u8>>> as EngineStore>::Transaction;
 
-  fn engine_transaction(
-    &self,
-  ) -> impl std::future::Future<Output = Result<Self::Transaction, db_engine::EngineError>> {
-    async move { self.inner.engine_transaction().await }
+  async fn engine_transaction(&self) -> Result<Self::Transaction, db_engine::EngineError> {
+    self.inner.engine_transaction().await
   }
 
   fn transaction_contract(&self) -> db_engine::TransactionContract {

@@ -3,6 +3,7 @@
 #[cfg(not(feature = "std"))]
 extern crate core;
 #[cfg(not(feature = "std"))]
+#[allow(unused_imports)]
 #[macro_use]
 extern crate alloc;
 
