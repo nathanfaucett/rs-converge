@@ -8,6 +8,7 @@
 - Prefer explicit imports and minimal dependencies.
 - Avoid glob imports and hard-coded absolute paths.
 - No non-essential comments; prefer refactoring over comments.
+- Use `cargo hack test --feature-powerset --all-targets` to run tests to ensure all features combinations are tested.
 
 ## Module Organization
 

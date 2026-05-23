@@ -42,6 +42,8 @@ mod tests {
   #[cfg(not(feature = "std"))]
   use alloc::string::String;
   #[cfg(not(feature = "std"))]
+  use alloc::vec::Vec;
+  #[cfg(not(feature = "std"))]
   use hashbrown::HashMap;
   #[cfg(feature = "std")]
   use std::collections::HashMap;
@@ -63,7 +65,7 @@ mod tests {
       "users".into(),
       db_engine::TableSchema {
         name: "users".into(),
-        columns: vec![
+        columns: Vec::from([
           db_engine::ColumnSchema {
             name: "id".into(),
             data_type: db_engine::EngineType::Integer,
@@ -72,8 +74,8 @@ mod tests {
             name: "name".into(),
             data_type: db_engine::EngineType::Text,
           },
-        ],
-        primary_key: vec![0],
+        ]),
+        primary_key: Vec::from([0]),
       },
     );
 
@@ -98,7 +100,7 @@ mod tests {
       "users".into(),
       db_engine::TableSchema {
         name: "users".into(),
-        columns: vec![
+        columns: Vec::from([
           db_engine::ColumnSchema {
             name: "id".into(),
             data_type: db_engine::EngineType::Integer,
@@ -107,8 +109,8 @@ mod tests {
             name: "name".into(),
             data_type: db_engine::EngineType::Text,
           },
-        ],
-        primary_key: vec![0],
+        ]),
+        primary_key: Vec::from([0]),
       },
     );
 

@@ -1,9 +1,9 @@
 use crate::store_adapter::EngineStore;
 use crate::{EngineError, query::EngineQuery, query::EngineResult, query::UpdateValueExpr};
-use alloc::string::ToString;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use super::planner::EngineKernel;
+use super::{EngineWriteTxn, planner::EngineKernel};
 
 impl<S> EngineKernel<S>
 where
@@ -63,29 +63,7 @@ where
         table,
         row,
         returning,
-      } => {
-        let mut writer = self.writer();
-        let returning_columns = match &returning {
-          Some(columns) => Some(self.output_columns_for_returning(&table, columns)?),
-          None => None,
-        };
-        match writer.insert_returning(&table, row, returning).await {
-          Ok(rows) => {
-            let events = writer.commit().await?;
-            Ok((
-              match returning_columns {
-                Some(columns) => EngineResult::new_with_columns(rows, columns),
-                None => EngineResult::new(rows),
-              },
-              events,
-            ))
-          }
-          Err(error) => {
-            let _ = writer.rollback().await;
-            Err(error)
-          }
-        }
-      }
+      } => self.execute_insert(table, row, returning).await,
       EngineQuery::Update {
         table,
         assignments,
@@ -94,68 +72,107 @@ where
         from_tables,
         returning,
       } => {
-        let mut writer = self.writer();
-        let returning_columns = match &returning {
-          Some(columns) => Some(self.output_columns_for_returning(&table, columns)?),
-          None => None,
-        };
-        match writer
-          .update(
-            &table,
-            assignments,
-            predicate,
-            joins,
-            from_tables,
-            returning,
-          )
+        self
+          .execute_update(table, assignments, predicate, joins, from_tables, returning)
           .await
-        {
-          Ok(rows) => {
-            let events = writer.commit().await?;
-            Ok((
-              match returning_columns {
-                Some(columns) => EngineResult::new_with_columns(rows, columns),
-                None => EngineResult::new(rows),
-              },
-              events,
-            ))
-          }
-          Err(error) => {
-            let _ = writer.rollback().await;
-            Err(error)
-          }
-        }
       }
       EngineQuery::Delete {
         table,
         predicate,
         returning,
-      } => {
-        let mut writer = self.writer();
-        let returning_columns = match &returning {
-          Some(columns) => Some(self.output_columns_for_returning(&table, columns)?),
-          None => None,
-        };
-        match writer.delete(&table, predicate, returning).await {
-          Ok(rows) => {
-            let events = writer.commit().await?;
-            Ok((
-              match returning_columns {
-                Some(columns) => EngineResult::new_with_columns(rows, columns),
-                None => EngineResult::new(rows),
-              },
-              events,
-            ))
-          }
-          Err(error) => {
-            let _ = writer.rollback().await;
-            Err(error)
-          }
-        }
-      }
+      } => self.execute_delete(table, predicate, returning).await,
       EngineQuery::Select { .. } => Err(EngineError::SchemaMismatch(
         "write query dispatcher received select query".into(),
       )),
+    }
+  }
+
+  async fn execute_insert(
+    &self,
+    table: String,
+    row: crate::EngineRow,
+    returning: Option<Vec<UpdateValueExpr>>,
+  ) -> Result<(EngineResult, Vec<crate::ChangeEvent>), EngineError> {
+    let mut writer = self.writer();
+    let returning_columns = match &returning {
+      Some(columns) => Some(self.output_columns_for_returning(&table, columns)?),
+      None => None,
+    };
+
+    let rows = writer.insert_returning(&table, row, returning).await;
+    self.commit_writer(writer, rows, returning_columns).await
+  }
+
+  async fn execute_update(
+    &self,
+    table: String,
+    assignments: Vec<crate::query::UpdateAssignment>,
+    predicate: Option<crate::query::QualifiedPredicate>,
+    joins: Vec<crate::query::JoinClause>,
+    from_tables: Vec<String>,
+    returning: Option<Vec<UpdateValueExpr>>,
+  ) -> Result<(EngineResult, Vec<crate::ChangeEvent>), EngineError> {
+    let mut writer = self.writer();
+    let returning_columns = match &returning {
+      Some(columns) => Some(self.output_columns_for_returning(&table, columns)?),
+      None => None,
+    };
+
+    let rows = writer
+      .update(
+        &table,
+        assignments,
+        predicate,
+        joins,
+        from_tables,
+        returning,
+      )
+      .await;
+    self.commit_writer(writer, rows, returning_columns).await
+  }
+
+  async fn execute_delete(
+    &self,
+    table: String,
+    predicate: Option<crate::query::QualifiedPredicate>,
+    returning: Option<Vec<UpdateValueExpr>>,
+  ) -> Result<(EngineResult, Vec<crate::ChangeEvent>), EngineError> {
+    let mut writer = self.writer();
+    let returning_columns = match &returning {
+      Some(columns) => Some(self.output_columns_for_returning(&table, columns)?),
+      None => None,
+    };
+
+    let rows = writer.delete(&table, predicate, returning).await;
+    self.commit_writer(writer, rows, returning_columns).await
+  }
+
+  async fn commit_writer(
+    &self,
+    writer: EngineWriteTxn<'_, S>,
+    result: Result<Vec<crate::EngineRow>, EngineError>,
+    returning_columns: Option<Vec<crate::query::ResultColumn>>,
+  ) -> Result<(EngineResult, Vec<crate::ChangeEvent>), EngineError> {
+    match result {
+      Ok(rows) => {
+        let events = writer.commit().await?;
+        Ok((self.build_result(rows, returning_columns), events))
+      }
+      Err(error) => {
+        let _ = writer.rollback().await;
+        Err(error)
+      }
+    }
+  }
+
+  fn build_result(
+    &self,
+    rows: Vec<crate::EngineRow>,
+    returning_columns: Option<Vec<crate::query::ResultColumn>>,
+  ) -> EngineResult {
+    match returning_columns {
+      Some(columns) => EngineResult::new_with_columns(rows, columns),
+      None => EngineResult::new(rows),
     }
   }
 }
