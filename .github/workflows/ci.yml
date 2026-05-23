@@ -43,6 +43,9 @@ jobs:
       - name: Cargo clippy
         run: just clippy
 
+      - name: Cargo crap
+        run: just crap-summary
+
   cargo-tests:
     name: Cargo tests
     needs: lint

@@ -4,20 +4,22 @@ use async_lock::RwLock;
 use async_stream::stream;
 use automerge::AutoCommit;
 use futures::{StreamExt, pin_mut};
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::automerge_btree::{AutomergeBTree, AutomergeEntry, DocumentChangeKey};
-use db_core::{BTree, BTreeError, BTreeExecutor, BTreeTransaction};
-use db_types::{StoreKey, StoreValue};
+use db_core::{BTree, BTreeError, BTreeExecutor, BTreeTransaction, decode_with_version};
+use db_types::{
+  EngineKey, EngineValue, StoreKey, StoreValue,
+  key_encoding::{DefaultEncoding, KeyEncoding, RowEncoding},
+};
 
 mod doc_payload;
 mod named;
 mod named_routing;
 
+use db_types::codec::{decode_store_value, encode_store_value};
 use doc_payload::{
-  is_direct_document, is_tombstone, read_direct_document_entry, read_row_columns,
-  read_store_key_metadata, set_doc_value, set_row_columns, set_store_key_metadata, set_tombstone,
+  read_row_columns, read_store_key_metadata, set_row_columns, set_store_key_metadata,
 };
 pub use named::{AutomergeNamedTransaction, AutomergeNamedTree, AutomergeNamedTreeTransaction};
 
@@ -121,47 +123,35 @@ pub fn automerge_metrics(docs: &BTreeMap<Uuid, AutoCommit>) -> (usize, usize) {
   (document_count, total_document_bytes)
 }
 
-pub(crate) fn make_doc_id(prefix: &str, name: &str) -> Uuid {
-  let mut hasher = Sha256::new();
-  hasher.update(prefix.as_bytes());
-  hasher.update(name.as_bytes());
-  let digest = hasher.finalize();
-  Uuid::from_slice(&digest[..16]).unwrap_or(Uuid::nil())
-}
+const TABLE_SCHEMA_TREE: &str = "sys:table_schemas";
+const INDEX_SCHEMA_TREE: &str = "sys:index_schemas";
 
-fn doc_id_for_key(key: &StoreKey) -> Uuid {
+fn tree_name_for_store_key(key: &StoreKey) -> String {
   match key {
-    StoreKey::TableRow {
-      table_name,
-      primary_key,
-    } => {
-      let mut hasher = Sha256::new();
-      hasher.update(b"table:row:");
-      hasher.update(table_name.as_bytes());
-      hasher.update(primary_key); // EngineKey is already bytes
-      let digest = hasher.finalize();
-      Uuid::from_slice(&digest[..16]).unwrap_or(Uuid::nil())
-    }
-    StoreKey::IndexEntry {
-      index_name,
-      index_key,
-      row_pk,
-    } => {
-      let mut hasher = Sha256::new();
-      hasher.update(b"index:entry:");
-      hasher.update(index_name.as_bytes());
-      hasher.update(index_key); // EngineKey is already bytes
-      hasher.update(row_pk); // EngineKey is already bytes
-      let digest = hasher.finalize();
-      Uuid::from_slice(&digest[..16]).unwrap_or(Uuid::nil())
-    }
-    StoreKey::TableSchema { table_name } => make_doc_id("table:schema:", table_name),
-    StoreKey::IndexSchema { index_name } => make_doc_id("index:schema:", index_name),
+    StoreKey::TableRow { table_name, .. } => format!("t:{table_name}"),
+    StoreKey::IndexEntry { index_name, .. } => format!("i:{index_name}"),
+    StoreKey::TableSchema { .. } => TABLE_SCHEMA_TREE.to_string(),
+    StoreKey::IndexSchema { .. } => INDEX_SCHEMA_TREE.to_string(),
   }
 }
 
-fn is_table_row_key(key: &StoreKey) -> bool {
-  matches!(key, StoreKey::TableRow { .. })
+fn tree_key_for_store_key(key: &StoreKey) -> EngineKey {
+  match key {
+    StoreKey::TableRow { primary_key, .. } => primary_key.clone(),
+    StoreKey::IndexEntry {
+      index_key, row_pk, ..
+    } => {
+      let mut composite = index_key.clone();
+      composite.extend_from_slice(row_pk);
+      composite
+    }
+    StoreKey::TableSchema { table_name } => schema_name_key(table_name),
+    StoreKey::IndexSchema { index_name } => schema_name_key(index_name),
+  }
+}
+
+fn schema_name_key(name: &str) -> EngineKey {
+  <DefaultEncoding as KeyEncoding>::encode_values(&[EngineValue::Text(name.to_string())])
 }
 
 fn key_in_range<K, R>(key: &K, range: &R) -> bool
@@ -184,36 +174,48 @@ where
   start && end
 }
 
-fn doc_with_row(
-  existing: Option<AutoCommit>,
-  key: &StoreKey,
-  row: &[db_types::EngineValue],
-) -> Result<AutoCommit, BTreeError> {
-  let mut doc = existing.unwrap_or_default();
-  set_store_key_metadata(&mut doc, key)?;
-  set_row_columns(&mut doc, row)?;
-  Ok(doc)
+fn decode_schema_value(bytes: &[u8]) -> Result<StoreValue, BTreeError> {
+  decode_with_version(bytes, decode_store_value).map_err(BTreeError::other)
 }
 
-fn doc_with_value(
-  existing: Option<AutoCommit>,
-  key: &StoreKey,
-  value: &StoreValue,
-) -> Result<AutoCommit, BTreeError> {
-  let mut doc = existing.unwrap_or_default();
-  set_store_key_metadata(&mut doc, key)?;
-  set_doc_value(&mut doc, value)?;
-  Ok(doc)
+fn store_value_for_doc(key: &StoreKey, doc: &AutoCommit) -> Result<Option<StoreValue>, BTreeError> {
+  if let StoreKey::TableRow { .. } = key {
+    return Ok(read_row_columns(doc)?.and_then(|row| {
+      if row.is_empty() {
+        None
+      } else {
+        Some(StoreValue::Row(row))
+      }
+    }));
+  }
+
+  if named::is_named_tombstone(doc)? {
+    return Ok(None);
+  }
+
+  if let StoreKey::IndexEntry { .. } = key {
+    return Ok(Some(StoreValue::IndexEntry));
+  }
+
+  let bytes = match named::read_named_value_bytes(doc)? {
+    Some(bytes) => bytes,
+    None => return Ok(None),
+  };
+  decode_schema_value(&bytes).map(Some)
 }
 
-fn doc_with_tombstone(
-  existing: Option<AutoCommit>,
+fn build_removed_named_doc(
+  doc: AutoCommit,
   key: &StoreKey,
-) -> Result<AutoCommit, BTreeError> {
-  let mut doc = existing.unwrap_or_default();
-  set_store_key_metadata(&mut doc, key)?;
-  set_tombstone(&mut doc)?;
-  Ok(doc)
+  tree_key: &EngineKey,
+) -> Result<(AutoCommit, Option<StoreValue>), BTreeError> {
+  if named::is_named_tombstone(&doc)? {
+    return Ok((doc, None));
+  }
+
+  let removed = store_value_for_doc(key, &doc)?;
+  let next_doc = named::build_named_tombstone_with_store_key(doc, key, tree_key)?;
+  Ok((next_doc, removed))
 }
 
 pub struct AutomergeEngineStoreTransaction<B>
@@ -240,23 +242,6 @@ where
     set_row_columns(&mut doc, &[])?;
     Ok((doc, prev.map(StoreValue::Row)))
   }
-
-  fn build_removed_direct_doc(
-    doc: AutoCommit,
-    key: &StoreKey,
-  ) -> Result<(AutoCommit, Option<StoreValue>), BTreeError> {
-    if is_tombstone(&doc)? {
-      return Ok((doc, None));
-    }
-
-    let prev = match read_direct_document_entry(&doc)? {
-      Some(value) => value,
-      None => return Ok((doc, None)),
-    };
-
-    let next_doc = doc_with_tombstone(Some(doc), key)?;
-    Ok((next_doc, Some(prev)))
-  }
 }
 
 impl<B> BTreeExecutor<StoreKey, StoreValue> for AutomergeEngineStoreTransaction<B>
@@ -275,31 +260,13 @@ where
     let key = key.borrow().clone();
     let inner = &self.inner;
     async move {
-      let doc_id = doc_id_for_key(&key);
-      match inner.get(&doc_id).await? {
-        None => Ok(None),
-        Some(doc) => {
-          if is_table_row_key(&key) {
-            return Ok(read_row_columns(&doc)?.and_then(|row| {
-              if row.is_empty() {
-                None
-              } else {
-                Some(StoreValue::Row(row))
-              }
-            }));
-          }
-
-          if is_tombstone(&doc)? {
-            return Ok(None);
-          }
-
-          if let Some(value) = read_direct_document_entry(&doc)? {
-            return Ok(Some(value));
-          }
-
-          Ok(None)
-        }
-      }
+      let tree = tree_name_for_store_key(&key);
+      let tree_key = tree_key_for_store_key(&key);
+      let doc_id = named_routing::doc_id_for_tree_key(&tree, &tree_key)?;
+      let Some(doc) = inner.get(&doc_id).await? else {
+        return Ok(None);
+      };
+      store_value_for_doc(&key, &doc)
     }
   }
 
@@ -314,15 +281,26 @@ where
   {
     let inner = &mut self.inner;
     async move {
-      let doc_id = doc_id_for_key(&key);
+      let tree = tree_name_for_store_key(&key);
+      let tree_key = tree_key_for_store_key(&key);
+      let doc_id = named_routing::doc_id_for_tree_key(&tree, &tree_key)?;
       let existing = inner.get(&doc_id).await?;
-      let next_doc = if is_table_row_key(&key) {
-        match &value {
-          StoreValue::Row(row) => doc_with_row(existing, &key, row)?,
+      let next_doc = match &key {
+        StoreKey::TableRow { .. } => match value {
+          StoreValue::Row(row) => {
+            let encoded_row = <DefaultEncoding as RowEncoding>::encode_values(&row);
+            named::build_named_tree_document(&tree, &tree_key, encoded_row, existing)?
+          }
           _ => return Err(BTreeError::UnsupportedOperation),
+        },
+        StoreKey::IndexEntry { row_pk, .. } => {
+          named::build_named_doc_with_store_key(existing, &key, &tree_key, row_pk)?
         }
-      } else {
-        doc_with_value(existing, &key, &value)?
+        StoreKey::TableSchema { .. } | StoreKey::IndexSchema { .. } => {
+          let mut encoded = Vec::new();
+          encode_store_value(&mut encoded, &value);
+          named::build_named_doc_with_store_key(existing, &key, &tree_key, &encoded)?
+        }
       };
       inner.insert(doc_id, next_doc).await
     }
@@ -340,16 +318,18 @@ where
     let key = key.borrow().clone();
     let inner = &mut self.inner;
     async move {
-      let doc_id = doc_id_for_key(&key);
+      let tree = tree_name_for_store_key(&key);
+      let tree_key = tree_key_for_store_key(&key);
+      let doc_id = named_routing::doc_id_for_tree_key(&tree, &tree_key)?;
       let existing = inner.get(&doc_id).await?;
       let Some(doc) = existing else {
         return Ok(None);
       };
 
-      let (next_doc, result) = if is_table_row_key(&key) {
+      let (next_doc, result) = if matches!(key, StoreKey::TableRow { .. }) {
         Self::build_removed_row_doc(doc, &key)?
       } else {
-        Self::build_removed_direct_doc(doc, &key)?
+        build_removed_named_doc(doc, &key, &tree_key)?
       };
 
       inner.insert(doc_id, next_doc).await?;
@@ -373,12 +353,10 @@ where
       pin_mut!(doc_stream);
       while let Some(item) = doc_stream.next().await {
         let (_doc_id, doc) = item?;
-        if is_direct_document(&doc)? {
-          if let Some(value) = read_direct_document_entry(&doc)? {
-            if let Some(key) = read_store_key_metadata(&doc)? {
-              if key_in_range(&key, &range) {
-                yield Ok((key, value));
-              }
+        if let Some(key) = read_store_key_metadata(&doc)? {
+          if let Some(value) = store_value_for_doc(&key, &doc)? {
+            if key_in_range(&key, &range) {
+              yield Ok((key, value));
             }
           }
         }

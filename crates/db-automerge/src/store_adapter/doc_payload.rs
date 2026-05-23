@@ -5,9 +5,9 @@ use automerge::ScalarValue;
 use automerge::Value;
 use automerge::transaction::Transactable;
 use db_core::{BTreeError, decode_with_version};
-use db_types::codec::{decode_store_key, decode_store_value, encode_store_key, encode_store_value};
+use db_types::codec::{decode_store_key, encode_store_key};
 use db_types::key_encoding::{DefaultEncoding, RowEncoding};
-use db_types::{EngineValue, StoreKey, StoreValue};
+use db_types::{EngineValue, StoreKey};
 
 const ROW_FIELD: &str = "row";
 const STORE_KEY_FIELD: &str = "store_key";
@@ -46,65 +46,6 @@ pub(crate) fn clear_doc_fields(doc: &mut AutoCommit) -> Result<(), BTreeError> {
     }
   }
   Ok(())
-}
-
-pub(crate) fn set_doc_value(doc: &mut AutoCommit, value: &StoreValue) -> Result<(), BTreeError> {
-  clear_doc_fields(doc)?;
-  let mut encoded = Vec::new();
-  encode_store_value(&mut encoded, value);
-  doc
-    .put(&automerge::ROOT, VALUE_FIELD, encoded)
-    .map_err(BTreeError::other)?;
-  Ok(())
-}
-
-pub(crate) fn read_value_bytes(doc: &AutoCommit) -> Result<Option<Vec<u8>>, BTreeError> {
-  if let Ok(Some((value, _id))) = doc.get(&automerge::ROOT, VALUE_FIELD) {
-    return Ok(Some(scalar_bytes(value)?));
-  }
-  Ok(None)
-}
-
-pub(crate) fn set_tombstone(doc: &mut AutoCommit) -> Result<(), BTreeError> {
-  clear_doc_fields(doc)?;
-  doc
-    .put(&automerge::ROOT, TOMBSTONE_FIELD, true)
-    .map_err(BTreeError::other)?;
-  Ok(())
-}
-
-pub(crate) fn is_tombstone(doc: &AutoCommit) -> Result<bool, BTreeError> {
-  if let Ok(Some((value, _id))) = doc.get(&automerge::ROOT, TOMBSTONE_FIELD) {
-    return match value {
-      Value::Scalar(scalar) => match scalar.as_ref() {
-        ScalarValue::Boolean(b) => Ok(*b),
-        _ => Err(BTreeError::UnsupportedOperation),
-      },
-      _ => Err(BTreeError::UnsupportedOperation),
-    };
-  }
-  Ok(false)
-}
-
-pub(crate) fn read_doc_value(doc: &AutoCommit) -> Result<Option<StoreValue>, BTreeError> {
-  if is_tombstone(doc)? {
-    return Ok(None);
-  }
-
-  if let Some(row) = read_row_columns(doc)? {
-    if row.is_empty() {
-      return Ok(None);
-    }
-    return Ok(Some(StoreValue::Row(row)));
-  }
-
-  if let Some(bytes) = read_value_bytes(doc)? {
-    return decode_with_version(&bytes, decode_store_value)
-      .map(Some)
-      .map_err(BTreeError::other);
-  }
-
-  Ok(None)
 }
 
 pub(crate) fn set_row_columns(doc: &mut AutoCommit, row: &[EngineValue]) -> Result<(), BTreeError> {
@@ -174,28 +115,6 @@ pub(crate) fn read_store_key_metadata(doc: &AutoCommit) -> Result<Option<StoreKe
   decode_with_version(&bytes, decode_store_key)
     .map(Some)
     .map_err(BTreeError::other)
-}
-
-pub(crate) fn is_direct_document(doc: &AutoCommit) -> Result<bool, BTreeError> {
-  if read_store_key_metadata(doc)?.is_none() {
-    return Ok(false);
-  }
-  if is_tombstone(doc)? {
-    return Ok(true);
-  }
-  if read_row_columns(doc)?.is_some() {
-    return Ok(true);
-  }
-  if read_doc_value(doc)?.is_some() {
-    return Ok(true);
-  }
-  Ok(false)
-}
-
-pub(crate) fn read_direct_document_entry(
-  doc: &AutoCommit,
-) -> Result<Option<StoreValue>, BTreeError> {
-  read_doc_value(doc)
 }
 
 #[cfg(test)]
