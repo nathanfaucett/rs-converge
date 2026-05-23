@@ -79,51 +79,103 @@ fn parse_byte_array(array: &Array) -> Option<Vec<u8>> {
   Some(bytes)
 }
 
+type ParseEngineValueFn = fn(&JsValue, &str) -> Option<Result<EngineValue, JsValue>>;
+
+const ENGINE_VALUE_PARSERS: &[ParseEngineValueFn] = &[
+  try_parse_null,
+  try_parse_number,
+  try_parse_string,
+  try_parse_uint8array,
+  try_parse_array,
+  try_parse_date,
+  try_parse_bool_or_object,
+];
+
 fn parse_engine_value(value: JsValue, path: &str) -> Result<EngineValue, JsValue> {
+  parse_engine_value_impl(&value, path)
+}
+
+fn parse_engine_value_impl(value: &JsValue, path: &str) -> Result<EngineValue, JsValue> {
+  ENGINE_VALUE_PARSERS
+    .iter()
+    .find_map(|parser| parser(value, path))
+    .unwrap_or_else(|| {
+      Err(to_js_error(format!(
+        "invalid param at {path}: unsupported parameter type"
+      )))
+    })
+}
+
+fn try_parse_null(value: &JsValue, _path: &str) -> Option<Result<EngineValue, JsValue>> {
   if value.is_null() || value.is_undefined() {
-    return Ok(EngineValue::Null);
+    Some(Ok(EngineValue::Null))
+  } else {
+    None
   }
+}
 
-  if let Some(number) = value.as_f64() {
-    return Ok(number_to_engine_value(number));
+fn try_parse_number(value: &JsValue, _path: &str) -> Option<Result<EngineValue, JsValue>> {
+  value
+    .as_f64()
+    .map(|number| Ok(number_to_engine_value(number)))
+}
+
+fn try_parse_string(value: &JsValue, _path: &str) -> Option<Result<EngineValue, JsValue>> {
+  value.as_string().map(|text| Ok(EngineValue::Text(text)))
+}
+
+fn try_parse_uint8array(value: &JsValue, _path: &str) -> Option<Result<EngineValue, JsValue>> {
+  if Uint8Array::instanceof(value) {
+    Some(parse_uint8array(value))
+  } else {
+    None
   }
+}
 
-  if let Some(text) = value.as_string() {
-    return Ok(EngineValue::Text(text));
+fn try_parse_array(value: &JsValue, path: &str) -> Option<Result<EngineValue, JsValue>> {
+  if Array::is_array(value) {
+    Some(parse_js_array(value, path))
+  } else {
+    None
   }
+}
 
-  if Uint8Array::instanceof(&value) {
-    let bytes = Uint8Array::new(&value).to_vec();
+fn try_parse_date(value: &JsValue, path: &str) -> Option<Result<EngineValue, JsValue>> {
+  if is_date(value) {
+    Some(parse_date_value(value, path))
+  } else {
+    None
+  }
+}
+
+fn try_parse_bool_or_object(value: &JsValue, path: &str) -> Option<Result<EngineValue, JsValue>> {
+  if value.as_bool().is_some() || value.is_object() {
+    Some(parse_json_value(value, path))
+  } else {
+    None
+  }
+}
+
+fn parse_uint8array(value: &JsValue) -> Result<EngineValue, JsValue> {
+  let bytes = Uint8Array::new(value).to_vec();
+  Ok(bytes_to_engine_value(bytes))
+}
+
+fn parse_js_array(value: &JsValue, path: &str) -> Result<EngineValue, JsValue> {
+  let array = Array::from(value);
+  if let Some(bytes) = parse_byte_array(&array) {
     return Ok(bytes_to_engine_value(bytes));
   }
+  parse_json_value(value, path)
+}
 
-  if Array::is_array(&value) {
-    let array = Array::from(&value);
-    if let Some(bytes) = parse_byte_array(&array) {
-      return Ok(bytes_to_engine_value(bytes));
-    }
-    return parse_json_value(&value, path);
+fn parse_date_value(value: &JsValue, path: &str) -> Result<EngineValue, JsValue> {
+  match to_iso_string(value) {
+    Ok(iso_string) => Ok(EngineValue::Text(iso_string)),
+    Err(_) => Err(to_js_error(format!(
+      "invalid param at {path}: cannot extract ISO string from Date"
+    ))),
   }
-
-  // Check for Date objects and convert to ISO string (Text)
-  if is_date(&value) {
-    match to_iso_string(&value) {
-      Ok(iso_string) => return Ok(EngineValue::Text(iso_string)),
-      Err(_) => {
-        return Err(to_js_error(format!(
-          "invalid param at {path}: cannot extract ISO string from Date"
-        )));
-      }
-    }
-  }
-
-  if value.as_bool().is_some() || value.is_object() {
-    return parse_json_value(&value, path);
-  }
-
-  Err(to_js_error(format!(
-    "invalid param at {path}: unsupported parameter type"
-  )))
 }
 
 fn parse_named_params(params: JsValue) -> Result<BTreeMap<String, EngineValue>, JsValue> {

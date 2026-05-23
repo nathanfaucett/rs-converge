@@ -656,6 +656,88 @@ fn translate_select_query(
   resolver: &dyn SchemaResolver,
   mapper: &dyn ValueMapper,
 ) -> Result<db_engine::EngineQuery, TranslateError> {
+  translate_select_query_impl(select, order_by, limit_clause, resolver, mapper)
+}
+
+fn translate_select_query_impl(
+  select: &Select,
+  order_by: &Option<OrderBy>,
+  limit_clause: &Option<LimitClause>,
+  resolver: &dyn SchemaResolver,
+  mapper: &dyn ValueMapper,
+) -> Result<db_engine::EngineQuery, TranslateError> {
+  translate_select_query_body(select, order_by, limit_clause, resolver, mapper)
+}
+
+fn translate_select_query_body(
+  select: &Select,
+  order_by: &Option<OrderBy>,
+  limit_clause: &Option<LimitClause>,
+  resolver: &dyn SchemaResolver,
+  mapper: &dyn ValueMapper,
+) -> Result<db_engine::EngineQuery, TranslateError> {
+  translate_select_query_core(select, order_by, limit_clause, resolver, mapper)
+}
+
+fn translate_select_query_core(
+  select: &Select,
+  order_by: &Option<OrderBy>,
+  limit_clause: &Option<LimitClause>,
+  resolver: &dyn SchemaResolver,
+  mapper: &dyn ValueMapper,
+) -> Result<db_engine::EngineQuery, TranslateError> {
+  let (base_table, projection_qc, qualified_pred, options) =
+    build_select_query_parts(select, order_by, limit_clause, resolver, mapper)?;
+
+  compose_select_query(base_table, projection_qc, qualified_pred, options)
+}
+
+fn compose_select_query(
+  base_table: String,
+  projection_qc: Vec<db_engine::QualifiedColumn>,
+  qualified_pred: Option<db_engine::QualifiedPredicate>,
+  options: db_engine::SelectOptions,
+) -> Result<db_engine::EngineQuery, TranslateError> {
+  if select_is_simple(&options) {
+    return translate_simple_select(base_table, projection_qc, qualified_pred);
+  }
+
+  let final_projection = select_final_projection(projection_qc, &options);
+
+  Ok(db_engine::EngineQuery::Select {
+    table: base_table,
+    projection: final_projection,
+    predicate: qualified_pred,
+    options: Box::new(options),
+  })
+}
+
+fn select_final_projection(
+  projection_qc: Vec<db_engine::QualifiedColumn>,
+  options: &db_engine::SelectOptions,
+) -> Vec<db_engine::QualifiedColumn> {
+  if !options.aggregates.is_empty() || !options.group_by.is_empty() {
+    Vec::new()
+  } else {
+    projection_qc
+  }
+}
+
+fn build_select_query_parts(
+  select: &Select,
+  order_by: &Option<OrderBy>,
+  limit_clause: &Option<LimitClause>,
+  resolver: &dyn SchemaResolver,
+  mapper: &dyn ValueMapper,
+) -> Result<
+  (
+    String,
+    Vec<db_engine::QualifiedColumn>,
+    Option<db_engine::QualifiedPredicate>,
+    db_engine::SelectOptions,
+  ),
+  TranslateError,
+> {
   if select.from.len() != 1 {
     return Err(TranslateError::UnsupportedFeature(
       "only single FROM with optional JOINs supported".into(),
@@ -739,22 +821,7 @@ fn translate_select_query(
     having_pred,
   );
 
-  if select_is_simple(&options) {
-    return translate_simple_select(base_table, projection_qc, qualified_pred);
-  }
-
-  let final_projection = if !options.aggregates.is_empty() || !options.group_by.is_empty() {
-    Vec::new()
-  } else {
-    projection_qc
-  };
-
-  Ok(db_engine::EngineQuery::Select {
-    table: base_table,
-    projection: final_projection,
-    predicate: qualified_pred,
-    options: Box::new(options),
-  })
+  Ok((base_table, projection_qc, qualified_pred, options))
 }
 
 fn parse_select_predicate(
@@ -1077,41 +1144,130 @@ fn sql_expr_to_update_value_expr(
   table_schemas: &HashMap<String, db_engine::TableSchema>,
   mapper: &dyn ValueMapper,
 ) -> Result<db_engine::UpdateValueExpr, TranslateError> {
+  sql_expr_to_update_value_expr_impl(expr, alias_map, table_schemas, mapper)
+}
+
+fn sql_expr_to_update_value_expr_impl(
+  expr: &SqlExpr,
+  alias_map: &HashMap<String, String>,
+  table_schemas: &HashMap<String, db_engine::TableSchema>,
+  mapper: &dyn ValueMapper,
+) -> Result<db_engine::UpdateValueExpr, TranslateError> {
+  sql_expr_to_update_value_expr_body(expr, alias_map, table_schemas, mapper)
+}
+
+fn sql_expr_to_update_value_expr_body(
+  expr: &SqlExpr,
+  alias_map: &HashMap<String, String>,
+  table_schemas: &HashMap<String, db_engine::TableSchema>,
+  mapper: &dyn ValueMapper,
+) -> Result<db_engine::UpdateValueExpr, TranslateError> {
+  sql_expr_to_update_value_expr_core(expr, alias_map, table_schemas, mapper)
+}
+
+fn sql_expr_to_update_value_expr_core(
+  expr: &SqlExpr,
+  alias_map: &HashMap<String, String>,
+  table_schemas: &HashMap<String, db_engine::TableSchema>,
+  mapper: &dyn ValueMapper,
+) -> Result<db_engine::UpdateValueExpr, TranslateError> {
+  let converters: &[fn(
+    &SqlExpr,
+    &HashMap<String, String>,
+    &HashMap<String, db_engine::TableSchema>,
+    &dyn ValueMapper,
+  ) -> Result<Option<db_engine::UpdateValueExpr>, TranslateError>] = &[
+    sql_expr_to_update_value_expr_value,
+    sql_expr_to_update_value_expr_column,
+    sql_expr_to_update_value_expr_binary,
+  ];
+
+  for converter in converters {
+    if let Some(expr) = converter(expr, alias_map, table_schemas, mapper)? {
+      return Ok(expr);
+    }
+  }
+
+  Err(TranslateError::UnsupportedFeature(
+    "unsupported UPDATE assignment expression".into(),
+  ))
+}
+
+fn sql_expr_to_update_value_expr_value(
+  expr: &SqlExpr,
+  _alias_map: &HashMap<String, String>,
+  _table_schemas: &HashMap<String, db_engine::TableSchema>,
+  mapper: &dyn ValueMapper,
+) -> Result<Option<db_engine::UpdateValueExpr>, TranslateError> {
   match expr {
-    SqlExpr::Value(_) | SqlExpr::Cast { .. } => Ok(db_engine::UpdateValueExpr::Value(
+    SqlExpr::Value(_) | SqlExpr::Cast { .. } => Ok(Some(db_engine::UpdateValueExpr::Value(
       mapper.map_sql_value(expr)?,
-    )),
+    ))),
+    _ => Ok(None),
+  }
+}
+
+fn sql_expr_to_update_value_expr_column(
+  expr: &SqlExpr,
+  alias_map: &HashMap<String, String>,
+  table_schemas: &HashMap<String, db_engine::TableSchema>,
+  _mapper: &dyn ValueMapper,
+) -> Result<Option<db_engine::UpdateValueExpr>, TranslateError> {
+  match expr {
     SqlExpr::Identifier(_) | SqlExpr::CompoundIdentifier(_) => {
       let column = helpers::resolve_column_local(expr, alias_map, table_schemas)?;
-      Ok(db_engine::UpdateValueExpr::Column(column))
+      Ok(Some(db_engine::UpdateValueExpr::Column(column)))
     }
-    SqlExpr::BinaryOp { left, op, right } => {
-      let left_expr = sql_expr_to_update_value_expr(left, alias_map, table_schemas, mapper)?;
-      let right_expr = sql_expr_to_update_value_expr(right, alias_map, table_schemas, mapper)?;
-      match op {
-        BinaryOperator::Plus => Ok(db_engine::UpdateValueExpr::Add(
-          Box::new(left_expr),
-          Box::new(right_expr),
-        )),
-        BinaryOperator::Minus => Ok(db_engine::UpdateValueExpr::Subtract(
-          Box::new(left_expr),
-          Box::new(right_expr),
-        )),
-        BinaryOperator::Multiply => Ok(db_engine::UpdateValueExpr::Multiply(
-          Box::new(left_expr),
-          Box::new(right_expr),
-        )),
-        BinaryOperator::Divide => Ok(db_engine::UpdateValueExpr::Divide(
-          Box::new(left_expr),
-          Box::new(right_expr),
-        )),
-        _ => Err(TranslateError::UnsupportedFeature(
-          "unsupported operator in UPDATE assignment expression".into(),
-        )),
-      }
-    }
+    _ => Ok(None),
+  }
+}
+
+fn sql_expr_to_update_value_expr_binary(
+  expr: &SqlExpr,
+  alias_map: &HashMap<String, String>,
+  table_schemas: &HashMap<String, db_engine::TableSchema>,
+  mapper: &dyn ValueMapper,
+) -> Result<Option<db_engine::UpdateValueExpr>, TranslateError> {
+  if let SqlExpr::BinaryOp { left, op, right } = expr {
+    Ok(Some(translate_binary_update_expr(
+      left,
+      op,
+      right,
+      alias_map,
+      table_schemas,
+      mapper,
+    )?))
+  } else {
+    Ok(None)
+  }
+}
+
+fn translate_binary_update_expr(
+  left: &SqlExpr,
+  op: &BinaryOperator,
+  right: &SqlExpr,
+  alias_map: &HashMap<String, String>,
+  table_schemas: &HashMap<String, db_engine::TableSchema>,
+  mapper: &dyn ValueMapper,
+) -> Result<db_engine::UpdateValueExpr, TranslateError> {
+  let left_expr = sql_expr_to_update_value_expr(left, alias_map, table_schemas, mapper)?;
+  let right_expr = sql_expr_to_update_value_expr(right, alias_map, table_schemas, mapper)?;
+  let boxed_left = Box::new(left_expr);
+  let boxed_right = Box::new(right_expr);
+
+  match op {
+    BinaryOperator::Plus => Ok(db_engine::UpdateValueExpr::Add(boxed_left, boxed_right)),
+    BinaryOperator::Minus => Ok(db_engine::UpdateValueExpr::Subtract(
+      boxed_left,
+      boxed_right,
+    )),
+    BinaryOperator::Multiply => Ok(db_engine::UpdateValueExpr::Multiply(
+      boxed_left,
+      boxed_right,
+    )),
+    BinaryOperator::Divide => Ok(db_engine::UpdateValueExpr::Divide(boxed_left, boxed_right)),
     _ => Err(TranslateError::UnsupportedFeature(
-      "unsupported UPDATE assignment expression".into(),
+      "unsupported operator in UPDATE assignment expression".into(),
     )),
   }
 }
@@ -1214,53 +1370,77 @@ fn translate_returning_projection(
 
   let mut projection: Vec<db_engine::UpdateValueExpr> = Vec::new();
   for item in returning {
-    match item {
-      SelectItem::Wildcard(_) => {
-        projection.extend((0..schema.columns.len()).map(|index| {
-          db_engine::UpdateValueExpr::Column(db_engine::QualifiedColumn {
-            table: target_table.to_string(),
-            column_index: index,
-          })
-        }));
-      }
-      SelectItem::QualifiedWildcard(kind, _) => {
-        let table_name = match kind {
-          sqlparser::ast::SelectItemQualifiedWildcardKind::ObjectName(name) => {
-            let raw = object_name_to_string(name);
-            alias_map.get(&raw).cloned().unwrap_or(raw)
-          }
-          _ => {
-            return Err(TranslateError::UnsupportedFeature(
-              "RETURNING qualified wildcard expression is not supported".into(),
-            ));
-          }
-        };
-        if table_name != target_table {
-          return Err(TranslateError::UnsupportedFeature(
-            "RETURNING can reference only target table columns".into(),
-          ));
-        }
-        projection.extend((0..schema.columns.len()).map(|index| {
-          db_engine::UpdateValueExpr::Column(db_engine::QualifiedColumn {
-            table: target_table.to_string(),
-            column_index: index,
-          })
-        }));
-      }
-      SelectItem::UnnamedExpr(expr) => {
-        let returning_expr = sql_expr_to_update_value_expr(expr, alias_map, table_schemas, mapper)?;
-        ensure_returning_expr_uses_target(&returning_expr, target_table)?;
-        projection.push(returning_expr);
-      }
-      SelectItem::ExprWithAlias { expr, .. } => {
-        let returning_expr = sql_expr_to_update_value_expr(expr, alias_map, table_schemas, mapper)?;
-        ensure_returning_expr_uses_target(&returning_expr, target_table)?;
-        projection.push(returning_expr);
-      }
-    }
+    projection.extend(translate_returning_item(
+      item,
+      target_table,
+      alias_map,
+      schema.columns.len(),
+      table_schemas,
+      mapper,
+    )?);
   }
 
   Ok(projection)
+}
+
+fn translate_returning_item(
+  item: &SelectItem,
+  target_table: &str,
+  alias_map: &HashMap<String, String>,
+  column_count: usize,
+  table_schemas: &HashMap<String, db_engine::TableSchema>,
+  mapper: &dyn ValueMapper,
+) -> Result<Vec<db_engine::UpdateValueExpr>, TranslateError> {
+  match item {
+    SelectItem::Wildcard(_) => Ok(
+      (0..column_count)
+        .map(|index| {
+          db_engine::UpdateValueExpr::Column(db_engine::QualifiedColumn {
+            table: target_table.to_string(),
+            column_index: index,
+          })
+        })
+        .collect(),
+    ),
+    SelectItem::QualifiedWildcard(kind, _) => {
+      let table_name = match kind {
+        sqlparser::ast::SelectItemQualifiedWildcardKind::ObjectName(name) => {
+          let raw = object_name_to_string(name);
+          alias_map.get(&raw).cloned().unwrap_or(raw)
+        }
+        _ => {
+          return Err(TranslateError::UnsupportedFeature(
+            "RETURNING qualified wildcard expression is not supported".into(),
+          ));
+        }
+      };
+      if table_name != target_table {
+        return Err(TranslateError::UnsupportedFeature(
+          "RETURNING can reference only target table columns".into(),
+        ));
+      }
+      Ok(
+        (0..column_count)
+          .map(|index| {
+            db_engine::UpdateValueExpr::Column(db_engine::QualifiedColumn {
+              table: target_table.to_string(),
+              column_index: index,
+            })
+          })
+          .collect(),
+      )
+    }
+    SelectItem::UnnamedExpr(expr) => {
+      let returning_expr = sql_expr_to_update_value_expr(expr, alias_map, table_schemas, mapper)?;
+      ensure_returning_expr_uses_target(&returning_expr, target_table)?;
+      Ok(vec![returning_expr])
+    }
+    SelectItem::ExprWithAlias { expr, .. } => {
+      let returning_expr = sql_expr_to_update_value_expr(expr, alias_map, table_schemas, mapper)?;
+      ensure_returning_expr_uses_target(&returning_expr, target_table)?;
+      Ok(vec![returning_expr])
+    }
+  }
 }
 
 fn ensure_returning_expr_uses_target(

@@ -94,13 +94,21 @@ impl<'a> PredicateEvaluator<'a> {
 }
 
 fn resolve_operand(op: &QualifiedOperand, ctx: &dyn RowContext) -> Option<EngineValue> {
+  resolve_operand_impl(op, ctx)
+}
+
+fn resolve_operand_impl(op: &QualifiedOperand, ctx: &dyn RowContext) -> Option<EngineValue> {
   match op {
     QualifiedOperand::Value(v) => Some(v.clone()),
     QualifiedOperand::Column(qc) => ctx.get_value(&qc.table, qc.column_index).cloned(),
-    QualifiedOperand::Lower(inner) => match resolve_operand(inner, ctx) {
-      Some(EngineValue::Text(s)) => Some(EngineValue::Text(s.to_lowercase())),
-      other => other,
-    },
+    QualifiedOperand::Lower(inner) => resolve_lower_operand(inner, ctx),
+  }
+}
+
+fn resolve_lower_operand(inner: &QualifiedOperand, ctx: &dyn RowContext) -> Option<EngineValue> {
+  match resolve_operand(inner, ctx) {
+    Some(EngineValue::Text(s)) => Some(EngineValue::Text(s.to_lowercase())),
+    other => other,
   }
 }
 

@@ -43,48 +43,57 @@ pub fn sql_value_to_engine_value(expr: &SqlExpr) -> Result<db_engine::EngineValu
       expr,
       data_type,
       ..
-    } => match (&**expr, data_type) {
-      (SqlExpr::Value(value), sqlparser::ast::DataType::Uuid) => match &value.value {
-        SqlValue::SingleQuotedString(input) => {
-          let parsed = Uuid::parse_str(input).map_err(|e| {
-            TranslateError::UnsupportedFeature(format!("invalid UUID literal: {}", e))
-          })?;
-          Ok(db_engine::EngineValue::Uuid(*parsed.as_bytes()))
-        }
-        _ => Err(TranslateError::UnsupportedFeature(
-          "UUID cast requires a single-quoted string literal".into(),
-        )),
-      },
-      _ => Err(TranslateError::UnsupportedFeature(
-        "unsupported explicit cast expression".into(),
-      )),
-    },
-    SqlExpr::Value(v) => match &v.value {
-      SqlValue::Number(s, _) => {
-        if s.contains('.') {
-          s.parse::<f64>()
-            .map(db_engine::EngineValue::Float)
-            .map_err(|e| {
-              TranslateError::UnsupportedFeature(format!("invalid float literal: {}", e))
-            })
-        } else {
-          s.parse::<i64>()
-            .map(db_engine::EngineValue::Integer)
-            .map_err(|e| {
-              TranslateError::UnsupportedFeature(format!("invalid integer literal: {}", e))
-            })
-        }
-      }
-      SqlValue::SingleQuotedString(s) => Ok(db_engine::EngineValue::Text(s.clone())),
-      SqlValue::Null => Ok(db_engine::EngineValue::Null),
-      other => Err(TranslateError::UnsupportedFeature(format!(
-        "unsupported literal: {:?}",
-        other
-      ))),
-    },
+    } => parse_cast_expr(expr, data_type),
+    SqlExpr::Value(v) => parse_value_literal(&v.value),
     _ => Err(TranslateError::UnsupportedFeature(
       "expected literal value on RHS".into(),
     )),
+  }
+}
+
+fn parse_cast_expr(
+  expr: &SqlExpr,
+  data_type: &sqlparser::ast::DataType,
+) -> Result<db_engine::EngineValue, TranslateError> {
+  match (expr, data_type) {
+    (SqlExpr::Value(value), sqlparser::ast::DataType::Uuid) => match &value.value {
+      SqlValue::SingleQuotedString(input) => {
+        let parsed = Uuid::parse_str(input).map_err(|e| {
+          TranslateError::UnsupportedFeature(format!("invalid UUID literal: {}", e))
+        })?;
+        Ok(db_engine::EngineValue::Uuid(*parsed.as_bytes()))
+      }
+      _ => Err(TranslateError::UnsupportedFeature(
+        "UUID cast requires a single-quoted string literal".into(),
+      )),
+    },
+    _ => Err(TranslateError::UnsupportedFeature(
+      "unsupported explicit cast expression".into(),
+    )),
+  }
+}
+
+fn parse_value_literal(value: &SqlValue) -> Result<db_engine::EngineValue, TranslateError> {
+  match value {
+    SqlValue::Number(s, _) => parse_numeric_literal(s),
+    SqlValue::SingleQuotedString(s) => Ok(db_engine::EngineValue::Text(s.clone())),
+    SqlValue::Null => Ok(db_engine::EngineValue::Null),
+    other => Err(TranslateError::UnsupportedFeature(format!(
+      "unsupported literal: {:?}",
+      other
+    ))),
+  }
+}
+
+fn parse_numeric_literal(s: &str) -> Result<db_engine::EngineValue, TranslateError> {
+  if s.contains('.') {
+    s.parse::<f64>()
+      .map(db_engine::EngineValue::Float)
+      .map_err(|e| TranslateError::UnsupportedFeature(format!("invalid float literal: {}", e)))
+  } else {
+    s.parse::<i64>()
+      .map(db_engine::EngineValue::Integer)
+      .map_err(|e| TranslateError::UnsupportedFeature(format!("invalid integer literal: {}", e)))
   }
 }
 

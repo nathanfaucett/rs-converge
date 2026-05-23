@@ -315,57 +315,69 @@ where
     &self,
     events: &[ChangeEvent],
   ) -> Result<(), EngineError> {
+    self.recompute_batched_subscriptions_impl(events).await
+  }
+
+  async fn recompute_batched_subscriptions_impl(
+    &self,
+    events: &[ChangeEvent],
+  ) -> Result<(), EngineError> {
+    let ids = self.collect_invalidated_subscription_ids(events);
+    self.recompute_subscriptions(ids).await;
+    Ok(())
+  }
+
+  fn collect_invalidated_subscription_ids(&self, events: &[ChangeEvent]) -> Vec<SubscriptionId> {
     let batch = SubscriptionBatch::new();
     for event in events {
       for sub in self.subscription_registry.affected_by_change(event) {
         batch.invalidate(sub.id);
       }
     }
+    batch.take_invalidated()
+  }
 
-    for id in batch.take_invalidated() {
-      let Some(sub) = self.subscription_registry.get_subscription(id) else {
-        continue;
-      };
-
-      // Recompute the subscription query with scope applied
-      match self.execute_with_scope(sub.query.clone(), &sub.scope).await {
-        Ok(new_results) => {
-          // Check if results changed (delta detection)
-          #[cfg(feature = "std")]
-          let results_changed = match &*sub.last_results.read().unwrap() {
-            None => true, // First time
-            Some(old) => {
-              // Simple comparison: same number of rows and same content
-              old.rows != new_results.rows || old.columns != new_results.columns
-            }
-          };
-          #[cfg(not(feature = "std"))]
-          let results_changed = match &*sub.last_results.read() {
-            None => true, // First time
-            Some(old) => {
-              // Simple comparison: same number of rows and same content
-              old.rows != new_results.rows || old.columns != new_results.columns
-            }
-          };
-
-          if results_changed {
-            // Update last results and call subscriber
-            #[cfg(feature = "std")]
-            let mut last_results = sub.last_results.write().unwrap();
-            #[cfg(not(feature = "std"))]
-            let mut last_results = sub.last_results.write();
-            *last_results = Some(new_results.clone());
-            sub.subscriber.on_results(Ok(new_results));
-          }
-        }
-        Err(e) => {
-          sub.subscriber.on_results(Err(e));
-        }
+  async fn recompute_subscriptions(&self, ids: Vec<SubscriptionId>) {
+    for id in ids {
+      if let Some(sub) = self.subscription_registry.get_subscription(id) {
+        self.recompute_subscription(sub).await;
       }
     }
-
-    Ok(())
   }
+
+  async fn recompute_subscription(&self, sub: Arc<QuerySubscription>) {
+    match self.execute_with_scope(sub.query.clone(), &sub.scope).await {
+      Ok(new_results) => {
+        if subscription_results_changed(&sub, &new_results) {
+          update_subscription_results(&sub, new_results);
+        }
+      }
+      Err(e) => {
+        sub.subscriber.on_results(Err(e));
+      }
+    }
+  }
+}
+
+fn subscription_results_changed(sub: &QuerySubscription, new_results: &EngineResult) -> bool {
+  #[cfg(feature = "std")]
+  let guard = sub.last_results.read().unwrap();
+  #[cfg(not(feature = "std"))]
+  let guard = sub.last_results.read();
+
+  match &*guard {
+    None => true,
+    Some(old) => old.rows != new_results.rows || old.columns != new_results.columns,
+  }
+}
+
+fn update_subscription_results(sub: &QuerySubscription, new_results: EngineResult) {
+  #[cfg(feature = "std")]
+  let mut last_results = sub.last_results.write().unwrap();
+  #[cfg(not(feature = "std"))]
+  let mut last_results = sub.last_results.write();
+  *last_results = Some(new_results.clone());
+  sub.subscriber.on_results(Ok(new_results));
 }
 
 pub struct EngineReadTransaction<'db, S>

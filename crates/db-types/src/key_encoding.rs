@@ -38,7 +38,7 @@ pub struct DefaultEncoding;
 // Engine value encoding helpers (moved from codec.rs)
 // ============================================================================
 
-fn encode_engine_value_into_sink<S: BufferSink>(sink: &mut S, value: &EngineValue) {
+pub(crate) fn encode_engine_value_into_sink<S: BufferSink>(sink: &mut S, value: &EngineValue) {
   match value {
     EngineValue::Null => sink.push_bytes(&[0]),
     EngineValue::Integer(integer) => {
@@ -68,22 +68,54 @@ fn encode_engine_value_into_sink<S: BufferSink>(sink: &mut S, value: &EngineValu
   }
 }
 
-fn decode_engine_value(cursor: &mut Cursor<'_>) -> Result<EngineValue, DecodeError> {
-  match cursor.read_u8()? {
-    0 => Ok(EngineValue::Null),
-    1 => Ok(EngineValue::Integer(cursor.read_i64()?)),
-    2 => Ok(EngineValue::Float(f64::from_bits(cursor.read_u64()?))),
-    3 => Ok(EngineValue::Text(decode_string(cursor)?)),
-    4 => Ok(EngineValue::Blob(decode_bytes(cursor)?)),
-    5 => {
-      let bytes = cursor.read_exact(16)?;
-      let mut value = [0_u8; 16];
-      value.copy_from_slice(bytes);
-      Ok(EngineValue::Uuid(value))
-    }
-    6 => Ok(EngineValue::Json(decode_string(cursor)?)),
-    _ => Err(DecodeError::Malformed),
-  }
+type DecodeFn = fn(&mut Cursor<'_>) -> Result<EngineValue, DecodeError>;
+
+const ENGINE_VALUE_DECODERS: [DecodeFn; 7] = [
+  decode_null,
+  decode_integer,
+  decode_float,
+  decode_text,
+  decode_blob,
+  decode_uuid,
+  decode_json,
+];
+
+pub(crate) fn decode_engine_value(cursor: &mut Cursor<'_>) -> Result<EngineValue, DecodeError> {
+  let tag = cursor.read_u8()?;
+  ENGINE_VALUE_DECODERS
+    .get(tag as usize)
+    .ok_or(DecodeError::Malformed)?(cursor)
+}
+
+fn decode_null(_: &mut Cursor<'_>) -> Result<EngineValue, DecodeError> {
+  Ok(EngineValue::Null)
+}
+
+fn decode_integer(cursor: &mut Cursor<'_>) -> Result<EngineValue, DecodeError> {
+  Ok(EngineValue::Integer(cursor.read_i64()?))
+}
+
+fn decode_float(cursor: &mut Cursor<'_>) -> Result<EngineValue, DecodeError> {
+  Ok(EngineValue::Float(f64::from_bits(cursor.read_u64()?)))
+}
+
+fn decode_text(cursor: &mut Cursor<'_>) -> Result<EngineValue, DecodeError> {
+  Ok(EngineValue::Text(decode_string(cursor)?))
+}
+
+fn decode_blob(cursor: &mut Cursor<'_>) -> Result<EngineValue, DecodeError> {
+  Ok(EngineValue::Blob(decode_bytes(cursor)?))
+}
+
+fn decode_uuid(cursor: &mut Cursor<'_>) -> Result<EngineValue, DecodeError> {
+  let bytes = cursor.read_exact(16)?;
+  let mut value = [0_u8; 16];
+  value.copy_from_slice(bytes);
+  Ok(EngineValue::Uuid(value))
+}
+
+fn decode_json(cursor: &mut Cursor<'_>) -> Result<EngineValue, DecodeError> {
+  Ok(EngineValue::Json(decode_string(cursor)?))
 }
 
 fn decode_vec<T, F>(cursor: &mut Cursor<'_>, mut decode: F) -> Result<Vec<T>, DecodeError>
