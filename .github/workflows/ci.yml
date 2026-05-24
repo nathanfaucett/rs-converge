@@ -28,6 +28,12 @@ jobs:
       - name: Install just
         run: cargo install just --locked
 
+      - name: Install llvm-cov
+        run: cargo install cargo-llvm-cov --locked
+
+      - name: Install crap
+        run: cargo install cargo-crap --locked
+
       - name: Cache cargo
         uses: actions/cache@v4
         with:
