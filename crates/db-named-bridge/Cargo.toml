@@ -22,7 +22,9 @@ automerge = [
 [dependencies]
 db-automerge = { path = "../db-automerge", default-features = false, optional = true }
 db-core = { path = "../db-core", default-features = false }
-db-engine = { path = "../db-engine", default-features = false }
+db-engine = { path = "../db-engine", default-features = false, features = [
+  "in-memory",
+] }
 db-types = { path = "../db-types", default-features = false }
 
 async-stream = { version = "0.3", default-features = false, optional = true }

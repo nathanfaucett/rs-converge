@@ -11,9 +11,10 @@ use db_automerge::DocumentType;
 use db_automerge::{AutomergeEntry, DocumentChangeKey};
 #[cfg(all(feature = "automerge", feature = "redb"))]
 use db_core::BufferSink;
-use db_core::{MaybeSend, MaybeSync, NamedTreeProvider};
-use db_engine::{EngineDatabase, EngineKey, EngineValue, NamedTreeEngineStore};
-#[cfg(feature = "automerge")]
+use db_core::{MaybeSend, MaybeSync, NamedBTreeMap};
+use db_engine::{
+  EngineDatabase, EngineKey, EngineNamedTreeBackend, EngineValue, NamedTreeEngineStore,
+};
 use db_in_memory::InMemoryNamedBTree;
 #[cfg(feature = "automerge")]
 use db_named_bridge::automerge::AutomergeFormatAdapter;
@@ -80,7 +81,12 @@ pub trait FacadeStore: Clone + MaybeSend + MaybeSync + 'static {
 
 impl<T> FacadeStore for T
 where
-  T: Clone + NamedTreeProvider<EngineKey, Vec<u8>> + MaybeSend + MaybeSync + 'static,
+  T: Clone
+    + NamedBTreeMap<EngineKey, Vec<u8>>
+    + EngineNamedTreeBackend<EngineKey, Vec<u8>>
+    + MaybeSend
+    + MaybeSync
+    + 'static,
 {
   type EngineStore = NamedTreeEngineStore<Self>;
 

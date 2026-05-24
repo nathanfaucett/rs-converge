@@ -185,7 +185,7 @@ Crate **`db-named-bridge`** glues any named-tree layout backend to a format hand
 - **`TreeLayoutCatalog`** — tree registry and discovery on the layout backend.
 - **`PerTreeFormatSync`** — format-specific merge for one logical tree.
 - **`sync_cataloged_layouts`** — layout-level sync (catalog + per-tree format sync).
-- **`LayoutFormatBridge`** — engine-facing `NamedTreeProvider<EngineKey, Vec<u8>>` built
+- **`LayoutFormatBridge`** — engine-facing `NamedBTreeMap` + `EngineNamedTreeBackend<EngineKey, Vec<u8>>` built
   from a layout backend.
 
 Automerge is one format implementation (`db-named-bridge::automerge`):

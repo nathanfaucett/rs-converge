@@ -7,10 +7,9 @@ use std::borrow::Borrow;
 
 use async_stream::stream;
 use db_automerge::{AutomergeEngineStore, AutomergeEntry, DocumentChangeKey};
-use db_core::{
-  BTree, BTreeError, BTreeExecutor, BTreeTransaction, NamedTreeProvider, NamedTreeTransaction,
-};
+use db_core::{BTree, BTreeError, BTreeExecutor, BTreeTransaction, NamedBTreeMap};
 use db_engine::EngineKey;
+use db_engine::{EngineNamedTreeBackend, EngineNamedTreeTransaction};
 use futures::{StreamExt, pin_mut};
 use std::collections::BTreeMap;
 use uuid::Uuid;
@@ -26,7 +25,12 @@ use crate::glue::LayoutFormatBridge;
 #[derive(Clone)]
 pub struct AutomergeFormatAdapter<P>
 where
-  P: NamedTreeProvider<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
+  P: NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
+    + EngineNamedTreeBackend<DocumentChangeKey, AutomergeEntry>
+    + Clone
+    + Send
+    + Sync
+    + 'static,
   P::Tree: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
 {
   backend: P,
@@ -34,7 +38,12 @@ where
 
 impl<P> AutomergeFormatAdapter<P>
 where
-  P: NamedTreeProvider<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
+  P: NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
+    + EngineNamedTreeBackend<DocumentChangeKey, AutomergeEntry>
+    + Clone
+    + Send
+    + Sync
+    + 'static,
   P::Tree: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
 {
   pub fn new(backend: P) -> Self {
@@ -58,7 +67,12 @@ where
 
 impl<P> LayoutFormatBridge for AutomergeFormatAdapter<P>
 where
-  P: NamedTreeProvider<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
+  P: NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
+    + EngineNamedTreeBackend<DocumentChangeKey, AutomergeEntry>
+    + Clone
+    + Send
+    + Sync
+    + 'static,
   P::Tree: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
 {
   type LayoutBackend = P;
@@ -91,7 +105,12 @@ where
 #[derive(Clone)]
 pub struct AutomergeFormatTree<P>
 where
-  P: NamedTreeProvider<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
+  P: NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
+    + EngineNamedTreeBackend<DocumentChangeKey, AutomergeEntry>
+    + Clone
+    + Send
+    + Sync
+    + 'static,
   P::Tree: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
 {
   store: AutomergeFormatAdapter<P>,
@@ -100,7 +119,12 @@ where
 
 pub struct AutomergeFormatTreeTransaction<P>
 where
-  P: NamedTreeProvider<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
+  P: NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
+    + EngineNamedTreeBackend<DocumentChangeKey, AutomergeEntry>
+    + Clone
+    + Send
+    + Sync
+    + 'static,
   P::Tree: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
 {
   inner: AutomergeFormatTransaction<P>,
@@ -109,7 +133,12 @@ where
 
 pub struct AutomergeFormatTransaction<P>
 where
-  P: NamedTreeProvider<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
+  P: NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
+    + EngineNamedTreeBackend<DocumentChangeKey, AutomergeEntry>
+    + Clone
+    + Send
+    + Sync
+    + 'static,
   P::Tree: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
 {
   store: AutomergeFormatAdapter<P>,
@@ -118,7 +147,12 @@ where
 
 impl<P> Clone for AutomergeFormatTransaction<P>
 where
-  P: NamedTreeProvider<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
+  P: NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
+    + EngineNamedTreeBackend<DocumentChangeKey, AutomergeEntry>
+    + Clone
+    + Send
+    + Sync
+    + 'static,
   P::Tree: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
 {
   fn clone(&self) -> Self {
@@ -131,7 +165,12 @@ where
 
 impl<P> AutomergeFormatTransaction<P>
 where
-  P: NamedTreeProvider<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
+  P: NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
+    + EngineNamedTreeBackend<DocumentChangeKey, AutomergeEntry>
+    + Clone
+    + Send
+    + Sync
+    + 'static,
   P::Tree: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
 {
   async fn get_named_base(&self, tree: &str, key: &EngineKey) -> Result<Option<Vec<u8>>, BTreeError>
@@ -207,9 +246,14 @@ where
   }
 }
 
-impl<P> NamedTreeTransaction<EngineKey, Vec<u8>> for AutomergeFormatTransaction<P>
+impl<P> EngineNamedTreeTransaction<EngineKey, Vec<u8>> for AutomergeFormatTransaction<P>
 where
-  P: NamedTreeProvider<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
+  P: NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
+    + EngineNamedTreeBackend<DocumentChangeKey, AutomergeEntry>
+    + Clone
+    + Send
+    + Sync
+    + 'static,
   P::Tree: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
 {
   async fn get<'a>(
@@ -347,7 +391,12 @@ where
 
 impl<P> BTreeExecutor<EngineKey, Vec<u8>> for AutomergeFormatTree<P>
 where
-  P: NamedTreeProvider<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
+  P: NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
+    + EngineNamedTreeBackend<DocumentChangeKey, AutomergeEntry>
+    + Clone
+    + Send
+    + Sync
+    + 'static,
   P::Tree: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
 {
   async fn get<'a, Q>(&'a self, key: Q) -> Result<Option<Vec<u8>>, BTreeError>
@@ -403,7 +452,12 @@ where
 
 impl<P> BTreeTransaction<EngineKey, Vec<u8>> for AutomergeFormatTreeTransaction<P>
 where
-  P: NamedTreeProvider<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
+  P: NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
+    + EngineNamedTreeBackend<DocumentChangeKey, AutomergeEntry>
+    + Clone
+    + Send
+    + Sync
+    + 'static,
   P::Tree: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
 {
   async fn commit(self) -> Result<(), BTreeError> {
@@ -417,7 +471,12 @@ where
 
 impl<P> BTreeExecutor<EngineKey, Vec<u8>> for AutomergeFormatTreeTransaction<P>
 where
-  P: NamedTreeProvider<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
+  P: NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
+    + EngineNamedTreeBackend<DocumentChangeKey, AutomergeEntry>
+    + Clone
+    + Send
+    + Sync
+    + 'static,
   P::Tree: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
 {
   async fn get<'a, Q>(&'a self, key: Q) -> Result<Option<Vec<u8>>, BTreeError>
@@ -458,7 +517,12 @@ where
 
 impl<P> BTree<EngineKey, Vec<u8>> for AutomergeFormatTree<P>
 where
-  P: NamedTreeProvider<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
+  P: NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
+    + EngineNamedTreeBackend<DocumentChangeKey, AutomergeEntry>
+    + Clone
+    + Send
+    + Sync
+    + 'static,
   P::Tree: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
 {
   type Transaction = AutomergeFormatTreeTransaction<P>;
@@ -471,13 +535,17 @@ where
   }
 }
 
-impl<P> NamedTreeProvider<EngineKey, Vec<u8>> for AutomergeFormatAdapter<P>
+impl<P> NamedBTreeMap<EngineKey, Vec<u8>> for AutomergeFormatAdapter<P>
 where
-  P: NamedTreeProvider<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
+  P: NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
+    + EngineNamedTreeBackend<DocumentChangeKey, AutomergeEntry>
+    + Clone
+    + Send
+    + Sync
+    + 'static,
   P::Tree: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
 {
   type Tree = AutomergeFormatTree<P>;
-  type Transaction = AutomergeFormatTransaction<P>;
 
   fn get_tree<'a>(
     &'a self,
@@ -487,6 +555,94 @@ where
     let name = name.to_string();
     async move { Ok(AutomergeFormatTree { store, name }) }
   }
+
+  fn insert_tree(
+    &self,
+    name: &str,
+    tree: Self::Tree,
+  ) -> impl core::future::Future<Output = Result<(), BTreeError>> + Send + '_ {
+    let name = name.to_string();
+    async move {
+      let mut tx = tree.store.begin_transaction().await?;
+      let tree_name = tree.name;
+      let mut entries = Vec::new();
+      {
+        let range_stream = tx.range(&tree_name, ..);
+        pin_mut!(range_stream);
+        while let Some(item) = range_stream.next().await {
+          entries.push(item?);
+        }
+      }
+      for (key, value) in entries {
+        tx.insert(&name, key, value).await?;
+      }
+      tx.commit().await
+    }
+  }
+
+  fn delete_tree(
+    &self,
+    name: &str,
+  ) -> impl core::future::Future<Output = Result<(), BTreeError>> + Send + '_ {
+    let store = self.clone();
+    let name = name.to_string();
+    async move {
+      let mut tx = store.begin_transaction().await?;
+      let mut keys = Vec::new();
+      {
+        let range_stream = tx.range(&name, ..);
+        pin_mut!(range_stream);
+        while let Some(item) = range_stream.next().await {
+          let (key, _) = item?;
+          keys.push(key);
+        }
+      }
+      for key in keys {
+        tx.remove(&name, &key).await?;
+      }
+      tx.commit().await
+    }
+  }
+
+  fn list_names(&self) -> impl core::future::Future<Output = Vec<String>> + Send + '_ {
+    let store = self.clone();
+    async move {
+      let tx = match store.begin_transaction().await {
+        Ok(tx) => tx,
+        Err(_) => return Vec::new(),
+      };
+      let mut names = Vec::new();
+      let range_stream = tx.range("sys:automerge_trees", ..);
+      pin_mut!(range_stream);
+      while let Some(item) = range_stream.next().await {
+        let Ok((_key, value)) = item else {
+          continue;
+        };
+        let Ok(name) = String::from_utf8(value) else {
+          continue;
+        };
+        if !name.is_empty() {
+          names.push(name);
+        }
+      }
+      names.sort();
+      names.dedup();
+      names
+    }
+  }
+}
+
+impl<P> EngineNamedTreeBackend<EngineKey, Vec<u8>> for AutomergeFormatAdapter<P>
+where
+  P: NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
+    + EngineNamedTreeBackend<DocumentChangeKey, AutomergeEntry>
+    + Clone
+    + Send
+    + Sync
+    + 'static,
+  P::Tree: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
+{
+  type Transaction = AutomergeFormatTransaction<P>;
 
   fn begin_transaction<'a>(
     &'a self,

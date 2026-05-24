@@ -6,9 +6,8 @@ use std::{
 };
 
 use async_stream::stream;
-use db_core::{
-  BTreeError, BTreeResult, KeyCodec, MaybeSend, NamedTreeProvider, NamedTreeTransaction, ValueCodec,
-};
+use db_core::{BTreeError, BTreeResult, KeyCodec, MaybeSend, NamedBTreeMap, ValueCodec};
+use db_engine::{EngineNamedTreeBackend, EngineNamedTreeTransaction};
 use futures::Stream;
 use redb::{Database, ReadableTable, TableDefinition, WriteTransaction};
 
@@ -23,7 +22,7 @@ type RedbNamedTableDefinition<'a, K, V, KC, VC> =
 ///
 /// The set of distinct names is bounded by the number of tables, indexes, and
 /// schema namespaces: small and stable over the process lifetime.
-fn intern(name: &str) -> &'static str {
+pub fn intern(name: &str) -> &'static str {
   use std::collections::BTreeSet;
   static INTERNED: Mutex<Option<BTreeSet<&'static str>>> = Mutex::new(None);
   let mut guard = INTERNED.lock().unwrap();
@@ -34,6 +33,16 @@ fn intern(name: &str) -> &'static str {
   let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
   set.insert(leaked);
   leaked
+}
+
+fn interned_names() -> Vec<String> {
+  use std::collections::BTreeSet;
+  static INTERNED: Mutex<Option<BTreeSet<&'static str>>> = Mutex::new(None);
+  let guard = INTERNED.lock().unwrap();
+  guard
+    .as_ref()
+    .map(|set| set.iter().map(|name| (*name).to_string()).collect())
+    .unwrap_or_default()
 }
 
 /// An atomic transaction spanning multiple named REDB tables.
@@ -58,7 +67,7 @@ where
   KC: KeyCodec<K> + Default + Send + Sync + 'static,
   VC: ValueCodec<V> + Default + Send + Sync + 'static,
 {
-  fn open_table<'a>(
+  pub fn open_table<'a>(
     &'a self,
     tree: &'a str,
   ) -> Result<RedbNamedTable<'a, K, V, KC, VC>, BTreeError> {
@@ -66,9 +75,17 @@ where
     let def: RedbNamedTableDefinition<K, V, KC, VC> = TableDefinition::new(name);
     self.write_tx.open_table(def).map_err(BTreeError::other)
   }
+
+  pub fn named_commit(self) -> BTreeResult<()> {
+    self.write_tx.commit().map_err(BTreeError::other)
+  }
+
+  pub fn named_rollback(self) -> BTreeResult<()> {
+    self.write_tx.abort().map_err(BTreeError::other)
+  }
 }
 
-impl<K, V, KC, VC> NamedTreeTransaction<K, V> for REDBNamedTransaction<K, V, KC, VC>
+impl<K, V, KC, VC> EngineNamedTreeTransaction<K, V> for REDBNamedTransaction<K, V, KC, VC>
 where
   K: Debug + Clone + Ord + Send + Sync + 'static,
   V: Debug + Clone + Send + Sync + 'static,
@@ -126,11 +143,11 @@ where
   }
 
   async fn commit(self) -> BTreeResult<()> {
-    self.write_tx.commit().map_err(BTreeError::other)
+    self.named_commit()
   }
 
   async fn rollback(self) -> BTreeResult<()> {
-    self.write_tx.abort().map_err(BTreeError::other)
+    self.named_rollback()
   }
 }
 
@@ -196,7 +213,7 @@ where
   }
 }
 
-impl<K, V, KC, VC> NamedTreeProvider<K, V> for REDBNamedBTree<K, V, KC, VC>
+impl<K, V, KC, VC> NamedBTreeMap<K, V> for REDBNamedBTree<K, V, KC, VC>
 where
   K: Debug + Clone + Ord + Send + Sync + 'static,
   V: Debug + Clone + Send + Sync + 'static,
@@ -204,7 +221,6 @@ where
   VC: ValueCodec<V> + Default + Clone + Send + Sync + 'static,
 {
   type Tree = REDBBTree<K, V, KC, VC>;
-  type Transaction = REDBNamedTransaction<K, V, KC, VC>;
 
   fn get_tree<'a>(
     &'a self,
@@ -215,9 +231,65 @@ where
     async move { Ok(REDBBTree::from_arc_with_codecs(db, static_name)) }
   }
 
-  fn begin_transaction<'a>(
-    &'a self,
-  ) -> impl core::future::Future<Output = BTreeResult<REDBNamedTransaction<K, V, KC, VC>>> + 'a {
+  fn insert_tree(
+    &self,
+    name: &str,
+    tree: Self::Tree,
+  ) -> impl core::future::Future<Output = BTreeResult<()>> + '_ {
+    let dest = intern(name);
+    let db = Arc::clone(&self.db);
+    async move {
+      let write_tx = db.begin_write().map_err(BTreeError::other)?;
+      let source_def = tree.table_definition();
+      let dest_def: RedbNamedTableDefinition<K, V, KC, VC> = TableDefinition::new(dest);
+
+      {
+        let source = write_tx.open_table(source_def).map_err(BTreeError::other)?;
+        let mut dest_table = write_tx.open_table(dest_def).map_err(BTreeError::other)?;
+
+        let range_iter = source.iter().map_err(BTreeError::other)?;
+        for entry in range_iter {
+          let (key, value) = entry.map_err(BTreeError::other)?;
+          dest_table
+            .insert(key.value(), value.value())
+            .map_err(BTreeError::other)?;
+        }
+      }
+
+      write_tx.commit().map_err(BTreeError::other)?;
+      Ok(())
+    }
+  }
+
+  fn delete_tree(&self, name: &str) -> impl core::future::Future<Output = BTreeResult<()>> + '_ {
+    let table_name = intern(name);
+    let db = Arc::clone(&self.db);
+    async move {
+      let write_tx = db.begin_write().map_err(BTreeError::other)?;
+      let def: RedbNamedTableDefinition<K, V, KC, VC> = TableDefinition::new(table_name);
+      write_tx.delete_table(def).map_err(BTreeError::other)?;
+      write_tx.commit().map_err(BTreeError::other)?;
+      Ok(())
+    }
+  }
+
+  fn list_names(&self) -> impl core::future::Future<Output = Vec<String>> + '_ {
+    async move { interned_names() }
+  }
+}
+
+impl<K, V, KC, VC> EngineNamedTreeBackend<K, V> for REDBNamedBTree<K, V, KC, VC>
+where
+  K: Debug + Clone + Ord + Send + Sync + 'static,
+  V: Debug + Clone + Send + Sync + 'static,
+  KC: KeyCodec<K> + Default + Clone + Send + Sync + 'static,
+  VC: ValueCodec<V> + Default + Clone + Send + Sync + 'static,
+{
+  type Transaction = REDBNamedTransaction<K, V, KC, VC>;
+
+  fn begin_transaction(
+    &self,
+  ) -> impl core::future::Future<Output = BTreeResult<Self::Transaction>> + '_ {
     let db = Arc::clone(&self.db);
     async move {
       let write_tx = db.begin_write().map_err(BTreeError::other)?;

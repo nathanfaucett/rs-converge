@@ -1,14 +1,16 @@
 use async_stream::stream;
 use core::fmt;
 use core::ops::{Bound, RangeBounds};
-use db_core::{BTreeError, BTreeResult, MaybeSend, NamedTreeProvider, NamedTreeTransaction};
-use db_engine::EngineKey;
+use db_core::{BTree, BTreeError, BTreeResult, MaybeSend, NamedBTreeMap};
+use db_engine::{EngineKey, EngineNamedTreeBackend, EngineNamedTreeTransaction};
 use futures::Stream;
+use futures::StreamExt;
 use js_sys::{Function, JSON, Promise, Reflect};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::string::String;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
@@ -506,9 +508,8 @@ fn decode_byte_entries(value: JsValue) -> BTreeResult<Vec<(EngineKey, Vec<u8>)>>
   )
 }
 
-impl NamedTreeProvider<EngineKey, Vec<u8>> for StoreAdapterCallbacks {
+impl NamedBTreeMap<EngineKey, Vec<u8>> for StoreAdapterCallbacks {
   type Tree = StoreAdapterTree;
-  type Transaction = StoreAdapterTransaction;
 
   fn get_tree(
     &self,
@@ -521,6 +522,48 @@ impl NamedTreeProvider<EngineKey, Vec<u8>> for StoreAdapterCallbacks {
     async move { Ok(tree) }
   }
 
+  fn insert_tree(
+    &self,
+    name: &str,
+    tree: Self::Tree,
+  ) -> impl core::future::Future<Output = BTreeResult<()>> + '_ {
+    let name = name.to_string();
+    async move {
+      let mut tx = EngineNamedTreeBackend::begin_transaction(&tree.adapter).await?;
+      let source = tree.tree;
+      let range_stream = tx.range(&source, ..);
+      pin_mut!(range_stream);
+      while let Some(item) = range_stream.next().await {
+        let (key, value) = item?;
+        tx.insert(&name, key, value).await?;
+      }
+      tx.commit().await
+    }
+  }
+
+  fn delete_tree(&self, name: &str) -> impl core::future::Future<Output = BTreeResult<()>> + '_ {
+    let adapter = self.clone();
+    let name = name.to_string();
+    async move {
+      let mut tx = adapter.begin_transaction().await?;
+      let range_stream = tx.range(&name, ..);
+      pin_mut!(range_stream);
+      while let Some(item) = range_stream.next().await {
+        let (key, _) = item?;
+        tx.remove(&name, &key).await?;
+      }
+      tx.commit().await
+    }
+  }
+
+  fn list_names(&self) -> impl core::future::Future<Output = Vec<String>> + '_ {
+    async move { Vec::new() }
+  }
+}
+
+impl EngineNamedTreeBackend<EngineKey, Vec<u8>> for StoreAdapterCallbacks {
+  type Transaction = StoreAdapterTransaction;
+
   async fn begin_transaction(&self) -> BTreeResult<Self::Transaction> {
     let backend_tx = self.begin_backend_transaction(true).await?;
     Ok(StoreAdapterTransaction {
@@ -530,7 +573,7 @@ impl NamedTreeProvider<EngineKey, Vec<u8>> for StoreAdapterCallbacks {
   }
 }
 
-impl NamedTreeTransaction<EngineKey, Vec<u8>> for StoreAdapterTransaction {
+impl EngineNamedTreeTransaction<EngineKey, Vec<u8>> for StoreAdapterTransaction {
   fn get<'a>(
     &'a mut self,
     tree: &'a str,
@@ -710,14 +753,14 @@ impl db_core::BTreeTransaction<EngineKey, Vec<u8>> for StoreAdapterTransaction {
   where
     Self: Sized,
   {
-    <Self as NamedTreeTransaction<EngineKey, Vec<u8>>>::commit(self)
+    <Self as EngineNamedTreeTransaction<EngineKey, Vec<u8>>>::commit(self)
   }
 
   fn rollback(self) -> impl core::future::Future<Output = BTreeResult<()>>
   where
     Self: Sized,
   {
-    <Self as NamedTreeTransaction<EngineKey, Vec<u8>>>::rollback(self)
+    <Self as EngineNamedTreeTransaction<EngineKey, Vec<u8>>>::rollback(self)
   }
 }
 

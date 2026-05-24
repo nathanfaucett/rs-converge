@@ -1,7 +1,9 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use core::future::Future;
-use db_core::{MaybeSend, MaybeSync, NamedTreeProvider};
+use db_core::{MaybeSend, MaybeSync};
+
+use super::EngineNamedTreeBackend;
 
 use super::backend_contract::TransactionContract;
 use super::named_tree::NamedTreeEngineTransaction;
@@ -34,14 +36,14 @@ pub trait EngineStore: Clone + MaybeSend + MaybeSync + 'static {
 /// engine store contract.
 pub struct NamedTreeEngineStore<T>
 where
-  T: Clone + NamedTreeProvider<EngineKey, Vec<u8>> + MaybeSend + MaybeSync + 'static,
+  T: Clone + EngineNamedTreeBackend<EngineKey, Vec<u8>> + MaybeSend + MaybeSync + 'static,
 {
   inner: T,
 }
 
 impl<T> NamedTreeEngineStore<T>
 where
-  T: Clone + NamedTreeProvider<EngineKey, Vec<u8>> + MaybeSend + MaybeSync + 'static,
+  T: Clone + EngineNamedTreeBackend<EngineKey, Vec<u8>> + MaybeSend + MaybeSync + 'static,
 {
   pub fn new(inner: T) -> Self {
     Self { inner }
@@ -54,7 +56,7 @@ where
 
 impl<T> Clone for NamedTreeEngineStore<T>
 where
-  T: Clone + NamedTreeProvider<EngineKey, Vec<u8>> + MaybeSend + MaybeSync + 'static,
+  T: Clone + EngineNamedTreeBackend<EngineKey, Vec<u8>> + MaybeSend + MaybeSync + 'static,
 {
   fn clone(&self) -> Self {
     Self {
@@ -65,7 +67,7 @@ where
 
 impl<T> From<T> for NamedTreeEngineStore<T>
 where
-  T: Clone + NamedTreeProvider<EngineKey, Vec<u8>> + MaybeSend + MaybeSync + 'static,
+  T: Clone + EngineNamedTreeBackend<EngineKey, Vec<u8>> + MaybeSend + MaybeSync + 'static,
 {
   fn from(inner: T) -> Self {
     NamedTreeEngineStore::new(inner)
@@ -74,7 +76,7 @@ where
 
 impl<T> EngineStore for NamedTreeEngineStore<T>
 where
-  T: Clone + NamedTreeProvider<EngineKey, Vec<u8>> + MaybeSend + MaybeSync + 'static,
+  T: Clone + EngineNamedTreeBackend<EngineKey, Vec<u8>> + MaybeSend + MaybeSync + 'static,
 {
   type Transaction = NamedTreeEngineTransaction<T::Transaction>;
 

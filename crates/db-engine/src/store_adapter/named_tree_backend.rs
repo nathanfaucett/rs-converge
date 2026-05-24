@@ -1,5 +1,5 @@
+use super::EngineNamedTreeTransaction;
 use async_stream::stream;
-use db_core::NamedTreeTransaction;
 use db_types::key_encoding::{DefaultEncoding, KeyEncoding, RowEncoding};
 use futures::{Stream, StreamExt, pin_mut};
 
@@ -20,7 +20,7 @@ pub(super) async fn get_bytes<'a, T>(
   key: &'a EngineKey,
 ) -> Result<Option<Vec<u8>>, EngineError>
 where
-  T: NamedTreeTransaction<EngineKey, Vec<u8>>,
+  T: EngineNamedTreeTransaction<EngineKey, Vec<u8>>,
 {
   tx.get(tree, key).await.map_err(EngineError::from)
 }
@@ -32,7 +32,7 @@ pub(super) async fn insert_bytes<'a, T>(
   value: Vec<u8>,
 ) -> Result<(), EngineError>
 where
-  T: NamedTreeTransaction<EngineKey, Vec<u8>>,
+  T: EngineNamedTreeTransaction<EngineKey, Vec<u8>>,
 {
   tx.insert(tree, key, value).await.map_err(EngineError::from)
 }
@@ -43,7 +43,7 @@ pub(super) async fn remove_bytes<'a, T>(
   key: &'a EngineKey,
 ) -> Result<Option<Vec<u8>>, EngineError>
 where
-  T: NamedTreeTransaction<EngineKey, Vec<u8>>,
+  T: EngineNamedTreeTransaction<EngineKey, Vec<u8>>,
 {
   tx.remove(tree, key).await.map_err(EngineError::from)
 }
@@ -53,7 +53,7 @@ pub(super) fn range_bytes<'a, T>(
   tree: String,
 ) -> impl Stream<Item = Result<(EngineKey, Vec<u8>), EngineError>> + 'a
 where
-  T: NamedTreeTransaction<EngineKey, Vec<u8>>,
+  T: EngineNamedTreeTransaction<EngineKey, Vec<u8>>,
 {
   stream! {
     let s = tx.range(&tree, ..);
@@ -100,7 +100,7 @@ pub(super) async fn collect_tree_rows<T>(
   tree_name: &str,
 ) -> Result<Vec<EngineRow>, EngineError>
 where
-  T: NamedTreeTransaction<EngineKey, Vec<u8>>,
+  T: EngineNamedTreeTransaction<EngineKey, Vec<u8>>,
 {
   let stream = tx.range(tree_name, ..);
   pin_mut!(stream);

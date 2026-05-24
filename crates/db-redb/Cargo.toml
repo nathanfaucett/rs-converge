@@ -9,6 +9,7 @@ name = "db_redb"
 
 [dependencies]
 db-core = { path = "../db-core", default-features = false, features = ["std"] }
+db-engine = { path = "../db-engine", default-features = true }
 async-stream = { version = "0.3", default-features = false, features = [] }
 futures = { version = "0.3", default-features = false, features = ["std"] }
 async-lock = { version = "3.4", default-features = false, features = [] }

@@ -1,5 +1,4 @@
 pub fn block_on<F: core::future::Future>(future: F) -> F::Output {
-  use core::hint::spin_loop;
   use core::pin::pin;
   use core::task::{Context, Poll, Waker};
 
@@ -10,7 +9,13 @@ pub fn block_on<F: core::future::Future>(future: F) -> F::Output {
   loop {
     match future.as_mut().poll(&mut context) {
       Poll::Ready(output) => return output,
-      Poll::Pending => spin_loop(),
+      Poll::Pending => {
+        if cfg!(feature = "std") {
+          std::thread::yield_now();
+        } else {
+          core::hint::spin_loop();
+        }
+      }
     }
   }
 }

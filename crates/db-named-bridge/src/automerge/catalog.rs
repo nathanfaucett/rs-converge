@@ -1,7 +1,8 @@
 //! Automerge layout tree catalog (registry of logical tree names).
 
 use db_automerge::{AutomergeEntry, DocumentChangeKey, DocumentType};
-use db_core::{BTree, BTreeError, NamedTreeProvider, NamedTreeTransaction};
+use db_core::{BTree, BTreeError, NamedBTreeMap};
+use db_engine::{EngineNamedTreeBackend, EngineNamedTreeTransaction};
 use futures::{StreamExt, pin_mut};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -66,7 +67,13 @@ pub async fn known_tree_names<L>(layout: &L) -> Vec<String>
 where
   L: AutomergeLayout,
 {
-  let mut names = Vec::new();
+  let mut names = layout.list_names().await;
+  if !names.is_empty() {
+    names.sort();
+    names.dedup();
+    return names;
+  }
+
   let Ok(tx) = layout.begin_transaction().await else {
     return names;
   };
@@ -92,12 +99,22 @@ where
 }
 
 pub trait AutomergeLayout:
-  NamedTreeProvider<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static
+  NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
+  + EngineNamedTreeBackend<DocumentChangeKey, AutomergeEntry>
+  + Clone
+  + Send
+  + Sync
+  + 'static
 {
 }
 
 impl<T> AutomergeLayout for T where
-  T: NamedTreeProvider<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static
+  T: NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
+    + EngineNamedTreeBackend<DocumentChangeKey, AutomergeEntry>
+    + Clone
+    + Send
+    + Sync
+    + 'static
 {
 }
 

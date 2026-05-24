@@ -10,12 +10,14 @@ path = "src/lib.rs"
 name = "db_engine"
 
 [features]
-default = ["std"]
-std = ["futures/std", "db-core/std", "db-in-memory/std", "db-types/std"]
+default = ["std", "in-memory"]
+std = ["futures/std", "db-core/std", "db-in-memory?/std", "db-types/std"]
+in-memory = ["dep:db-in-memory"]
 wasm = ["tsify", "serde-wasm-bindgen", "wasm-bindgen", "db-types/wasm"]
 
 [dependencies]
 db-core = { path = "../db-core", default-features = false }
+db-in-memory = { path = "../db-in-memory", default-features = false, optional = true }
 db-types = { path = "../db-types", default-features = false }
 async-stream = { version = "0.3", default-features = false, features = [] }
 futures = { version = "0.3", default-features = false, features = [] }
@@ -37,9 +39,6 @@ wasm-bindgen = { version = "0.2", default-features = false, features = [
 ], optional = true }
 
 [dev-dependencies]
-db-in-memory = { path = "../db-in-memory", default-features = false, features = [
-] }
-db-redb = { path = "../db-redb", default-features = false, features = [] }
 futures = { version = "0.3", default-features = false, features = ["executor"] }
 proptest = { version = "1.0", default-features = false, features = ["std"] }
 uuid = { version = "1.23", default-features = false, features = ["std"] }

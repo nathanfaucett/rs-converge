@@ -311,7 +311,6 @@ dependencies = [
  "async-stream",
  "db-core",
  "db-in-memory",
- "db-redb",
  "db-types",
  "futures",
  "hashbrown 0.17.0",
@@ -350,6 +349,7 @@ dependencies = [
  "async-lock",
  "async-stream",
  "db-core",
+ "db-engine",
  "futures",
 ]
 
@@ -375,6 +375,7 @@ dependencies = [
  "async-lock",
  "async-stream",
  "db-core",
+ "db-engine",
  "futures",
  "redb",
 ]

@@ -573,29 +573,9 @@ mod tests {
     TableSchema, UpdateAssignment,
   };
   use db_in_memory::InMemoryNamedBTree;
-  use db_redb::REDBNamedBTree;
-  use db_types::EngineKeyCodec;
   use futures::executor::block_on;
-  #[cfg(feature = "std")]
-  use std::{
-    fs,
-    path::PathBuf,
-    time::{SystemTime, UNIX_EPOCH},
-  };
-  use uuid::Uuid;
 
-  fn redb_test_path(name: &str) -> PathBuf {
-    let mut path = std::env::temp_dir();
-    path.push(format!(
-      "aicacia_db_engine_{}_{}.db",
-      name,
-      SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time after unix epoch")
-        .as_nanos()
-    ));
-    path
-  }
+  use uuid::Uuid;
 
   #[test]
   fn engine_read_transaction_supports_select_only() {
@@ -2897,77 +2877,6 @@ mod tests {
         unchanged.rows,
         vec![vec![uuid(1), EngineValue::Text("Alice".into())]],
       );
-    });
-  }
-
-  #[test]
-  fn reopen_database_with_redb_store_recovers_schema_and_rows() {
-    block_on(async {
-      let path = redb_test_path("reopen");
-      let _ = fs::remove_file(&path);
-
-      let store = REDBNamedBTree::<EngineKey, Vec<u8>, EngineKeyCodec>::open_with_codecs(&path)
-        .expect("open redb store");
-      let mut database = EngineDatabase::new(NamedTreeEngineStore::new(store.clone()));
-
-      database
-        .register_table(
-          TableSchema {
-            name: "users".into(),
-            columns: vec![
-              ColumnSchema {
-                name: "id".into(),
-                data_type: EngineType::Uuid,
-              },
-              ColumnSchema {
-                name: "name".into(),
-                data_type: EngineType::Text,
-              },
-            ],
-            primary_key: vec![0],
-          },
-          false,
-        )
-        .await
-        .expect("register users table");
-
-      database
-        .register_index(IndexSchema {
-          name: "users_name_idx".into(),
-          table_name: "users".into(),
-          column_indices: vec![1],
-          unique: true,
-        })
-        .await
-        .expect("register users_name_idx index");
-
-      database
-        .execute(EngineQuery::Insert {
-          table: "users".into(),
-          row: vec![uuid(1), EngineValue::Text("Bob".into())],
-          returning: None,
-        })
-        .await
-        .expect("insert row into redb-backed engine");
-
-      let reopened = EngineDatabase::open(NamedTreeEngineStore::new(store))
-        .await
-        .expect("reopen redb-backed engine");
-      let result = reopened
-        .execute(EngineQuery::select_simple(
-          "users".into(),
-          vec![0, 1],
-          Some(eq_pred("users", 1, EngineValue::Text("Bob".into()))),
-        ))
-        .await
-        .expect("select row from reopened redb-backed engine");
-
-      assert_eq!(
-        result.rows,
-        vec![vec![uuid(1), EngineValue::Text("Bob".into())]],
-      );
-
-      let _ = fs::remove_file(&path);
     });
   }
 }

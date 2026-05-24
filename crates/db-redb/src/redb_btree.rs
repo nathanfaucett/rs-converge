@@ -242,6 +242,12 @@ where
       table_definition: TableDefinition::new(table_name),
     }
   }
+
+  pub(crate) fn table_definition(
+    &self,
+  ) -> TableDefinition<'static, EncodedKey<K, KC>, EncodedValue<V, VC>> {
+    self.table_definition
+  }
 }
 
 impl<K, V, KC, VC> BTreeExecutor<K, V> for REDBBTree<K, V, KC, VC>

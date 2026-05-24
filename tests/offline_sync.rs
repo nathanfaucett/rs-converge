@@ -1,7 +1,8 @@
 #[cfg(feature = "automerge")]
 mod tests {
   use db::{Database, automerge_layout_metrics, sync_automerge_layouts};
-  use db_core::NamedTreeProvider;
+  use db_core::NamedBTreeMap;
+  use db_engine::EngineNamedTreeBackend;
   use db_engine::{
     EngineKey, EngineQuery, EngineValue, QualifiedColumn, QualifiedOperand, QualifiedPredicate,
     UpdateAssignment,
@@ -57,10 +58,23 @@ mod tests {
     ]
   }
 
-  trait SyncStore: Clone + NamedTreeProvider<EngineKey, Vec<u8>> + Send + Sync + 'static {}
+  trait SyncStore:
+    Clone
+    + NamedBTreeMap<EngineKey, Vec<u8>>
+    + EngineNamedTreeBackend<EngineKey, Vec<u8>>
+    + Send
+    + Sync
+    + 'static
+  {
+  }
 
   impl<T> SyncStore for T where
-    T: Clone + NamedTreeProvider<EngineKey, Vec<u8>> + Send + Sync + 'static
+    T: Clone
+      + NamedBTreeMap<EngineKey, Vec<u8>>
+      + EngineNamedTreeBackend<EngineKey, Vec<u8>>
+      + Send
+      + Sync
+      + 'static
   {
   }
 

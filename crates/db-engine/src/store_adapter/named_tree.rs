@@ -1,9 +1,9 @@
+use super::EngineNamedTreeTransaction;
 use crate::{EngineError, EngineKey, EngineRow, IndexSchema, PrimaryKey, TableSchema};
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use async_stream::stream;
 use core::future::Future;
-use db_core::NamedTreeTransaction;
 use db_types::persistence::{
   INDEX_SCHEMA_TREE, TABLE_SCHEMA_TREE, decode_index_schema_rows, decode_table_schema_rows,
   encode_index_schema, encode_table_schema, index_schema_entry_key, index_tree, row_tree,
@@ -18,14 +18,14 @@ use super::named_tree_backend::{
 
 pub struct NamedTreeEngineTransaction<T>
 where
-  T: NamedTreeTransaction<EngineKey, Vec<u8>>,
+  T: EngineNamedTreeTransaction<EngineKey, Vec<u8>>,
 {
   inner: T,
 }
 
 impl<T> NamedTreeEngineTransaction<T>
 where
-  T: NamedTreeTransaction<EngineKey, Vec<u8>>,
+  T: EngineNamedTreeTransaction<EngineKey, Vec<u8>>,
 {
   pub fn new(inner: T) -> Self {
     Self { inner }
@@ -66,7 +66,7 @@ where
 
 impl<T> super::EngineStoreReadTransaction for NamedTreeEngineTransaction<T>
 where
-  T: NamedTreeTransaction<EngineKey, Vec<u8>> + 'static,
+  T: EngineNamedTreeTransaction<EngineKey, Vec<u8>> + 'static,
 {
   fn get_table_row<'a>(
     &'a mut self,
@@ -135,7 +135,7 @@ where
 
 impl<T> super::EngineStoreTransaction for NamedTreeEngineTransaction<T>
 where
-  T: NamedTreeTransaction<EngineKey, Vec<u8>> + 'static,
+  T: EngineNamedTreeTransaction<EngineKey, Vec<u8>> + 'static,
 {
   fn insert_table_row<'a>(
     &'a mut self,

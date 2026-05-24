@@ -35,4 +35,4 @@ pub use transaction_patch::{TransactionEntry, TransactionPatch};
 #[cfg(feature = "test-helpers")]
 pub use test_helpers::MockBTree;
 
-pub use named_tree::{NamedTreeProvider, NamedTreeTransaction};
+pub use named_tree::NamedBTreeMap;

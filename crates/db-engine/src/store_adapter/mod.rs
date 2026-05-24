@@ -5,6 +5,7 @@ mod engine_store;
 mod helpers;
 mod named_tree;
 mod named_tree_backend;
+mod named_tree_tx;
 mod transaction;
 
 pub use backend_contract::{BackendCapability, TransactionContract};
@@ -14,6 +15,7 @@ pub(crate) use helpers::{
   remove_table_rows,
 };
 pub use helpers::{fetch_rows_by_primary_keys, lookup_primary_keys_by_index_predicate};
+pub use named_tree_tx::{EngineNamedTreeBackend, EngineNamedTreeTransaction};
 pub use transaction::{EngineStoreReadTransaction, EngineStoreTransaction};
 
 #[cfg(test)]

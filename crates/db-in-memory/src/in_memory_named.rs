@@ -2,8 +2,8 @@ use async_lock::RwLock;
 use async_stream::stream;
 use core::{borrow::Borrow, ops::RangeBounds};
 use db_core::{
-  BTree, BTreeExecutor, BTreeResult, BTreeTransaction, MaybeSend, NamedTreeProvider,
-  NamedTreeTransaction, TransactionEntry, TransactionPatch,
+  BTree, BTreeExecutor, BTreeResult, BTreeTransaction, MaybeSend, NamedBTreeMap, TransactionEntry,
+  TransactionPatch,
 };
 use futures::Stream;
 
@@ -16,6 +16,7 @@ use alloc::{
   collections::BTreeMap,
   string::{String, ToString},
   sync::Arc,
+  vec::Vec,
 };
 #[cfg(feature = "std")]
 use std::{collections::BTreeMap, string::String, sync::Arc};
@@ -58,8 +59,8 @@ where
 /// A multi-tree transaction that buffers changes per named tree and applies
 /// them all atomically on commit by acquiring a single write lock.
 pub struct InMemoryNamedTransaction<K, V> {
-  inner: Inner<K, V>,
-  patches: BTreeMap<String, TransactionPatch<K, V>>,
+  pub(crate) inner: Inner<K, V>,
+  pub(crate) patches: BTreeMap<String, TransactionPatch<K, V>>,
 }
 
 #[derive(Clone)]
@@ -227,12 +228,12 @@ where
   }
 }
 
-impl<K, V> NamedTreeTransaction<K, V> for InMemoryNamedTransaction<K, V>
+impl<K, V> InMemoryNamedTransaction<K, V>
 where
   K: Clone + Ord + Send + Sync + 'static,
   V: Clone + Send + Sync + 'static,
 {
-  async fn get<'a>(&'a mut self, tree: &'a str, key: &'a K) -> BTreeResult<Option<V>>
+  pub async fn named_get(&mut self, tree: &str, key: &K) -> BTreeResult<Option<V>>
   where
     K: Ord,
   {
@@ -247,7 +248,7 @@ where
     Ok(guard.get(tree).and_then(|m| m.get(key)).cloned())
   }
 
-  async fn insert<'a>(&'a mut self, tree: &'a str, key: K, value: V) -> BTreeResult<()>
+  pub async fn named_insert(&mut self, tree: &str, key: K, value: V) -> BTreeResult<()>
   where
     K: Ord,
   {
@@ -256,7 +257,7 @@ where
     Ok(())
   }
 
-  async fn remove<'a>(&'a mut self, tree: &'a str, key: &'a K) -> BTreeResult<Option<V>>
+  pub async fn named_remove(&mut self, tree: &str, key: &K) -> BTreeResult<Option<V>>
   where
     K: Ord,
   {
@@ -274,7 +275,11 @@ where
     Ok(remove_from_patch_then_map(patch, sub_map, key))
   }
 
-  fn range<'a, R>(&'a self, tree: &'a str, range: R) -> impl Stream<Item = BTreeResult<(K, V)>> + 'a
+  pub fn named_range<'a, R>(
+    &'a self,
+    tree: &'a str,
+    range: R,
+  ) -> impl Stream<Item = BTreeResult<(K, V)>> + 'a
   where
     K: Ord,
     R: core::ops::RangeBounds<K> + MaybeSend + 'a,
@@ -293,7 +298,7 @@ where
     }
   }
 
-  async fn commit(self) -> BTreeResult<()> {
+  pub async fn named_commit(self) -> BTreeResult<()> {
     let mut guard = self.inner.write().await;
     for (name, patch) in self.patches {
       let sub = guard.entry(name).or_default();
@@ -302,18 +307,30 @@ where
     Ok(())
   }
 
-  async fn rollback(self) -> BTreeResult<()> {
+  pub async fn named_rollback(self) -> BTreeResult<()> {
     Ok(())
   }
 }
 
-impl<K, V> NamedTreeProvider<K, V> for InMemoryNamedBTree<K, V>
+impl<K, V> InMemoryNamedBTree<K, V>
+where
+  K: Clone + Ord + Send + Sync + 'static,
+  V: Clone + Send + Sync + 'static,
+{
+  pub async fn begin_named_transaction(&self) -> BTreeResult<InMemoryNamedTransaction<K, V>> {
+    Ok(InMemoryNamedTransaction {
+      inner: Arc::clone(&self.inner),
+      patches: BTreeMap::new(),
+    })
+  }
+}
+
+impl<K, V> NamedBTreeMap<K, V> for InMemoryNamedBTree<K, V>
 where
   K: Clone + Ord + Send + Sync + 'static,
   V: Clone + Send + Sync + 'static,
 {
   type Tree = InMemoryNamedTree<K, V>;
-  type Transaction = InMemoryNamedTransaction<K, V>;
 
   fn get_tree<'a>(
     &'a self,
@@ -329,15 +346,38 @@ where
     }
   }
 
-  fn begin_transaction<'a>(
-    &'a self,
-  ) -> impl core::future::Future<Output = BTreeResult<InMemoryNamedTransaction<K, V>>> + 'a {
+  fn insert_tree(
+    &self,
+    name: &str,
+    tree: Self::Tree,
+  ) -> impl core::future::Future<Output = BTreeResult<()>> + '_ {
+    let target = name.to_string();
     let inner = Arc::clone(&self.inner);
     async move {
-      Ok(InMemoryNamedTransaction {
-        inner,
-        patches: BTreeMap::new(),
-      })
+      let guard = tree.inner.read().await;
+      let data = guard.get(&tree.name).cloned().unwrap_or_default();
+      drop(guard);
+      let mut guard = inner.write().await;
+      guard.insert(target, data);
+      Ok(())
+    }
+  }
+
+  fn delete_tree(&self, name: &str) -> impl core::future::Future<Output = BTreeResult<()>> + '_ {
+    let target = name.to_string();
+    let inner = Arc::clone(&self.inner);
+    async move {
+      let mut guard = inner.write().await;
+      guard.remove(&target);
+      Ok(())
+    }
+  }
+
+  fn list_names<'a>(&'a self) -> impl core::future::Future<Output = Vec<String>> + 'a {
+    let inner = Arc::clone(&self.inner);
+    async move {
+      let guard = inner.read().await;
+      guard.keys().cloned().collect()
     }
   }
 }
@@ -345,9 +385,7 @@ where
 #[cfg(test)]
 mod tests {
   use super::*;
-  use db_core::{
-    BTreeExecutor, BTreeTransaction, NamedTreeProvider, NamedTreeTransaction, block_on,
-  };
+  use db_core::{BTreeExecutor, BTreeTransaction, NamedBTreeMap, block_on};
 
   #[test]
   fn get_tree_returns_shared_isolated_trees() {
@@ -371,11 +409,13 @@ mod tests {
   fn named_transaction_commits_across_trees() {
     block_on(async {
       let provider = InMemoryNamedBTree::<u64, u64>::new();
-      let mut tx = provider.begin_transaction().await.expect("begin");
+      let mut tx = provider.begin_named_transaction().await.expect("begin");
 
-      tx.insert("first", 1, 10).await.expect("insert first");
-      tx.insert("second", 1, 20).await.expect("insert second");
-      tx.commit().await.expect("commit");
+      tx.named_insert("first", 1, 10).await.expect("insert first");
+      tx.named_insert("second", 1, 20)
+        .await
+        .expect("insert second");
+      tx.named_commit().await.expect("commit");
 
       let first = provider.get_tree("first").await.expect("first tree");
       let second = provider.get_tree("second").await.expect("second tree");

@@ -3,8 +3,8 @@
 //! Glue between **layout** backends (named B-trees) and **format** handlers
 //! (how engine keys/values are stored in each layout tree).
 //!
-//! - Layout: `NamedTreeProvider<LayoutKey, LayoutValue>` — physical tree storage.
-//! - Format: per-tree encoding/decoding exposed as `NamedTreeProvider<EngineKey, EngineValue>`.
+//! - Layout: `NamedBTreeMap<LayoutKey, LayoutValue>` — physical tree storage.
+//! - Format: per-tree encoding/decoding exposed as `NamedBTreeMap` + `EngineNamedTreeBackend` for engine keys/values.
 //! - Catalog & sync: layout concerns; operate on layout backends, not the SQL facade.
 
 mod glue;

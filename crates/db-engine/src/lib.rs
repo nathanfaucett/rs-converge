@@ -4,6 +4,8 @@
 extern crate alloc;
 
 mod access_control;
+#[cfg(feature = "in-memory")]
+mod backends;
 mod change_event;
 mod engine;
 mod engine_kernel;
@@ -33,9 +35,9 @@ pub use query::{EngineQuery, EngineResult, ResultColumn};
 pub use row_deserialize_error::RowDeserializeError;
 pub use schema_resolver::SchemaResolver;
 pub use store_adapter::{
-  BackendCapability, EngineStore, EngineStoreReadTransaction, EngineStoreTransaction,
-  NamedTreeEngineStore, TransactionContract, fetch_rows_by_primary_keys,
-  lookup_primary_keys_by_index_predicate,
+  BackendCapability, EngineNamedTreeBackend, EngineNamedTreeTransaction, EngineStore,
+  EngineStoreReadTransaction, EngineStoreTransaction, NamedTreeEngineStore, TransactionContract,
+  fetch_rows_by_primary_keys, lookup_primary_keys_by_index_predicate,
 };
 pub use subscriptions::{Subscriber, SubscriptionId};
 pub use types::{EngineError, EngineKey, EngineRow, EngineType, EngineValue, PrimaryKey};

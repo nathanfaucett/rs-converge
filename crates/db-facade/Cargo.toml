@@ -30,7 +30,9 @@ automerge = [
 db-automerge = { path = "../db-automerge", default-features = false, optional = true }
 db-core = { path = "../db-core", default-features = false }
 db-named-bridge = { path = "../db-named-bridge", default-features = false, optional = true }
-db-engine = { path = "../db-engine", default-features = false }
+db-engine = { path = "../db-engine", default-features = false, features = [
+  "in-memory",
+] }
 db-in-memory = { path = "../db-in-memory", default-features = false }
 db-redb = { path = "../db-redb", default-features = false, optional = true }
 db-sql-to-engine = { path = "../db-sql-to-engine", default-features = false }
