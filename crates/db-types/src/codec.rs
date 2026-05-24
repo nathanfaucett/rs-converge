@@ -321,7 +321,7 @@ pub fn encode_store_value(buffer: &mut Vec<u8>, value: &StoreValue) {
 
 #[cfg(test)]
 mod tests {
-  use std::f64::consts::PI;
+  use core::f64::consts::PI;
 
   use super::*;
   use crate::engine_types::EngineValue;

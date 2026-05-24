@@ -1,6 +1,8 @@
 use crate::{ChangeEvent, EngineError, EngineQuery, EngineResult, SyncScope};
 #[cfg(not(feature = "std"))]
-use alloc::string::String;
+use alloc::boxed::Box;
+#[cfg(not(feature = "std"))]
+use alloc::string::{String, ToString};
 #[cfg(not(feature = "std"))]
 use alloc::sync::Arc;
 #[cfg(not(feature = "std"))]
