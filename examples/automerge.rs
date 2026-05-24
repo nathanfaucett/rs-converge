@@ -1,4 +1,5 @@
-// Example: register two tables, insert rows, and run a SQL JOIN select
+// Example: register two tables, insert rows, and run a SQL JOIN select.
+// Uses Automerge document encoding on the in-memory named-tree layout backend.
 // Requires the `automerge` feature; this example fails to build otherwise.
 #[cfg(feature = "automerge")]
 use db::Database;

@@ -8,10 +8,9 @@ use uuid::Uuid;
 use crate::automerge_btree::{AutomergeBTree, AutomergeEntry, DocumentChangeKey};
 use db_core::{BTree, BTreeError, BTreeExecutor, BTreeTransaction};
 
-/// Automerge-backed engine store: each logical collection (table/index/schema)
-/// is represented by an Automerge `AutoCommit` document stored in the
-/// `AutomergeBTree<B>` backend. Engine-level keys/values are encoded as direct
-/// Automerge document fields and decoded on read.
+/// Automerge **format** store: each logical key maps to an `AutoCommit` document
+/// in an underlying B-tree backend (`AutomergeBTree<B>`). Encoding and merge
+/// semantics are format-only; the caller owns layout/tree structure.
 #[derive(Clone)]
 pub struct AutomergeEngineStore<B>
 where

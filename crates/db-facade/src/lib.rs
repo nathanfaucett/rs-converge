@@ -1,18 +1,25 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
 mod api;
-#[cfg(feature = "automerge")]
-mod automerge_named_store;
 mod types;
 
-pub use db_sql_to_engine::SqlParams;
 #[cfg(feature = "automerge")]
-pub use types::AutomergeSyncMetrics;
+pub use db_named_bridge::LayoutFormatBridge;
+#[cfg(feature = "automerge")]
+pub use db_named_bridge::automerge::{
+  AutomergeFormatAdapter, AutomergeLayout, AutomergeSyncMetrics, automerge_layout_metrics,
+  sync_automerge_layouts,
+};
+pub use db_sql_to_engine::SqlParams;
 #[cfg(feature = "redb")]
 pub use types::RedbEngineStore;
 pub use types::{
   Database, DatabaseError, FacadeStore, InMemoryEngineStore, ReadTransaction, Row, Transaction,
 };
+#[cfg(feature = "automerge")]
+pub use types::{InMemoryAutomergeLayoutBackend, InMemoryAutomergeStore};
+#[cfg(all(feature = "automerge", feature = "redb"))]
+pub use types::{RedbAutomergeLayoutBackend, RedbAutomergeStore};
 
 // Re-export subscription types from db_engine for convenience
 pub use db_engine::{Subscriber, SubscriptionId, SyncScope};

@@ -9,22 +9,18 @@ use std::string::ToString;
 use std::vec::Vec;
 
 #[cfg(feature = "automerge")]
-use crate::automerge_named_store::AutomergeNamedStore;
+use super::types::InMemoryAutomergeLayoutBackend;
 #[cfg(not(feature = "std"))]
 use alloc::sync::Arc;
-#[cfg(feature = "automerge")]
-use db_automerge::{AutomergeEngineStore, AutomergeEntry, DocumentChangeKey};
 #[cfg(feature = "redb")]
 use db_engine::EngineKey;
 use db_engine::{
   EngineDatabase, EngineQuery, EngineResult, FromRow, IndexSchema, Subscriber, SubscriptionId,
   SyncScope, TableSchema,
 };
-#[cfg(feature = "automerge")]
-use db_in_memory::InMemoryBTree;
 use db_in_memory::InMemoryNamedBTree;
-#[cfg(all(feature = "automerge", feature = "redb"))]
-use db_redb::REDBBTree;
+#[cfg(feature = "automerge")]
+use db_named_bridge::automerge::AutomergeFormatAdapter;
 #[cfg(feature = "redb")]
 use db_redb::REDBNamedBTree;
 #[cfg(feature = "redb")]
@@ -40,17 +36,15 @@ use db_sql_to_engine::{
   parse_and_translate_with_params,
 };
 
-#[cfg(all(feature = "automerge", feature = "redb"))]
-use super::types::RedbAutomergeStore;
+#[cfg(feature = "automerge")]
+use super::types::InMemoryAutomergeStore;
 #[cfg(feature = "redb")]
 use super::types::RedbEngineStore;
-#[cfg(feature = "automerge")]
-use super::types::{AutomergeSyncMetrics, InMemoryAutomergeStore};
 use super::types::{
   Database, DatabaseError, FacadeStore, InMemoryEngineStore, ReadTransaction, Row, Transaction,
 };
 #[cfg(all(feature = "automerge", feature = "redb"))]
-use super::types::{FacadeDocumentChangeKeyCodec, FacadeVecBytesCodec};
+use super::types::{RedbAutomergeLayoutBackend, RedbAutomergeStore};
 
 impl<S> SchemaResolver for Database<S>
 where
@@ -74,81 +68,46 @@ impl Database<InMemoryEngineStore> {
   }
 }
 
+// Automerge facade constructors: layout backend + format bridge (see `db-named-bridge`).
 #[cfg(feature = "automerge")]
 impl Database<InMemoryAutomergeStore> {
-  /// Open an Automerge-backed database (feature-gated).
+  /// Open an in-memory database with Automerge document encoding on the
+  /// in-memory named-tree layout backend.
   pub async fn open_automerge_in_memory() -> Result<Self, DatabaseError> {
-    let backend = InMemoryBTree::<DocumentChangeKey, AutomergeEntry>::new();
-    let store = AutomergeNamedStore::new(AutomergeEngineStore::new_with_backend(backend));
-    let engine = EngineDatabase::new(store.into_engine_store());
+    let backend = InMemoryAutomergeLayoutBackend::new();
+    let bridge = AutomergeFormatAdapter::new(backend);
+    let engine = EngineDatabase::new(bridge.into_engine_store());
     Ok(Self { engine })
   }
 
-  /// Merge Automerge documents from each peer and reload schema on both sides.
-  pub async fn sync_with(&mut self, other: &mut Self) -> Result<(), DatabaseError> {
-    db_automerge::sync_automerge_stores(
-      self.engine.store().inner().raw(),
-      other.engine.store().inner().raw(),
-    )
-    .await
-    .map_err(|e| DatabaseError::Engine(format!("{e}")))?;
-    self.engine.reload_schema().await?;
-    other.engine.reload_schema().await?;
-    Ok(())
+  /// Layout backend used for catalog/sync (see `db_named_bridge::sync_automerge_layouts`).
+  pub fn automerge_layout(&self) -> &InMemoryAutomergeLayoutBackend {
+    AutomergeFormatAdapter::layout_backend(self.engine.store().inner())
   }
 
-  pub async fn automerge_sync_metrics(&self) -> Result<AutomergeSyncMetrics, DatabaseError> {
-    let docs = db_automerge::collect_documents(self.engine.store().inner().raw())
-      .await
-      .map_err(|e| DatabaseError::Engine(format!("{e}")))?;
-    let (document_count, total_document_bytes) = db_automerge::automerge_metrics(&docs);
-    Ok(AutomergeSyncMetrics {
-      document_count,
-      total_document_bytes,
-    })
+  pub async fn reload_schema(&mut self) -> Result<(), DatabaseError> {
+    self.engine.reload_schema().await.map_err(Into::into)
   }
 }
 
 #[cfg(all(feature = "automerge", feature = "redb"))]
 impl Database<RedbAutomergeStore> {
-  pub async fn open_automerge_with_redb(
-    path: impl AsRef<Path>,
-    table_name: &'static str,
-  ) -> Result<Self, DatabaseError> {
-    let backend = REDBBTree::<
-      DocumentChangeKey,
-      AutomergeEntry,
-      FacadeDocumentChangeKeyCodec,
-      FacadeVecBytesCodec,
-    >::open_with_codecs(path, table_name)
-    .map_err(|e| DatabaseError::Engine(format!("{e}")))?;
-    let store = AutomergeNamedStore::new(AutomergeEngineStore::new_with_backend(backend));
-    let engine = EngineDatabase::new(store.into_engine_store());
+  /// Open a redb-backed database with Automerge document encoding on the
+  /// redb named-tree layout backend.
+  pub async fn open_automerge_with_redb(path: impl AsRef<Path>) -> Result<Self, DatabaseError> {
+    let backend = RedbAutomergeLayoutBackend::open_with_codecs(path)
+      .map_err(|e| DatabaseError::Engine(format!("{e}")))?;
+    let bridge = AutomergeFormatAdapter::new(backend);
+    let engine = EngineDatabase::new(bridge.into_engine_store());
     Ok(Self { engine })
   }
 
-  /// Merge Automerge documents from each peer and reload schema on both sides.
-  pub async fn sync_with(&mut self, other: &mut Self) -> Result<(), DatabaseError> {
-    db_automerge::sync_automerge_stores(
-      self.engine.store().inner().raw(),
-      other.engine.store().inner().raw(),
-    )
-    .await
-    .map_err(|e| DatabaseError::Engine(format!("{e}")))?;
-    self.engine.reload_schema().await?;
-    other.engine.reload_schema().await?;
-    Ok(())
+  pub fn automerge_layout(&self) -> &RedbAutomergeLayoutBackend {
+    AutomergeFormatAdapter::layout_backend(self.engine.store().inner())
   }
 
-  pub async fn automerge_sync_metrics(&self) -> Result<AutomergeSyncMetrics, DatabaseError> {
-    let docs = db_automerge::collect_documents(self.engine.store().inner().raw())
-      .await
-      .map_err(|e| DatabaseError::Engine(format!("{e}")))?;
-    let (document_count, total_document_bytes) = db_automerge::automerge_metrics(&docs);
-    Ok(AutomergeSyncMetrics {
-      document_count,
-      total_document_bytes,
-    })
+  pub async fn reload_schema(&mut self) -> Result<(), DatabaseError> {
+    self.engine.reload_schema().await.map_err(Into::into)
   }
 }
 

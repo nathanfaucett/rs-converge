@@ -1,0 +1,34 @@
+[package]
+name = "db-named-bridge"
+version = "0.1.0"
+description = "Glue between named-tree layout backends and engine storage formats"
+rust-version = "1.95"
+edition = "2024"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = ["std"]
+std = ["db-core/std", "db-engine/std", "db-types/std"]
+automerge = [
+  "std",
+  "dep:db-automerge",
+  "dep:async-stream",
+  "dep:automerge",
+  "dep:sha2",
+]
+
+[dependencies]
+db-automerge = { path = "../db-automerge", default-features = false, optional = true }
+db-core = { path = "../db-core", default-features = false }
+db-engine = { path = "../db-engine", default-features = false }
+db-types = { path = "../db-types", default-features = false }
+
+async-stream = { version = "0.3", default-features = false, optional = true }
+automerge = { version = "0.9", default-features = false, optional = true }
+futures = { version = "0.3", default-features = false }
+sha2 = { version = "0.10", default-features = false, features = [
+  "std",
+], optional = true }
+uuid = { version = "1.18", default-features = false }

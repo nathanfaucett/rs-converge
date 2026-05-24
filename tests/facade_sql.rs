@@ -509,7 +509,7 @@ mod tests {
       let path = temp_redb_path("join");
       let _ = fs::remove_file(&path);
 
-      let mut db = Database::open_automerge_with_redb(&path, "automerge_store")
+      let mut db = Database::open_automerge_with_redb(&path)
         .await
         .expect("open automerge redb");
 

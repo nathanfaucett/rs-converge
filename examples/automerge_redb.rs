@@ -1,6 +1,6 @@
-// Example: register two tables, insert rows, and run a SQL JOIN select
-// Uses an Automerge-backed store persisted in `redb` when built with the
-// `automerge` and `redb` features.
+// Example: register two tables, insert rows, and run a SQL JOIN select.
+// Uses Automerge document encoding on a redb named-tree layout backend when
+// built with the `automerge` and `redb` features.
 #[cfg(all(feature = "automerge", feature = "redb"))]
 use db::Database;
 #[cfg(all(feature = "automerge", feature = "redb"))]
@@ -20,7 +20,7 @@ fn main() {
         .as_secs()
     ));
 
-    let mut db = Database::open_automerge_with_redb(path, "automerge_store")
+    let mut db = Database::open_automerge_with_redb(path)
       .await
       .expect("open automerge redb");
 

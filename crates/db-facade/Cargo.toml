@@ -22,15 +22,14 @@ redb = ["std", "db-redb", "dep:redb"]
 automerge = [
   "std",
   "db-automerge",
-  "dep:async-stream",
-  "dep:automerge",
-  "dep:sha2",
+  "db-named-bridge/automerge",
 ]
 
 [dependencies]
 # Workspace crates
 db-automerge = { path = "../db-automerge", default-features = false, optional = true }
 db-core = { path = "../db-core", default-features = false }
+db-named-bridge = { path = "../db-named-bridge", default-features = false, optional = true }
 db-engine = { path = "../db-engine", default-features = false }
 db-in-memory = { path = "../db-in-memory", default-features = false }
 db-redb = { path = "../db-redb", default-features = false, optional = true }
@@ -38,14 +37,7 @@ db-sql-to-engine = { path = "../db-sql-to-engine", default-features = false }
 db-types = { path = "../db-types", default-features = false }
 
 # External crates
-async-stream = { version = "0.3", default-features = false, features = [
-], optional = true }
-automerge = { version = "0.9", default-features = false, features = [
-], optional = true }
 futures = { version = "0.3", default-features = false }
 redb = { version = "4.0", default-features = false, features = [
-], optional = true }
-sha2 = { version = "0.10", default-features = false, features = [
-  "std",
 ], optional = true }
 uuid = { version = "1.18", default-features = false }

@@ -1,6 +1,6 @@
 #[cfg(feature = "automerge")]
 mod tests {
-  use db::Database;
+  use db::{Database, automerge_layout_metrics, sync_automerge_layouts};
   use db_core::NamedTreeProvider;
   use db_engine::{
     EngineKey, EngineQuery, EngineValue, QualifiedColumn, QualifiedOperand, QualifiedPredicate,
@@ -106,6 +106,16 @@ mod tests {
     .await;
   }
 
+  macro_rules! sync_layout_peers {
+    ($left:expr, $right:expr) => {{
+      sync_automerge_layouts($left.automerge_layout(), $right.automerge_layout())
+        .await
+        .expect("layout sync");
+      $left.reload_schema().await.expect("reload left schema");
+      $right.reload_schema().await.expect("reload right schema");
+    }};
+  }
+
   fn eq_pred(table: &str, column_index: usize, value: EngineValue) -> QualifiedPredicate {
     QualifiedPredicate::Equals(
       QualifiedOperand::Column(QualifiedColumn {
@@ -123,7 +133,7 @@ mod tests {
         .await
         .expect("create users on left");
 
-      $left.sync_with(&mut $right).await.expect("first sync");
+      sync_layout_peers!($left, $right);
 
       $right
         .execute_sql(&format!(
@@ -140,10 +150,10 @@ mod tests {
         .await
         .expect("insert alice on left");
 
-      $left.sync_with(&mut $right).await.expect("second sync");
+      sync_layout_peers!($left, $right);
       assert_user_rows_match(&mut $left, &mut $right).await;
 
-      $left.sync_with(&mut $right).await.expect("third sync");
+      sync_layout_peers!($left, $right);
       assert_user_rows_match(&mut $left, &mut $right).await;
     }};
   }
@@ -159,10 +169,7 @@ mod tests {
         .await
         .expect("create teams on left");
 
-      $left
-        .sync_with(&mut $right)
-        .await
-        .expect("sync initial schema");
+      sync_layout_peers!($left, $right);
 
       $left
         .execute_sql(&format!(
@@ -194,10 +201,7 @@ mod tests {
         .await
         .expect("insert infra team on right");
 
-      $left
-        .sync_with(&mut $right)
-        .await
-        .expect("sync divergent inserts");
+      sync_layout_peers!($left, $right);
 
       assert_query_rows_match(
         &mut $left,
@@ -250,10 +254,7 @@ mod tests {
         .await
         .expect("insert dan on right");
 
-      $left
-        .sync_with(&mut $right)
-        .await
-        .expect("sync second inserts");
+      sync_layout_peers!($left, $right);
 
       assert_query_rows_match(
         &mut $left,
@@ -299,10 +300,7 @@ mod tests {
         .execute_sql("CREATE TABLE profiles (id UUID PRIMARY KEY, alias TEXT, status TEXT);")
         .await
         .expect("create profiles on right");
-      $right
-        .sync_with(&mut $left)
-        .await
-        .expect("sync profiles schema");
+      sync_layout_peers!($right, $left);
 
       $left
         .execute_sql(&format!(
@@ -318,10 +316,7 @@ mod tests {
         ))
         .await
         .expect("insert eli on right");
-      $left
-        .sync_with(&mut $right)
-        .await
-        .expect("sync profiles rows");
+      sync_layout_peers!($left, $right);
 
       assert_query_rows_match(
         &mut $left,
@@ -353,8 +348,8 @@ mod tests {
       )
       .await;
 
-      $left.sync_with(&mut $right).await.expect("no-op sync one");
-      $right.sync_with(&mut $left).await.expect("no-op sync two");
+      sync_layout_peers!($left, $right);
+      sync_layout_peers!($right, $left);
 
       assert_query_rows_match(
         &mut $left,
@@ -383,10 +378,7 @@ mod tests {
         .execute_sql("CREATE TABLE users (id UUID PRIMARY KEY, name TEXT, score INT);")
         .await
         .expect("create users on left");
-      $left
-        .sync_with(&mut $right)
-        .await
-        .expect("sync users schema");
+      sync_layout_peers!($left, $right);
 
       $left
         .execute_sql(&format!(
@@ -410,7 +402,7 @@ mod tests {
         .await
         .expect("insert cara on left");
 
-      $left.sync_with(&mut $right).await.expect("sync seed rows");
+      sync_layout_peers!($left, $right);
 
       $left
         .execute_query(EngineQuery::Update {
@@ -424,10 +416,7 @@ mod tests {
         .await
         .expect("update score for alice on left");
 
-      $left
-        .sync_with(&mut $right)
-        .await
-        .expect("sync sequential update");
+      sync_layout_peers!($left, $right);
 
       assert_query_rows_match(
         &mut $left,
@@ -462,10 +451,7 @@ mod tests {
         .await
         .expect("delete bob on right");
 
-      $right
-        .sync_with(&mut $left)
-        .await
-        .expect("sync sequential delete");
+      sync_layout_peers!($right, $left);
 
       assert_query_rows_match(
         &mut $left,
@@ -513,10 +499,7 @@ mod tests {
         .await
         .expect("update cara score on right");
 
-      $left
-        .sync_with(&mut $right)
-        .await
-        .expect("sync divergent non-overlapping updates");
+      sync_layout_peers!($left, $right);
 
       assert_query_rows_match(
         &mut $left,
@@ -537,14 +520,8 @@ mod tests {
       )
       .await;
 
-      $left
-        .sync_with(&mut $right)
-        .await
-        .expect("mutation no-op sync one");
-      $right
-        .sync_with(&mut $left)
-        .await
-        .expect("mutation no-op sync two");
+      sync_layout_peers!($left, $right);
+      sync_layout_peers!($right, $left);
 
       assert_query_rows_match(
         &mut $left,
@@ -584,37 +561,24 @@ mod tests {
           .expect("insert seed user on left");
       }
 
-      $left
-        .sync_with(&mut $right)
-        .await
-        .expect("sync seed dataset");
+      sync_layout_peers!($left, $right);
 
-      let left_before = $left
-        .automerge_sync_metrics()
+      let left_before = automerge_layout_metrics($left.automerge_layout())
         .await
-        .expect("collect left metrics before no-op sync");
-      let right_before = $right
-        .automerge_sync_metrics()
+        .expect("layout metrics");
+      let right_before = automerge_layout_metrics($right.automerge_layout())
         .await
-        .expect("collect right metrics before no-op sync");
+        .expect("layout metrics");
 
-      $left
-        .sync_with(&mut $right)
-        .await
-        .expect("first no-op sync");
-      $right
-        .sync_with(&mut $left)
-        .await
-        .expect("second no-op sync");
+      sync_layout_peers!($left, $right);
+      sync_layout_peers!($right, $left);
 
-      let left_after = $left
-        .automerge_sync_metrics()
+      let left_after = automerge_layout_metrics($left.automerge_layout())
         .await
-        .expect("collect left metrics after no-op sync");
-      let right_after = $right
-        .automerge_sync_metrics()
+        .expect("layout metrics");
+      let right_after = automerge_layout_metrics($right.automerge_layout())
         .await
-        .expect("collect right metrics after no-op sync");
+        .expect("layout metrics");
 
       assert_eq!(left_after.document_count, left_before.document_count);
       assert_eq!(right_after.document_count, right_before.document_count);
@@ -628,24 +592,113 @@ mod tests {
         ))
         .await
         .expect("insert one delta row on left");
-      $left
-        .sync_with(&mut $right)
-        .await
-        .expect("sync one-row delta");
+      sync_layout_peers!($left, $right);
 
-      let left_delta = $left
-        .automerge_sync_metrics()
+      let left_delta = automerge_layout_metrics($left.automerge_layout())
         .await
-        .expect("collect left metrics after delta sync");
-      let right_delta = $right
-        .automerge_sync_metrics()
+        .expect("layout metrics");
+      let right_delta = automerge_layout_metrics($right.automerge_layout())
         .await
-        .expect("collect right metrics after delta sync");
+        .expect("layout metrics");
 
       assert!(left_delta.document_count >= left_after.document_count);
       assert!(right_delta.document_count >= right_after.document_count);
       assert!(left_delta.total_document_bytes >= left_after.total_document_bytes);
       assert!(right_delta.total_document_bytes >= right_after.total_document_bytes);
+    }};
+  }
+
+  macro_rules! run_tree_isolation_sync_scenario {
+    ($left:expr, $right:expr) => {{
+      $left
+        .execute_sql("CREATE TABLE users (id UUID PRIMARY KEY, name TEXT);")
+        .await
+        .expect("create users on left");
+      $left
+        .execute_sql("CREATE TABLE teams (id UUID PRIMARY KEY, title TEXT);")
+        .await
+        .expect("create teams on left");
+
+      sync_layout_peers!($left, $right);
+
+      $left
+        .execute_sql(&format!(
+          "INSERT INTO users (id, name) VALUES ({}, 'Alice');",
+          uuid_lit(1)
+        ))
+        .await
+        .expect("insert users row");
+      $left
+        .execute_sql(&format!(
+          "INSERT INTO teams (id, title) VALUES ({}, 'Core');",
+          uuid_lit(1)
+        ))
+        .await
+        .expect("insert teams row");
+
+      sync_layout_peers!($left, $right);
+
+      assert_query_rows_match(
+        &mut $left,
+        &mut $right,
+        "SELECT id, name FROM users;",
+        vec![vec![uuid_value(1), EngineValue::Text("Alice".into())]],
+      )
+      .await;
+      assert_query_rows_match(
+        &mut $left,
+        &mut $right,
+        "SELECT id, title FROM teams;",
+        vec![vec![uuid_value(1), EngineValue::Text("Core".into())]],
+      )
+      .await;
+
+      $left
+        .execute_sql(&format!(
+          "UPDATE users SET name = 'Alice v2' WHERE id = {};",
+          uuid_lit(1)
+        ))
+        .await
+        .expect("update users row only");
+
+      sync_layout_peers!($left, $right);
+
+      assert_query_rows_match(
+        &mut $left,
+        &mut $right,
+        "SELECT id, name FROM users;",
+        vec![vec![uuid_value(1), EngineValue::Text("Alice v2".into())]],
+      )
+      .await;
+      assert_query_rows_match(
+        &mut $left,
+        &mut $right,
+        "SELECT id, title FROM teams;",
+        vec![vec![uuid_value(1), EngineValue::Text("Core".into())]],
+      )
+      .await;
+
+      $right
+        .execute_sql(&format!("DELETE FROM users WHERE id = {};", uuid_lit(1)))
+        .await
+        .expect("delete users row only");
+
+      sync_layout_peers!($right, $left);
+
+      assert_query_rows_match(
+        &mut $left,
+        &mut $right,
+        "SELECT id, name FROM users;",
+        vec![],
+      )
+      .await;
+      assert_query_rows_match(
+        &mut $left,
+        &mut $right,
+        "SELECT id, title FROM teams;",
+        vec![vec![uuid_value(1), EngineValue::Text("Core".into())]],
+      )
+      .await;
     }};
   }
 
@@ -700,10 +753,10 @@ mod tests {
     let left_path = temp_redb_path("left");
     let right_path = temp_redb_path("right");
 
-    let mut left = Database::open_automerge_with_redb(&left_path, "automerge_store")
+    let mut left = Database::open_automerge_with_redb(&left_path)
       .await
       .expect("open left redb db");
-    let mut right = Database::open_automerge_with_redb(&right_path, "automerge_store")
+    let mut right = Database::open_automerge_with_redb(&right_path)
       .await
       .expect("open right redb db");
 
@@ -728,10 +781,10 @@ mod tests {
       let left_path = temp_redb_path("left_lifecycle");
       let right_path = temp_redb_path("right_lifecycle");
 
-      let mut left = Database::open_automerge_with_redb(&left_path, "automerge_store")
+      let mut left = Database::open_automerge_with_redb(&left_path)
         .await
         .expect("open left redb db");
-      let mut right = Database::open_automerge_with_redb(&right_path, "automerge_store")
+      let mut right = Database::open_automerge_with_redb(&right_path)
         .await
         .expect("open right redb db");
 
@@ -749,10 +802,10 @@ mod tests {
       let left_path = temp_redb_path("left_mutations");
       let right_path = temp_redb_path("right_mutations");
 
-      let mut left = Database::open_automerge_with_redb(&left_path, "automerge_store")
+      let mut left = Database::open_automerge_with_redb(&left_path)
         .await
         .expect("open left redb db");
-      let mut right = Database::open_automerge_with_redb(&right_path, "automerge_store")
+      let mut right = Database::open_automerge_with_redb(&right_path)
         .await
         .expect("open right redb db");
 
@@ -777,6 +830,20 @@ mod tests {
     });
   }
 
+  #[test]
+  fn automerge_in_memory_tree_isolation_same_key() {
+    block_on(async {
+      let mut left = Database::open_automerge_in_memory()
+        .await
+        .expect("open left in-memory db");
+      let mut right = Database::open_automerge_in_memory()
+        .await
+        .expect("open right in-memory db");
+
+      run_tree_isolation_sync_scenario!(left, right);
+    });
+  }
+
   #[cfg(feature = "redb")]
   #[test]
   fn automerge_redb_offline_sync_noop_is_data_efficient() {
@@ -784,14 +851,35 @@ mod tests {
       let left_path = temp_redb_path("left_efficiency");
       let right_path = temp_redb_path("right_efficiency");
 
-      let mut left = Database::open_automerge_with_redb(&left_path, "automerge_store")
+      let mut left = Database::open_automerge_with_redb(&left_path)
         .await
         .expect("open left redb db");
-      let mut right = Database::open_automerge_with_redb(&right_path, "automerge_store")
+      let mut right = Database::open_automerge_with_redb(&right_path)
         .await
         .expect("open right redb db");
 
       run_efficiency_sync_scenario!(left, right);
+
+      let _ = fs::remove_file(left_path);
+      let _ = fs::remove_file(right_path);
+    });
+  }
+
+  #[cfg(feature = "redb")]
+  #[test]
+  fn automerge_redb_tree_isolation_same_key() {
+    block_on(async {
+      let left_path = temp_redb_path("left_isolation");
+      let right_path = temp_redb_path("right_isolation");
+
+      let mut left = Database::open_automerge_with_redb(&left_path)
+        .await
+        .expect("open left redb db");
+      let mut right = Database::open_automerge_with_redb(&right_path)
+        .await
+        .expect("open right redb db");
+
+      run_tree_isolation_sync_scenario!(left, right);
 
       let _ = fs::remove_file(left_path);
       let _ = fs::remove_file(right_path);

@@ -5,8 +5,6 @@ extern crate alloc;
 use alloc::{format, string::String, vec::Vec};
 use core::fmt;
 
-#[cfg(feature = "automerge")]
-use crate::automerge_named_store::AutomergeNamedStore;
 #[cfg(all(feature = "automerge", feature = "redb"))]
 use db_automerge::DocumentType;
 #[cfg(feature = "automerge")]
@@ -16,10 +14,9 @@ use db_core::BufferSink;
 use db_core::{MaybeSend, MaybeSync, NamedTreeProvider};
 use db_engine::{EngineDatabase, EngineKey, EngineValue, NamedTreeEngineStore};
 #[cfg(feature = "automerge")]
-use db_in_memory::InMemoryBTree;
 use db_in_memory::InMemoryNamedBTree;
-#[cfg(all(feature = "automerge", feature = "redb"))]
-use db_redb::REDBBTree;
+#[cfg(feature = "automerge")]
+use db_named_bridge::automerge::AutomergeFormatAdapter;
 #[cfg(feature = "redb")]
 use db_redb::REDBNamedBTree;
 #[cfg(feature = "redb")]
@@ -50,24 +47,30 @@ impl From<db_engine::EngineError> for DatabaseError {
 /// Simple row type reusing EngineValue
 pub type Row = Vec<EngineValue>;
 
+/// In-memory named-tree layout backend for raw engine key/value storage.
 pub type InMemoryEngineStore = InMemoryNamedBTree<EngineKey, Vec<u8>>;
+/// Redb named-tree layout backend for raw engine key/value storage.
 #[cfg(feature = "redb")]
 pub type RedbEngineStore = REDBNamedBTree<EngineKey, Vec<u8>, EngineKeyCodec>;
 
+/// Redb named-tree layout backend for Automerge document change storage.
 #[cfg(all(feature = "automerge", feature = "redb"))]
-pub type RedbAutomergeStore = AutomergeNamedStore<
-  REDBBTree<DocumentChangeKey, Vec<u8>, FacadeDocumentChangeKeyCodec, FacadeVecBytesCodec>,
+pub type RedbAutomergeLayoutBackend = REDBNamedBTree<
+  DocumentChangeKey,
+  AutomergeEntry,
+  FacadeDocumentChangeKeyCodec,
+  FacadeVecBytesCodec,
 >;
+/// In-memory named-tree layout backend for Automerge document change storage.
 #[cfg(feature = "automerge")]
-pub type InMemoryAutomergeStore =
-  AutomergeNamedStore<InMemoryBTree<DocumentChangeKey, AutomergeEntry>>;
+pub type InMemoryAutomergeLayoutBackend = InMemoryNamedBTree<DocumentChangeKey, AutomergeEntry>;
 
+/// Facade store: Automerge format adapter over a redb layout backend.
+#[cfg(all(feature = "automerge", feature = "redb"))]
+pub type RedbAutomergeStore = AutomergeFormatAdapter<RedbAutomergeLayoutBackend>;
+/// Facade store: Automerge format adapter over an in-memory layout backend.
 #[cfg(feature = "automerge")]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct AutomergeSyncMetrics {
-  pub document_count: usize,
-  pub total_document_bytes: usize,
-}
+pub type InMemoryAutomergeStore = AutomergeFormatAdapter<InMemoryAutomergeLayoutBackend>;
 
 pub trait FacadeStore: Clone + MaybeSend + MaybeSync + 'static {
   type EngineStore: db_engine::EngineStore;

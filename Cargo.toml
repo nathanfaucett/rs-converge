@@ -31,7 +31,14 @@ db-facade = { path = "crates/db-facade", default-features = false, features = [
 
 [dev-dependencies]
 db-core = { path = "crates/db-core", default-features = false, features = [
-    "std",
+  "std",
+] }
+db-named-bridge = { path = "crates/db-named-bridge", default-features = false, features = [
+  "automerge",
+] }
+db-facade = { path = "crates/db-facade", default-features = false, features = [
+  "std",
+  "automerge",
 ] }
 db-engine = { path = "crates/db-engine", default-features = false, features = [
     "std",
@@ -42,6 +49,7 @@ uuid = { version = "1.0", default-features = false, features = ["v4"] }
 [workspace]
 members = [
     "crates/db-facade",
+    "crates/db-named-bridge",
     "crates/db-core",
     "crates/db-types",
     "crates/db-engine",

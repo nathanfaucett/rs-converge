@@ -1,5 +1,5 @@
 ---
-applyTo: "**"
+alwaysApply: true
 ---
 
 # Instructions
