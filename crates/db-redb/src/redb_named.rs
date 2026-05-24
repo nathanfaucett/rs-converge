@@ -273,8 +273,8 @@ where
     }
   }
 
-  fn list_names(&self) -> impl core::future::Future<Output = Vec<String>> + '_ {
-    async move { interned_names() }
+  async fn list_names(&self) -> Vec<String> {
+    interned_names()
   }
 }
 
