@@ -1424,16 +1424,7 @@ fn translate_returning_item(
   mapper: &dyn ValueMapper,
 ) -> Result<Vec<db_engine::UpdateValueExpr>, TranslateError> {
   match item {
-    SelectItem::Wildcard(_) => Ok(
-      (0..column_count)
-        .map(|index| {
-          db_engine::UpdateValueExpr::Column(db_engine::QualifiedColumn {
-            table: target_table.to_string(),
-            column_index: index,
-          })
-        })
-        .collect(),
-    ),
+    SelectItem::Wildcard(_) => Ok(wildcard_returning_projection(target_table, column_count)),
     SelectItem::QualifiedWildcard(kind, _) => {
       let table_name = match kind {
         sqlparser::ast::SelectItemQualifiedWildcardKind::ObjectName(name) => {
@@ -1451,46 +1442,47 @@ fn translate_returning_item(
           "RETURNING can reference only target table columns".into(),
         ));
       }
-      Ok(
-        (0..column_count)
-          .map(|index| {
-            db_engine::UpdateValueExpr::Column(db_engine::QualifiedColumn {
-              table: target_table.to_string(),
-              column_index: index,
-            })
-          })
-          .collect(),
-      )
+      Ok(wildcard_returning_projection(target_table, column_count))
     }
-    SelectItem::UnnamedExpr(expr) => {
-      let returning_expr =
-        match sql_expr_to_update_value_expr(expr, alias_map, table_schemas, mapper) {
-          Ok(expr) => expr,
-          Err(TranslateError::UnknownTable(_)) | Err(TranslateError::UnknownColumn(_)) => {
-            return Err(TranslateError::UnsupportedFeature(
-              "RETURNING can reference only target table columns".into(),
-            ));
-          }
-          Err(err) => return Err(err),
-        };
-      ensure_returning_expr_uses_target(&returning_expr, target_table)?;
-      Ok(vec![returning_expr])
-    }
-    SelectItem::ExprWithAlias { expr, .. } => {
-      let returning_expr =
-        match sql_expr_to_update_value_expr(expr, alias_map, table_schemas, mapper) {
-          Ok(expr) => expr,
-          Err(TranslateError::UnknownTable(_)) | Err(TranslateError::UnknownColumn(_)) => {
-            return Err(TranslateError::UnsupportedFeature(
-              "RETURNING can reference only target table columns".into(),
-            ));
-          }
-          Err(err) => return Err(err),
-        };
-      ensure_returning_expr_uses_target(&returning_expr, target_table)?;
-      Ok(vec![returning_expr])
+    SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } => {
+      translate_returning_expression(expr, target_table, alias_map, table_schemas, mapper)
     }
   }
+}
+
+fn wildcard_returning_projection(
+  target_table: &str,
+  column_count: usize,
+) -> Vec<db_engine::UpdateValueExpr> {
+  (0..column_count)
+    .map(|index| {
+      db_engine::UpdateValueExpr::Column(db_engine::QualifiedColumn {
+        table: target_table.to_string(),
+        column_index: index,
+      })
+    })
+    .collect()
+}
+
+fn translate_returning_expression(
+  expr: &SqlExpr,
+  target_table: &str,
+  alias_map: &HashMap<String, String>,
+  table_schemas: &HashMap<String, db_engine::TableSchema>,
+  mapper: &dyn ValueMapper,
+) -> Result<Vec<db_engine::UpdateValueExpr>, TranslateError> {
+  let returning_expr = match sql_expr_to_update_value_expr(expr, alias_map, table_schemas, mapper) {
+    Ok(expr) => expr,
+    Err(TranslateError::UnknownTable(_)) | Err(TranslateError::UnknownColumn(_)) => {
+      return Err(TranslateError::UnsupportedFeature(
+        "RETURNING can reference only target table columns".into(),
+      ));
+    }
+    Err(err) => return Err(err),
+  };
+
+  ensure_returning_expr_uses_target(&returning_expr, target_table)?;
+  Ok(vec![returning_expr])
 }
 
 fn ensure_returning_expr_uses_target(

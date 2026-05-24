@@ -169,6 +169,43 @@ impl<S> Database<S>
 where
   S: FacadeStore,
 {
+  fn empty_result() -> EngineResult {
+    EngineResult::new(Vec::new())
+  }
+
+  async fn execute_ddl(&mut self, op: DdlOp) -> Result<EngineResult, DatabaseError> {
+    match op {
+      DdlOp::CreateTable(schema, if_not_exists) => {
+        self.register_table(schema, if_not_exists).await?;
+        Ok(Self::empty_result())
+      }
+      DdlOp::DropTable(name, if_exists) => {
+        self.engine.drop_table(&name, if_exists).await?;
+        Ok(Self::empty_result())
+      }
+      DdlOp::CreateIndex(schema, if_not_exists) => match self.engine.register_index(schema).await {
+        Ok(()) => Ok(Self::empty_result()),
+        Err(db_engine::EngineError::DuplicateIndex(_)) if if_not_exists => Ok(Self::empty_result()),
+        Err(err) => Err(DatabaseError::Other(err.to_string())),
+      },
+      DdlOp::DropIndex(name, if_exists) => match self.engine.drop_index(&name).await {
+        Ok(()) => Ok(Self::empty_result()),
+        Err(db_engine::EngineError::IndexNotFound(_)) if if_exists => Ok(Self::empty_result()),
+        Err(err) => Err(DatabaseError::Other(err.to_string())),
+      },
+    }
+  }
+
+  async fn execute_canonical_statement(
+    &mut self,
+    statement: CanonicalStatement,
+  ) -> Result<EngineResult, DatabaseError> {
+    match statement {
+      CanonicalStatement::Query(query) => self.execute_query(query).await,
+      CanonicalStatement::Ddl(op) => self.execute_ddl(op).await,
+    }
+  }
+
   pub fn from_store(store: S) -> Self {
     let engine = EngineDatabase::new(store.into_engine_store());
     Self { engine }
@@ -281,36 +318,9 @@ where
 
   /// Execute a SQL string using the database schema catalog.
   pub async fn execute_sql(&mut self, sql: &str) -> Result<EngineResult, DatabaseError> {
-    match parse_and_translate_statement(sql, self) {
-      Ok(CanonicalStatement::Query(query)) => self.execute_query(query).await,
-      Ok(CanonicalStatement::Ddl(DdlOp::CreateTable(schema, if_not_exists))) => {
-        self.register_table(schema, if_not_exists).await?;
-        Ok(EngineResult::new(Vec::new()))
-      }
-      Ok(CanonicalStatement::Ddl(DdlOp::DropTable(name, if_exists))) => {
-        self.engine.drop_table(&name, if_exists).await?;
-        Ok(EngineResult::new(Vec::new()))
-      }
-      Ok(CanonicalStatement::Ddl(DdlOp::CreateIndex(schema, if_not_exists))) => {
-        match self.engine.register_index(schema).await {
-          Ok(()) => Ok(EngineResult::new(Vec::new())),
-          Err(db_engine::EngineError::DuplicateIndex(_)) if if_not_exists => {
-            Ok(EngineResult::new(Vec::new()))
-          }
-          Err(err) => Err(DatabaseError::Other(err.to_string())),
-        }
-      }
-      Ok(CanonicalStatement::Ddl(DdlOp::DropIndex(name, if_exists))) => {
-        match self.engine.drop_index(&name).await {
-          Ok(()) => Ok(EngineResult::new(Vec::new())),
-          Err(db_engine::EngineError::IndexNotFound(_)) if if_exists => {
-            Ok(EngineResult::new(Vec::new()))
-          }
-          Err(err) => Err(DatabaseError::Other(err.to_string())),
-        }
-      }
-      Err(e) => Err(DatabaseError::Other(format!("{e}"))),
-    }
+    let statement =
+      parse_and_translate_statement(sql, self).map_err(|e| DatabaseError::Other(format!("{e}")))?;
+    self.execute_canonical_statement(statement).await
   }
 
   /// Execute a SQL string using the database schema catalog with bound parameters.
@@ -319,36 +329,9 @@ where
     sql: &str,
     params: &SqlParams,
   ) -> Result<EngineResult, DatabaseError> {
-    match parse_and_translate_statement_with_params(sql, self, params) {
-      Ok(CanonicalStatement::Query(query)) => self.execute_query(query).await,
-      Ok(CanonicalStatement::Ddl(DdlOp::CreateTable(schema, if_not_exists))) => {
-        self.register_table(schema, if_not_exists).await?;
-        Ok(EngineResult::new(Vec::new()))
-      }
-      Ok(CanonicalStatement::Ddl(DdlOp::DropTable(name, if_exists))) => {
-        self.engine.drop_table(&name, if_exists).await?;
-        Ok(EngineResult::new(Vec::new()))
-      }
-      Ok(CanonicalStatement::Ddl(DdlOp::CreateIndex(schema, if_not_exists))) => {
-        match self.engine.register_index(schema).await {
-          Ok(()) => Ok(EngineResult::new(Vec::new())),
-          Err(db_engine::EngineError::DuplicateIndex(_)) if if_not_exists => {
-            Ok(EngineResult::new(Vec::new()))
-          }
-          Err(err) => Err(DatabaseError::Other(err.to_string())),
-        }
-      }
-      Ok(CanonicalStatement::Ddl(DdlOp::DropIndex(name, if_exists))) => {
-        match self.engine.drop_index(&name).await {
-          Ok(()) => Ok(EngineResult::new(Vec::new())),
-          Err(db_engine::EngineError::IndexNotFound(_)) if if_exists => {
-            Ok(EngineResult::new(Vec::new()))
-          }
-          Err(err) => Err(DatabaseError::Other(err.to_string())),
-        }
-      }
-      Err(e) => Err(DatabaseError::Other(format!("{e}"))),
-    }
+    let statement = parse_and_translate_statement_with_params(sql, self, params)
+      .map_err(|e| DatabaseError::Other(format!("{e}")))?;
+    self.execute_canonical_statement(statement).await
   }
 
   /// Convenience: run a closure in a transaction context.
@@ -466,6 +449,54 @@ impl<'db, S> Transaction<'db, S>
 where
   S: FacadeStore,
 {
+  async fn execute_engine_query(
+    &mut self,
+    query: EngineQuery,
+  ) -> Result<EngineResult, DatabaseError> {
+    match query {
+      EngineQuery::Insert {
+        table,
+        row,
+        returning,
+      } => self
+        .inner
+        .insert_row_with_returning(&table, row, returning)
+        .await
+        .map_err(Into::into),
+      EngineQuery::Update {
+        table,
+        assignments,
+        predicate,
+        joins,
+        from_tables,
+        returning,
+      } => self
+        .inner
+        .update_rows_with_sources_and_returning(
+          &table,
+          assignments,
+          predicate,
+          joins,
+          from_tables,
+          returning,
+        )
+        .await
+        .map_err(Into::into),
+      EngineQuery::Delete {
+        table,
+        predicate,
+        returning,
+      } => self
+        .inner
+        .delete_rows_with_returning(&table, predicate, returning)
+        .await
+        .map_err(Into::into),
+      EngineQuery::Select { .. } => Err(DatabaseError::Other(
+        "SELECT inside transaction not supported; use Database::execute_sql instead".into(),
+      )),
+    }
+  }
+
   pub async fn insert_row(&mut self, table: &str, row: Row) -> Result<(), DatabaseError> {
     self.inner.insert_row(table, row).await?;
     Ok(())
@@ -480,50 +511,7 @@ where
   ) -> Result<EngineResult, DatabaseError> {
     let query =
       parse_and_translate(sql, resolver).map_err(|e| DatabaseError::Other(format!("{e}")))?;
-    match query {
-      EngineQuery::Insert {
-        table,
-        row,
-        returning,
-      } => self
-        .inner
-        .insert_row_with_returning(&table, row, returning)
-        .await
-        .map_err(Into::into),
-      EngineQuery::Update {
-        table,
-        assignments,
-        predicate,
-        joins,
-        from_tables,
-        returning,
-      } => {
-        let result = self
-          .inner
-          .update_rows_with_sources_and_returning(
-            &table,
-            assignments,
-            predicate,
-            joins,
-            from_tables,
-            returning,
-          )
-          .await?;
-        Ok(result)
-      }
-      EngineQuery::Delete {
-        table,
-        predicate,
-        returning,
-      } => self
-        .inner
-        .delete_rows_with_returning(&table, predicate, returning)
-        .await
-        .map_err(Into::into),
-      EngineQuery::Select { .. } => Err(DatabaseError::Other(
-        "SELECT inside transaction not supported; use Database::execute_sql instead".into(),
-      )),
-    }
+    self.execute_engine_query(query).await
   }
 
   /// Execute a SQL string inside this transaction with bound parameters.
@@ -535,50 +523,7 @@ where
   ) -> Result<EngineResult, DatabaseError> {
     let query = parse_and_translate_with_params(sql, resolver, params)
       .map_err(|e| DatabaseError::Other(format!("{e}")))?;
-    match query {
-      EngineQuery::Insert {
-        table,
-        row,
-        returning,
-      } => self
-        .inner
-        .insert_row_with_returning(&table, row, returning)
-        .await
-        .map_err(Into::into),
-      EngineQuery::Update {
-        table,
-        assignments,
-        predicate,
-        joins,
-        from_tables,
-        returning,
-      } => {
-        let result = self
-          .inner
-          .update_rows_with_sources_and_returning(
-            &table,
-            assignments,
-            predicate,
-            joins,
-            from_tables,
-            returning,
-          )
-          .await?;
-        Ok(result)
-      }
-      EngineQuery::Delete {
-        table,
-        predicate,
-        returning,
-      } => self
-        .inner
-        .delete_rows_with_returning(&table, predicate, returning)
-        .await
-        .map_err(Into::into),
-      EngineQuery::Select { .. } => Err(DatabaseError::Other(
-        "SELECT inside transaction not supported; use Database::execute_sql instead".into(),
-      )),
-    }
+    self.execute_engine_query(query).await
   }
 
   pub async fn commit(self) -> Result<(), DatabaseError> {

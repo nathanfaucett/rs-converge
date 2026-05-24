@@ -145,4 +145,28 @@ mod tests {
     assert!(policy.should_compact(0, 1024));
     assert!(!policy.should_compact(2, 10));
   }
+
+  #[test]
+  fn compaction_error_display_messages_include_context() {
+    let key = DocumentChangeKey {
+      doc_id: Uuid::nil(),
+      doc_type: DocumentType::Incremental,
+      change_hash: [0u8; 32],
+    };
+
+    let errors = [
+      CompactionError::Scan(BTreeError::other(std::io::Error::other("scan"))),
+      CompactionError::DecodeState(BTreeError::other(std::io::Error::other("decode"))),
+      CompactionError::Insert(BTreeError::other(std::io::Error::other("insert"))),
+      CompactionError::Remove(key, BTreeError::other(std::io::Error::other("remove"))),
+      CompactionError::Commit(BTreeError::other(std::io::Error::other("commit"))),
+      CompactionError::Rollback(BTreeError::other(std::io::Error::other("rollback"))),
+    ];
+
+    for error in errors {
+      let message = error.to_string();
+      assert!(message.starts_with("compaction "));
+      assert!(!message.is_empty());
+    }
+  }
 }

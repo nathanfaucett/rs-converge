@@ -190,18 +190,27 @@ fn parse_named_params(params: JsValue) -> Result<BTreeMap<String, EngineValue>, 
   let mut named = BTreeMap::new();
 
   for key in keys.iter() {
-    let Some(name) = key.as_string() else {
-      return Err(to_js_error(
-        "invalid named params: found non-string object key",
-      ));
-    };
-    let raw_value = Reflect::get(&object, &key)
-      .map_err(|_| to_js_error(format!("invalid named params: cannot read key '{name}'")))?;
-    let parsed = parse_engine_value(raw_value, &format!("named param '{name}'"))?;
+    let (name, parsed) = parse_named_param_entry(&object, key)?;
     named.insert(name, parsed);
   }
 
   Ok(named)
+}
+
+fn parse_named_param_entry(
+  object: &Object,
+  key: JsValue,
+) -> Result<(String, EngineValue), JsValue> {
+  let Some(name) = key.as_string() else {
+    return Err(to_js_error(
+      "invalid named params: found non-string object key",
+    ));
+  };
+
+  let raw_value = Reflect::get(object, &key)
+    .map_err(|_| to_js_error(format!("invalid named params: cannot read key '{name}'")))?;
+  let parsed = parse_engine_value(raw_value, &format!("named param '{name}'"))?;
+  Ok((name, parsed))
 }
 
 pub fn parse_sql_params(params: JsValue) -> Result<SqlParams, JsValue> {

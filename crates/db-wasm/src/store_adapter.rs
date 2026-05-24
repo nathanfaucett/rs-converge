@@ -280,19 +280,23 @@ fn key_in_range<R>(key: &EngineKey, range: &R) -> bool
 where
   R: RangeBounds<EngineKey>,
 {
-  let start_ok = match range.start_bound() {
+  start_bound_matches(key, range.start_bound()) && end_bound_matches(key, range.end_bound())
+}
+
+fn start_bound_matches(key: &EngineKey, bound: Bound<&EngineKey>) -> bool {
+  match bound {
     Bound::Included(start) => key >= start,
     Bound::Excluded(start) => key > start,
     Bound::Unbounded => true,
-  };
+  }
+}
 
-  let end_ok = match range.end_bound() {
+fn end_bound_matches(key: &EngineKey, bound: Bound<&EngineKey>) -> bool {
+  match bound {
     Bound::Included(end) => key <= end,
     Bound::Excluded(end) => key < end,
     Bound::Unbounded => true,
-  };
-
-  start_ok && end_ok
+  }
 }
 
 #[cfg(test)]
@@ -313,15 +317,19 @@ mod tests {
 }
 
 impl StoreAdapterCallbacks {
+  fn transaction_mode(commit_on_success: bool) -> &'static str {
+    if commit_on_success {
+      "readwrite"
+    } else {
+      "readonly"
+    }
+  }
+
   async fn begin_backend_transaction(
     &self,
     commit_on_success: bool,
   ) -> BTreeResult<BackendTransaction> {
-    let mode = if commit_on_success {
-      "readwrite"
-    } else {
-      "readonly"
-    };
+    let mode = Self::transaction_mode(commit_on_success);
     let value = call_method1(
       self.callbacks.begin_transaction.clone(),
       self.callbacks.adapter.clone(),
@@ -405,18 +413,7 @@ impl StoreAdapterCallbacks {
   where
     R: RangeBounds<EngineKey>,
   {
-    let request = ByteRangeRequest {
-      start: match range.start_bound() {
-        Bound::Included(key) | Bound::Excluded(key) => Some(key.clone()),
-        Bound::Unbounded => None,
-      },
-      start_inclusive: matches!(range.start_bound(), Bound::Included(_)),
-      end: match range.end_bound() {
-        Bound::Included(key) | Bound::Excluded(key) => Some(key.clone()),
-        Bound::Unbounded => None,
-      },
-      end_inclusive: matches!(range.end_bound(), Bound::Included(_)),
-    };
+    let request = byte_range_request(range);
 
     let (range_fn, tx_value) = {
       let handles = tx.handles.borrow();
@@ -429,13 +426,7 @@ impl StoreAdapterCallbacks {
       to_js(&request)?,
     )
     .await?;
-    let rows: Vec<ByteEntry> = from_js(value)?;
-    Ok(
-      rows
-        .into_iter()
-        .map(|entry| (entry.key, entry.value))
-        .collect(),
-    )
+    decode_byte_entries(value)
   }
 
   async fn callback_get(&self, tree: &str, key: &EngineKey) -> BTreeResult<Option<Vec<u8>>> {
@@ -484,6 +475,35 @@ impl StoreAdapterCallbacks {
     let _ = tx.rollback().await;
     result
   }
+}
+
+fn byte_range_request<R>(range: &R) -> ByteRangeRequest
+where
+  R: RangeBounds<EngineKey>,
+{
+  ByteRangeRequest {
+    start: bound_key(range.start_bound()),
+    start_inclusive: matches!(range.start_bound(), Bound::Included(_)),
+    end: bound_key(range.end_bound()),
+    end_inclusive: matches!(range.end_bound(), Bound::Included(_)),
+  }
+}
+
+fn bound_key(bound: Bound<&EngineKey>) -> Option<EngineKey> {
+  match bound {
+    Bound::Included(key) | Bound::Excluded(key) => Some(key.clone()),
+    Bound::Unbounded => None,
+  }
+}
+
+fn decode_byte_entries(value: JsValue) -> BTreeResult<Vec<(EngineKey, Vec<u8>)>> {
+  let rows: Vec<ByteEntry> = from_js(value)?;
+  Ok(
+    rows
+      .into_iter()
+      .map(|entry| (entry.key, entry.value))
+      .collect(),
+  )
 }
 
 impl NamedTreeProvider<EngineKey, Vec<u8>> for StoreAdapterCallbacks {

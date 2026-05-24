@@ -86,28 +86,38 @@ pub async fn load_catalog_impl<T>(
 where
   T: BTreeTransaction<StoreKey, StoreValue> + Send + 'static,
 {
-  let mut tables = Vec::new();
-  let mut indexes = Vec::new();
-
-  let table_schema_stream = range_table_schema_entries_impl(tx);
-  pin_mut!(table_schema_stream);
-  while let Some(item) = table_schema_stream.next().await {
-    let (_, value) = item?;
-    if let StoreValue::TableSchema(schema) = value {
-      tables.push(schema);
-    }
-  }
-
-  let index_schema_stream = range_index_schema_entries_impl(tx);
-  pin_mut!(index_schema_stream);
-  while let Some(item) = index_schema_stream.next().await {
-    let (_, value) = item?;
-    if let StoreValue::IndexSchema(schema) = value {
-      indexes.push(schema);
-    }
-  }
+  let tables = collect_table_schemas(range_table_schema_entries_impl(tx)).await?;
+  let indexes = collect_index_schemas(range_index_schema_entries_impl(tx)).await?;
 
   Ok((tables, indexes))
+}
+
+async fn collect_table_schemas<S>(stream: S) -> Result<Vec<TableSchema>, db_core::BTreeError>
+where
+  S: futures::Stream<Item = Result<(StoreKey, StoreValue), db_core::BTreeError>>,
+{
+  pin_mut!(stream);
+  let mut schemas = Vec::new();
+  while let Some(item) = stream.next().await {
+    if let StoreValue::TableSchema(schema) = item?.1 {
+      schemas.push(schema);
+    }
+  }
+  Ok(schemas)
+}
+
+async fn collect_index_schemas<S>(stream: S) -> Result<Vec<IndexSchema>, db_core::BTreeError>
+where
+  S: futures::Stream<Item = Result<(StoreKey, StoreValue), db_core::BTreeError>>,
+{
+  pin_mut!(stream);
+  let mut schemas = Vec::new();
+  while let Some(item) = stream.next().await {
+    if let StoreValue::IndexSchema(schema) = item?.1 {
+      schemas.push(schema);
+    }
+  }
+  Ok(schemas)
 }
 
 pub fn range_table_schema_entries_impl<'a, T>(
@@ -186,19 +196,27 @@ where
 
   while let Some(item) = stream.next().await {
     let (key, _value) = item?;
-    if let StoreKey::IndexEntry {
-      index_name: name,
-      index_key: entry_key,
-      row_pk,
-    } = key
-      && name == index_name
-      && entry_key == *index_key
-    {
+    if let Some(row_pk) = matching_index_entry_row_pk(key, index_name, index_key) {
       row_pks.push(row_pk);
     }
   }
 
   Ok(row_pks)
+}
+
+fn matching_index_entry_row_pk(
+  key: StoreKey,
+  index_name: &str,
+  index_key: &EngineKey,
+) -> Option<EngineKey> {
+  match key {
+    StoreKey::IndexEntry {
+      index_name: name,
+      index_key: entry_key,
+      row_pk,
+    } if name == index_name && entry_key == *index_key => Some(row_pk),
+    _ => None,
+  }
 }
 
 pub fn encode_table_schema(schema: &TableSchema) -> Vec<EngineValue> {

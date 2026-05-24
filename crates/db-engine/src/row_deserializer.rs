@@ -388,3 +388,34 @@ impl<'de> serde::Deserializer<'de> for EngineValueDeserializer<'de> {
     ignored_any
   }
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use serde::Deserialize;
+
+  #[test]
+  fn deserialize_bool_accepts_integer_and_text_forms() {
+    let int_true = bool::deserialize(EngineValueDeserializer(&EngineValue::Integer(1)))
+      .expect("integer bool should deserialize");
+    let text_true = bool::deserialize(EngineValueDeserializer(&EngineValue::Text("true".into())))
+      .expect("text bool should deserialize");
+    let text_false = bool::deserialize(EngineValueDeserializer(&EngineValue::Text("0".into())))
+      .expect("text false should deserialize");
+
+    assert!(int_true);
+    assert!(text_true);
+    assert!(!text_false);
+  }
+
+  #[test]
+  fn deserialize_i32_checks_range() {
+    let ok = i32::deserialize(EngineValueDeserializer(&EngineValue::Integer(123)))
+      .expect("in-range i32 should deserialize");
+    assert_eq!(ok, 123);
+
+    let err = i32::deserialize(EngineValueDeserializer(&EngineValue::Integer(i64::MAX)))
+      .expect_err("out-of-range i32 should fail");
+    assert!(err.to_string().contains("i32 out of range"));
+  }
+}

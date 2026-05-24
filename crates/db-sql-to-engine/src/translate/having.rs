@@ -387,4 +387,146 @@ mod tests {
 
     assert!(matches!(predicate, db_engine::HavingPredicate::IsNull(_)));
   }
+
+  #[test]
+  fn aggregate_name_maps_variants() {
+    let col = db_engine::QualifiedColumn {
+      table: "t".into(),
+      column_index: 0,
+    };
+
+    assert_eq!(aggregate_name(&db_engine::Aggregate::Count(None)), "count");
+    assert_eq!(
+      aggregate_name(&db_engine::Aggregate::Count(Some(col.clone()))),
+      "count"
+    );
+    assert_eq!(
+      aggregate_name(&db_engine::Aggregate::Sum(col.clone())),
+      "sum"
+    );
+    assert_eq!(
+      aggregate_name(&db_engine::Aggregate::Min(col.clone())),
+      "min"
+    );
+    assert_eq!(
+      aggregate_name(&db_engine::Aggregate::Max(col.clone())),
+      "max"
+    );
+    assert_eq!(aggregate_name(&db_engine::Aggregate::Avg(col)), "avg");
+  }
+
+  #[test]
+  fn aggregate_arg_matches_covers_count_and_non_count() {
+    let col = db_engine::QualifiedColumn {
+      table: "t".into(),
+      column_index: 0,
+    };
+    let other = db_engine::QualifiedColumn {
+      table: "t".into(),
+      column_index: 1,
+    };
+
+    assert!(aggregate_arg_matches(
+      &db_engine::Aggregate::Count(None),
+      &None
+    ));
+    assert!(aggregate_arg_matches(
+      &db_engine::Aggregate::Count(Some(col.clone())),
+      &Some(col.clone())
+    ));
+    assert!(!aggregate_arg_matches(
+      &db_engine::Aggregate::Count(Some(col.clone())),
+      &Some(other.clone())
+    ));
+    assert!(!aggregate_arg_matches(
+      &db_engine::Aggregate::Count(None),
+      &Some(col.clone())
+    ));
+
+    assert!(aggregate_arg_matches(
+      &db_engine::Aggregate::Sum(col.clone()),
+      &Some(col.clone())
+    ));
+    assert!(!aggregate_arg_matches(
+      &db_engine::Aggregate::Sum(col),
+      &Some(other)
+    ));
+  }
+
+  #[test]
+  fn resolve_aggregate_ref_resolves_known_and_rejects_unknown() {
+    let col = db_engine::QualifiedColumn {
+      table: "t".into(),
+      column_index: 0,
+    };
+    let aggregates = vec![db_engine::Aggregate::Sum(col.clone())];
+    let group_by = Vec::new();
+    let proj_alias_map = HashMap::new();
+    let alias_map = HashMap::new();
+    let mut table_schemas = HashMap::new();
+    table_schemas.insert(
+      "t".into(),
+      TableSchema {
+        name: "t".into(),
+        columns: vec![ColumnSchema {
+          name: "value".into(),
+          data_type: EngineType::Integer,
+        }],
+        primary_key: vec![],
+      },
+    );
+    let mapper = crate::translate::DefaultValueMapper;
+    let resolver = StubResolver;
+    let ctx = HavingContext {
+      group_by: &group_by,
+      aggregates: &aggregates,
+      proj_alias_map: &proj_alias_map,
+      alias_map: &alias_map,
+      table_schemas: &table_schemas,
+      resolver: &resolver,
+      mapper: &mapper,
+    };
+
+    let known = sqlparser::ast::Function {
+      name: sqlparser::ast::ObjectName(vec![sqlparser::ast::ObjectNamePart::Identifier(
+        sqlparser::ast::Ident::new("sum"),
+      )]),
+      uses_odbc_syntax: false,
+      parameters: sqlparser::ast::FunctionArguments::None,
+      args: sqlparser::ast::FunctionArguments::List(sqlparser::ast::FunctionArgumentList {
+        duplicate_treatment: None,
+        args: vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(
+          SqlExpr::Identifier(Ident::new("value")),
+        ))],
+        clauses: vec![],
+      }),
+      filter: None,
+      null_treatment: None,
+      over: None,
+      within_group: vec![],
+    };
+
+    let resolved = resolve_aggregate_ref(&known, &ctx).expect("known aggregate should resolve");
+    assert!(matches!(resolved, db_engine::RefOrAgg::AggregateIndex(0)));
+
+    let unknown = sqlparser::ast::Function {
+      name: sqlparser::ast::ObjectName(vec![sqlparser::ast::ObjectNamePart::Identifier(
+        sqlparser::ast::Ident::new("count"),
+      )]),
+      uses_odbc_syntax: false,
+      parameters: sqlparser::ast::FunctionArguments::None,
+      args: sqlparser::ast::FunctionArguments::List(sqlparser::ast::FunctionArgumentList {
+        duplicate_treatment: None,
+        args: vec![FunctionArg::Unnamed(FunctionArgExpr::Wildcard)],
+        clauses: vec![],
+      }),
+      filter: None,
+      null_treatment: None,
+      over: None,
+      within_group: vec![],
+    };
+
+    let err = resolve_aggregate_ref(&unknown, &ctx).expect_err("unknown aggregate should fail");
+    assert!(matches!(err, TranslateError::UnsupportedFeature(_)));
+  }
 }

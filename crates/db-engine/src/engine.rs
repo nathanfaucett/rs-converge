@@ -815,6 +815,92 @@ mod tests {
   }
 
   #[test]
+  fn transaction_returning_methods_include_columns_and_rows() {
+    block_on(async {
+      let store: InMemoryNamedBTree<EngineKey, Vec<u8>> = InMemoryNamedBTree::new();
+      let mut database = EngineDatabase::new(NamedTreeEngineStore::new(store));
+      let users = TableSchema {
+        name: "users".into(),
+        columns: vec![
+          ColumnSchema {
+            name: "id".into(),
+            data_type: EngineType::Uuid,
+          },
+          ColumnSchema {
+            name: "name".into(),
+            data_type: EngineType::Text,
+          },
+        ],
+        primary_key: vec![0],
+      };
+
+      database
+        .register_table(users, false)
+        .await
+        .expect("register users table");
+
+      let returning = Some(vec![UpdateValueExpr::Column(QualifiedColumn {
+        table: "users".into(),
+        column_index: 1,
+      })]);
+
+      let mut tx = database.transaction();
+      let inserted = tx
+        .insert_row_with_returning(
+          "users",
+          vec![uuid(10), EngineValue::Text("Alice".into())],
+          returning.clone(),
+        )
+        .await
+        .expect("insert with returning");
+      tx.commit().await.expect("commit insert");
+
+      assert_eq!(inserted.rows, vec![vec![EngineValue::Text("Alice".into())]]);
+      assert_eq!(inserted.columns.len(), 1);
+      assert_eq!(inserted.columns[0].name, "name");
+
+      database
+        .execute(EngineQuery::Insert {
+          table: "users".into(),
+          row: vec![uuid(11), EngineValue::Text("Bob".into())],
+          returning: None,
+        })
+        .await
+        .expect("insert second row");
+
+      let mut tx = database.transaction();
+      let updated = tx
+        .update_rows_with_sources_and_returning(
+          "users",
+          vec![UpdateAssignment::value(
+            1,
+            EngineValue::Text("Bobby".into()),
+          )],
+          Some(eq_pred("users", 0, uuid(11))),
+          Vec::new(),
+          Vec::new(),
+          returning.clone(),
+        )
+        .await
+        .expect("update with returning");
+      tx.commit().await.expect("commit update");
+
+      assert_eq!(updated.rows, vec![vec![EngineValue::Text("Bobby".into())]]);
+      assert_eq!(updated.columns[0].name, "name");
+
+      let mut tx = database.transaction();
+      let deleted = tx
+        .delete_rows_with_returning("users", Some(eq_pred("users", 0, uuid(10))), returning)
+        .await
+        .expect("delete with returning");
+      tx.commit().await.expect("commit delete");
+
+      assert_eq!(deleted.rows, vec![vec![EngineValue::Text("Alice".into())]]);
+      assert_eq!(deleted.columns[0].name, "name");
+    });
+  }
+
+  #[test]
   fn select_uses_index_when_available() {
     block_on(async {
       let store: InMemoryNamedBTree<EngineKey, Vec<u8>> = InMemoryNamedBTree::new();

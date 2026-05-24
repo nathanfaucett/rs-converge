@@ -114,3 +114,38 @@ impl RowDeserializeError {
     }
   }
 }
+
+#[cfg(test)]
+mod tests {
+  use super::RowDeserializeError;
+
+  #[test]
+  fn display_formats_all_variants() {
+    let errors = [
+      (
+        RowDeserializeError::column_not_found("name"),
+        "Column 'name' not found in schema",
+      ),
+      (
+        RowDeserializeError::type_mismatch("age", "integer", "text"),
+        "Column 'age' expects integer, but got: text",
+      ),
+      (
+        RowDeserializeError::missing_required_field("id"),
+        "Required field 'id' is NULL or missing",
+      ),
+      (
+        RowDeserializeError::serde_error("bad value"),
+        "Deserialization error: bad value",
+      ),
+      (
+        RowDeserializeError::schema_error("missing schema"),
+        "Schema error: missing schema",
+      ),
+    ];
+
+    for (error, expected) in errors {
+      assert_eq!(error.to_string(), expected);
+    }
+  }
+}
