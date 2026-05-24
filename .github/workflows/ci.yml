@@ -34,6 +34,9 @@ jobs:
       - name: Install crap
         run: cargo install cargo-crap --locked
 
+      - name: Install cargo-hack
+        run: cargo install cargo-hack --locked
+
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -86,4 +89,4 @@ jobs:
         run: rustc --version && cargo --version
 
       - name: Test feature combinations
-        run: just hack-test
+        run: just test
