@@ -13,9 +13,3 @@ repos:
         language: system
         files: \.rs$
         pass_filenames: false
-      - id: crap
-        name: Run crap
-        entry: just crap
-        language: system
-        files: \.rs$
-        pass_filenames: false

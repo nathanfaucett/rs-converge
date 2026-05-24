@@ -13,6 +13,7 @@ help:
     @printf "  clippy         Run clippy for all targets and workspace crates\n"
     @printf "  clippy-fix     Run clippy with --fix for all targets and workspace crates\n"
     @printf "  crap           Run CRAP\n"
+    @printf "  crap-summary   Run CRAP and get a summary\n"
     @printf "  fmt            Format all workspace crates\n"
     @printf "  fmt-check      Check formatting for all workspace crates\n"
     @printf "  clean          Remove build artifacts\n"
@@ -28,9 +29,6 @@ check:
     cargo check --workspace
 
 test:
-    cargo test --workspace
-
-hack-test:
     cargo hack test --feature-powerset --workspace --all-targets
 
 clippy:
@@ -40,7 +38,7 @@ clippy-fix:
     cargo clippy --workspace --all-targets --fix --allow-dirty -- -D warnings
 
 crap *args:
-    RUST_MIN_STACK=67108864 cargo llvm-cov --workspace --lcov --output-path /tmp/lcov.info && cargo crap --workspace --lcov /tmp/lcov.info  {{args}}
+    RUST_MIN_STACK=67108864 cargo hack llvm-cov --workspace --lcov --output-path /tmp/lcov.info && cargo crap --workspace --lcov /tmp/lcov.info  {{args}}
 
 crap-summary:
     just crap --summary

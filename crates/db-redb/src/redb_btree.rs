@@ -20,10 +20,10 @@ pub struct RedbKeyCodec;
 pub struct RedbValueCodec;
 
 #[derive(Clone, Copy)]
-pub(crate) struct EncodedKey<K, C>(PhantomData<(K, C)>);
+pub struct EncodedKey<K, C>(PhantomData<(K, C)>);
 
 #[derive(Clone, Copy)]
-pub(crate) struct EncodedValue<V, C>(PhantomData<(V, C)>);
+pub struct EncodedValue<V, C>(PhantomData<(V, C)>);
 
 macro_rules! impl_encoded_debug {
   ($encoded:ident<$value:ident>, $name:literal) => {
