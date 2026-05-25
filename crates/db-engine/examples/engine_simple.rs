@@ -1,3 +1,5 @@
+#![cfg(feature = "in-memory")]
+
 // Simple quickstart: register a table, insert a row, and select it.
 use futures::executor::block_on;
 

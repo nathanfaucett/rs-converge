@@ -1,3 +1,5 @@
+#![cfg(feature = "in-memory")]
+
 // Join example: registers two tables and performs an INNER JOIN with a projection.
 use futures::executor::block_on;
 

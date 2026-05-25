@@ -1,3 +1,5 @@
+#![cfg(feature = "in-memory")]
+
 use futures::executor::block_on;
 
 use db_engine::{

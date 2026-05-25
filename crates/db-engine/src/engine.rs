@@ -561,7 +561,7 @@ where
   }
 }
 
-#[cfg(all(test, feature = "std"))]
+#[cfg(all(test, feature = "std", feature = "in-memory"))]
 mod tests {
   use super::*;
   use crate::query::{
@@ -1247,7 +1247,7 @@ mod tests {
             _ => panic!("expected count integer"),
           }
           match &row[2] {
-            EngineValue::Float(s) => assert!((*s - 150.0).abs() < f64::EPSILON),
+            EngineValue::Float(s) => assert!((s - 150.0).abs() < f64::EPSILON),
             EngineValue::Integer(i) => assert_eq!(*i, 150),
             _ => panic!("expected sum numeric"),
           }
@@ -1257,7 +1257,7 @@ mod tests {
             _ => panic!("expected count integer"),
           }
           match &row[2] {
-            EngineValue::Float(s) => assert!((*s - 200.0).abs() < f64::EPSILON),
+            EngineValue::Float(s) => assert!((s - 200.0).abs() < f64::EPSILON),
             EngineValue::Integer(i) => assert_eq!(*i, 200),
             _ => panic!("expected sum numeric"),
           }

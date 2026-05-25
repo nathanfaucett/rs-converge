@@ -1,3 +1,5 @@
+#![cfg(feature = "in-memory")]
+
 /// Integration test for transaction contract validation.
 /// Verifies that backends honor their declared transactional guarantees.
 use db_engine::{

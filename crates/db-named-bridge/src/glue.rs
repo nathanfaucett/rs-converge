@@ -1,3 +1,5 @@
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 use db_core::NamedBTreeMap;
 use db_engine::{EngineKey, EngineNamedTreeBackend};
 

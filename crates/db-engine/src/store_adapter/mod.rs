@@ -18,7 +18,7 @@ pub use helpers::{fetch_rows_by_primary_keys, lookup_primary_keys_by_index_predi
 pub use named_tree_tx::{EngineNamedTreeBackend, EngineNamedTreeTransaction};
 pub use transaction::{EngineStoreReadTransaction, EngineStoreTransaction};
 
-#[cfg(test)]
+#[cfg(all(test, feature = "in-memory"))]
 mod tests {
   use super::*;
   use crate::{

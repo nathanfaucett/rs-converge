@@ -7,6 +7,9 @@
 //! - Format: per-tree encoding/decoding exposed as `NamedBTreeMap` + `EngineNamedTreeBackend` for engine keys/values.
 //! - Catalog & sync: layout concerns; operate on layout backends, not the SQL facade.
 
+#[cfg(not(feature = "std"))]
+extern crate alloc;
+
 mod glue;
 mod layout_catalog;
 mod layout_sync;

@@ -118,6 +118,8 @@ impl RowDeserializeError {
 #[cfg(test)]
 mod tests {
   use super::RowDeserializeError;
+  #[cfg(not(feature = "std"))]
+  use alloc::string::ToString;
 
   #[test]
   fn display_formats_all_variants() {

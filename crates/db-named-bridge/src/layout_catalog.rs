@@ -1,3 +1,7 @@
+#[cfg(not(feature = "std"))]
+use alloc::string::String;
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 use db_core::BTreeError;
 
 /// Catalog operations on a layout backend (tree registry and discovery).

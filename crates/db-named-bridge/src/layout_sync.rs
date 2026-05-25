@@ -1,3 +1,6 @@
+#[cfg(not(feature = "std"))]
+use alloc::boxed::Box;
+use core::pin::Pin;
 use db_core::BTreeError;
 
 use crate::layout_catalog::{TreeLayoutCatalog, merged_tree_names};
@@ -8,7 +11,7 @@ pub trait PerTreeFormatSync<L> {
     left: &'a L,
     right: &'a L,
     tree: &'a str,
-  ) -> std::pin::Pin<Box<dyn core::future::Future<Output = Result<(), BTreeError>> + 'a>>;
+  ) -> Pin<Box<dyn core::future::Future<Output = Result<(), BTreeError>> + 'a>>;
 }
 
 /// Discover trees via the layout catalog, then sync each tree through the format handler.
