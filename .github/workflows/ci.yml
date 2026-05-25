@@ -28,15 +28,6 @@ jobs:
       - name: Install just
         run: cargo install just --locked
 
-      - name: Install llvm-cov
-        run: cargo install cargo-llvm-cov --locked
-
-      - name: Install crap
-        run: cargo install cargo-crap --locked
-
-      - name: Install cargo-hack
-        run: cargo install cargo-hack --locked
-
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -51,9 +42,6 @@ jobs:
 
       - name: Cargo clippy
         run: just clippy
-
-      - name: Cargo crap
-        run: just crap-summary
 
   cargo-tests:
     name: Cargo tests
@@ -73,6 +61,12 @@ jobs:
       - name: Install just
         run: cargo install just --locked
 
+      - name: Install llvm-cov
+        run: cargo install cargo-llvm-cov --locked
+
+      - name: Install crap
+        run: cargo install cargo-crap --locked
+
       - name: Install cargo-hack
         run: cargo install cargo-hack --locked
 
@@ -89,4 +83,4 @@ jobs:
         run: rustc --version && cargo --version
 
       - name: Test feature combinations
-        run: just test
+        run: just crap-summary
