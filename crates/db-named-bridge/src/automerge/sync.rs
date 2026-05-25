@@ -13,17 +13,23 @@ pub struct AutomergePerTreeSync;
 
 impl<L> PerTreeFormatSync<L> for AutomergePerTreeSync
 where
-  L: AutomergeLayout,
+  L: AutomergeLayout + Sync,
   L::Tree: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
 {
-  async fn sync_tree(left: &L, right: &L, tree: &str) -> Result<(), BTreeError> {
-    for layout in [left, right] {
-      ensure_tree_initialized(layout, tree).await?;
-      register_tree_name(layout, tree).await?;
-    }
-    let left_store = AutomergeEngineStore::new_with_backend(left.get_tree(tree).await?);
-    let right_store = AutomergeEngineStore::new_with_backend(right.get_tree(tree).await?);
-    db_automerge::sync_automerge_stores(&left_store, &right_store).await
+  fn sync_tree<'a>(
+    left: &'a L,
+    right: &'a L,
+    tree: &'a str,
+  ) -> std::pin::Pin<Box<dyn core::future::Future<Output = Result<(), BTreeError>> + 'a>> {
+    Box::pin(async move {
+      for layout in [left, right] {
+        ensure_tree_initialized(layout, tree).await?;
+        register_tree_name(layout, tree).await?;
+      }
+      let left_store = AutomergeEngineStore::new_with_backend(left.get_tree(tree).await?);
+      let right_store = AutomergeEngineStore::new_with_backend(right.get_tree(tree).await?);
+      db_automerge::sync_automerge_stores(&left_store, &right_store).await
+    })
   }
 }
 

@@ -4,8 +4,8 @@ use std::{
 
 use async_stream::stream;
 use db_core::{
-  BTree, BTreeError, BTreeExecutor, BTreeTransaction, FastKeyCodec, KeyCodec, KeyScratch,
-  MaybeSend, ValueCodec,
+  BTree, BTreeError, BTreeReadExecutor, BTreeTransaction, BTreeWriteExecutor, FastKeyCodec,
+  KeyCodec, KeyScratch, MaybeSend, ValueCodec,
 };
 use futures::Stream;
 use redb::{
@@ -250,7 +250,7 @@ where
   }
 }
 
-impl<K, V, KC, VC> BTreeExecutor<K, V> for REDBBTree<K, V, KC, VC>
+impl<K, V, KC, VC> BTreeReadExecutor<K, V> for REDBBTree<K, V, KC, VC>
 where
   K: Debug + Clone + Ord + Send + Sync + 'static,
   V: Debug + Clone + Send + Sync + 'static,
@@ -270,6 +270,47 @@ where
     Ok(guard.map(|g| g.value()))
   }
 
+  fn range<'a, R>(&'a self, range: R) -> impl Stream<Item = Result<(K, V), BTreeError>> + 'a
+  where
+    K: Ord + Clone,
+    R: RangeBounds<K> + MaybeSend + 'a,
+  {
+    let table_definition = self.table_definition;
+    let db = Arc::clone(&self.db);
+
+    stream! {
+      let read_tx = match db.begin_read() {
+        Ok(tx) => tx,
+        Err(e) => { yield Err(BTreeError::other(e)); return; },
+      };
+
+      let table = match read_tx.open_table(table_definition) {
+        Ok(table) => table,
+        Err(e) => { yield Err(BTreeError::other(e)); return; },
+      };
+
+      let range_iter = match table.range(range) {
+        Ok(range_iter) => range_iter,
+        Err(e) => { yield Err(BTreeError::other(e)); return; },
+      };
+
+      for entry in range_iter {
+        match entry {
+          Ok((key, value)) => yield Ok((key.value(), value.value())),
+          Err(e) => { yield Err(BTreeError::other(e)); return; },
+        }
+      }
+    }
+  }
+}
+
+impl<K, V, KC, VC> BTreeWriteExecutor<K, V> for REDBBTree<K, V, KC, VC>
+where
+  K: Debug + Clone + Ord + Send + Sync + 'static,
+  V: Debug + Clone + Send + Sync + 'static,
+  KC: KeyCodec<K>,
+  VC: ValueCodec<V>,
+{
   async fn insert(&mut self, key: K, value: V) -> Result<(), BTreeError>
   where
     K: Ord,
@@ -307,39 +348,6 @@ where
     }
 
     Ok(removed)
-  }
-
-  fn range<'a, R>(&'a self, range: R) -> impl Stream<Item = Result<(K, V), BTreeError>> + 'a
-  where
-    K: Ord + Clone,
-    R: RangeBounds<K> + MaybeSend + 'a,
-  {
-    let table_definition = self.table_definition;
-    let db = Arc::clone(&self.db);
-
-    stream! {
-      let read_tx = match db.begin_read() {
-        Ok(tx) => tx,
-        Err(e) => { yield Err(BTreeError::other(e)); return; },
-      };
-
-      let table = match read_tx.open_table(table_definition) {
-        Ok(table) => table,
-        Err(e) => { yield Err(BTreeError::other(e)); return; },
-      };
-
-      let range_iter = match table.range(range) {
-        Ok(range_iter) => range_iter,
-        Err(e) => { yield Err(BTreeError::other(e)); return; },
-      };
-
-      for entry in range_iter {
-        match entry {
-          Ok((key, value)) => yield Ok((key.value(), value.value())),
-          Err(e) => { yield Err(BTreeError::other(e)); return; },
-        }
-      }
-    }
   }
 }
 
@@ -382,7 +390,7 @@ where
   }
 }
 
-impl<K, V, KC, VC> BTreeExecutor<K, V> for REDBBTreeTransaction<K, V, KC, VC>
+impl<K, V, KC, VC> BTreeReadExecutor<K, V> for REDBBTreeTransaction<K, V, KC, VC>
 where
   K: Debug + Clone + Ord + Send + Sync + 'static,
   V: Debug + Clone + Send + Sync + 'static,
@@ -396,25 +404,6 @@ where
   {
     let table = self.open_table()?;
     let guard = table.get(key).ok().flatten();
-    Ok(guard.map(|g| g.value()))
-  }
-
-  async fn insert(&mut self, key: K, value: V) -> Result<(), BTreeError>
-  where
-    K: Ord,
-  {
-    let mut table = self.open_table()?;
-    table.insert(key, value).map_err(BTreeError::other)?;
-    Ok(())
-  }
-
-  async fn remove<'a, Q>(&'a mut self, key: Q) -> Result<Option<V>, BTreeError>
-  where
-    K: Ord,
-    Q: Borrow<K> + MaybeSend + 'a,
-  {
-    let mut table = self.open_table()?;
-    let guard = table.remove(key).ok().flatten();
     Ok(guard.map(|g| g.value()))
   }
 
@@ -441,6 +430,33 @@ where
         }
       }
     }
+  }
+}
+
+impl<K, V, KC, VC> BTreeWriteExecutor<K, V> for REDBBTreeTransaction<K, V, KC, VC>
+where
+  K: Debug + Clone + Ord + Send + Sync + 'static,
+  V: Debug + Clone + Send + Sync + 'static,
+  KC: KeyCodec<K>,
+  VC: ValueCodec<V>,
+{
+  async fn insert(&mut self, key: K, value: V) -> Result<(), BTreeError>
+  where
+    K: Ord,
+  {
+    let mut table = self.open_table()?;
+    table.insert(key, value).map_err(BTreeError::other)?;
+    Ok(())
+  }
+
+  async fn remove<'a, Q>(&'a mut self, key: Q) -> Result<Option<V>, BTreeError>
+  where
+    K: Ord,
+    Q: Borrow<K> + MaybeSend + 'a,
+  {
+    let mut table = self.open_table()?;
+    let guard = table.remove(key).ok().flatten();
+    Ok(guard.map(|g| g.value()))
   }
 }
 

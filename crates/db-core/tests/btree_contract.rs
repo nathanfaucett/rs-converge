@@ -3,7 +3,7 @@ use core::{
   pin::pin,
   task::{Context, Poll, Waker},
 };
-use db_core::{BTree, BTreeExecutor, BTreeTransaction};
+use db_core::{BTree, BTreeReadExecutor, BTreeTransaction, BTreeWriteExecutor};
 use futures::{StreamExt, pin_mut};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -44,7 +44,7 @@ fn redb_contract_path() -> std::path::PathBuf {
 
 async fn commit_and_rollback_contract<S>(mut store: S)
 where
-  S: BTree<u64, u64>,
+  S: BTree<u64, u64> + BTreeWriteExecutor<u64, u64>,
 {
   store.insert(1, 100).await.expect("insert initial value");
 
@@ -59,7 +59,7 @@ where
 
 async fn transaction_range_merges_contract<S>(mut store: S)
 where
-  S: BTree<u64, u64>,
+  S: BTree<u64, u64> + BTreeWriteExecutor<u64, u64>,
 {
   store.insert(1, 100).await.expect("insert initial");
   store.insert(3, 300).await.expect("insert second");
@@ -109,11 +109,11 @@ fn redb_transaction_commit_and_rollback_contract() {
 
 async fn read_transaction_observes_committed_state<S>(mut store: S)
 where
-  S: BTree<u64, u64>,
+  S: BTree<u64, u64> + BTreeWriteExecutor<u64, u64>,
 {
   store.insert(1, 100).await.expect("insert initial value");
 
-  let tx = store.read_transaction().await.expect("start read tx");
+  let tx = store.transaction().await.expect("start read tx");
   assert_eq!(tx.get(&1).await.expect("get value"), Some(100));
 
   let mut rows = Vec::new();

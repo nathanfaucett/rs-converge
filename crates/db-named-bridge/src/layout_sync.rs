@@ -4,11 +4,11 @@ use crate::layout_catalog::{TreeLayoutCatalog, merged_tree_names};
 
 /// Sync one logical tree between two layout backends using a format-specific handler.
 pub trait PerTreeFormatSync<L> {
-  fn sync_tree(
-    left: &L,
-    right: &L,
-    tree: &str,
-  ) -> impl core::future::Future<Output = Result<(), BTreeError>> + Send;
+  fn sync_tree<'a>(
+    left: &'a L,
+    right: &'a L,
+    tree: &'a str,
+  ) -> std::pin::Pin<Box<dyn core::future::Future<Output = Result<(), BTreeError>> + 'a>>;
 }
 
 /// Discover trees via the layout catalog, then sync each tree through the format handler.

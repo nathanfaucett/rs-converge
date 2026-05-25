@@ -1,7 +1,5 @@
-use core::fmt;
-
 use automerge::AutoCommit;
-use db_core::{BTreeError, BTreeTransaction};
+use db_core::{BTreeError, BTreeResult, BTreeTransaction};
 use futures::StreamExt;
 use uuid::Uuid;
 
@@ -38,49 +36,18 @@ impl CompactionPolicy for ThresholdPolicy {
   }
 }
 
-#[derive(Debug)]
-pub enum CompactionError {
-  Scan(BTreeError),
-  DecodeState(BTreeError),
-  Insert(BTreeError),
-  Remove(DocumentChangeKey, BTreeError),
-  Commit(BTreeError),
-  Rollback(BTreeError),
-}
-
-impl fmt::Display for CompactionError {
-  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    match self {
-      CompactionError::Scan(source) => write!(f, "compaction scan failed: {source}"),
-      CompactionError::DecodeState(source) => {
-        write!(f, "compaction state decode failed: {source}")
-      }
-      CompactionError::Insert(source) => write!(f, "compaction insert failed: {source}"),
-      CompactionError::Remove(key, source) => {
-        write!(f, "compaction remove failed for key {:?}: {source}", key)
-      }
-      CompactionError::Commit(source) => write!(f, "compaction commit failed: {source}"),
-      CompactionError::Rollback(source) => write!(f, "compaction rollback failed: {source}"),
-    }
-  }
-}
-
-impl std::error::Error for CompactionError {}
-
 /// Perform transactional compaction: insert a snapshot for `doc_id` with `state` and remove older change keys.
 pub async fn run_compaction<T>(
-  mut tx: T,
+  tx: &mut T,
   start: DocumentChangeKey,
   end: DocumentChangeKey,
   doc_id: Uuid,
   state: Vec<u8>,
-) -> Result<(), CompactionError>
+) -> BTreeResult<()>
 where
   T: BTreeTransaction<DocumentChangeKey, AutomergeEntry>,
 {
-  let mut compacted_doc = AutoCommit::load(&state)
-    .map_err(BTreeError::other)
-    .map_err(CompactionError::DecodeState)?;
+  let mut compacted_doc = AutoCommit::load(&state).map_err(BTreeError::other)?;
   let new_hash = hash_heads(&compacted_doc.get_heads());
 
   let new_entry = state;
@@ -92,7 +59,7 @@ where
     while let Some(item) = range_stream.next().await {
       let (k, _v) = match item {
         Ok(pair) => pair,
-        Err(err) => return Err(CompactionError::Scan(err)),
+        Err(err) => return Err(err),
       };
       // Remove all old entries: any Incremental (deltas) or Snapshot with mismatched hash
       if k.doc_type.is_snapshot() && k.change_hash == new_hash {
@@ -110,25 +77,13 @@ where
     change_hash: new_hash,
   };
 
-  if let Err(err) = tx.insert(new_key.clone(), new_entry).await {
-    if let Err(rollback_err) = tx.rollback().await {
-      return Err(CompactionError::Rollback(rollback_err));
-    }
-    return Err(CompactionError::Insert(err));
-  }
+  tx.insert(new_key.clone(), new_entry).await?;
 
   for k in to_remove {
-    if let Err(err) = tx.remove(k.clone()).await {
-      let rollback_err = tx.rollback().await;
-      eprintln!(
-        "Automerge compaction remove failed for key {:?}, attempting rollback: {:?}",
-        k, rollback_err
-      );
-      return Err(CompactionError::Remove(k, err));
-    }
+    tx.remove(k.clone()).await?;
   }
 
-  tx.commit().await.map_err(CompactionError::Commit)
+  Ok(())
 }
 
 #[cfg(test)]
@@ -144,29 +99,5 @@ mod tests {
     assert!(policy.should_compact(10, 0));
     assert!(policy.should_compact(0, 1024));
     assert!(!policy.should_compact(2, 10));
-  }
-
-  #[test]
-  fn compaction_error_display_messages_include_context() {
-    let key = DocumentChangeKey {
-      doc_id: Uuid::nil(),
-      doc_type: DocumentType::Incremental,
-      change_hash: [0u8; 32],
-    };
-
-    let errors = [
-      CompactionError::Scan(BTreeError::other(std::io::Error::other("scan"))),
-      CompactionError::DecodeState(BTreeError::other(std::io::Error::other("decode"))),
-      CompactionError::Insert(BTreeError::other(std::io::Error::other("insert"))),
-      CompactionError::Remove(key, BTreeError::other(std::io::Error::other("remove"))),
-      CompactionError::Commit(BTreeError::other(std::io::Error::other("commit"))),
-      CompactionError::Rollback(BTreeError::other(std::io::Error::other("rollback"))),
-    ];
-
-    for error in errors {
-      let message = error.to_string();
-      assert!(message.starts_with("compaction "));
-      assert!(!message.is_empty());
-    }
   }
 }

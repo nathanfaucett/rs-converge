@@ -183,7 +183,7 @@ impl EngineNamedTreeTransaction<EngineKey, Vec<u8>> for PluggableBackendTransact
   }
 }
 
-impl db_core::BTreeExecutor<EngineKey, Vec<u8>> for PluggableBackendTree {
+impl db_core::BTreeWriteExecutor<EngineKey, Vec<u8>> for PluggableBackendTree {
   async fn get<'a, Q>(&'a self, key: Q) -> BTreeResult<Option<Vec<u8>>>
   where
     EngineKey: Ord,

@@ -1,4 +1,4 @@
-use automerge::AutoCommit;
+use automerge::{AutoCommit, AutomergeError};
 use db_core::BTreeError;
 use uuid::Uuid;
 
@@ -17,12 +17,14 @@ pub(super) fn reconstruct_state(
 pub(super) fn build_lifecycle_write(
   doc_id: Uuid,
   mut desired_doc: AutoCommit,
-  existing_doc: Option<AutoCommit>,
-) -> Option<(DocumentChangeKey, AutomergeEntry)> {
-  if let Some(mut current_doc) = existing_doc {
+  existing_doc_bytes: Option<Vec<u8>>,
+) -> Result<Option<(DocumentChangeKey, AutomergeEntry)>, AutomergeError> {
+  if let Some(current_doc_bytes) = existing_doc_bytes {
+    let mut current_doc = AutoCommit::load(&current_doc_bytes)?;
+
     let changes = desired_doc.get_changes(&current_doc.get_heads());
     if changes.is_empty() {
-      return None;
+      return Ok(None);
     }
 
     let mut delta_bytes = Vec::new();
@@ -39,7 +41,7 @@ pub(super) fn build_lifecycle_write(
       change_hash,
     };
 
-    return Some((key, delta_bytes));
+    return Ok(Some((key, delta_bytes)));
   }
 
   let change_hash = hash_heads(&desired_doc.get_heads());
@@ -49,7 +51,7 @@ pub(super) fn build_lifecycle_write(
     change_hash,
   };
   let bytes = desired_doc.save();
-  Some((key, bytes))
+  Ok(Some((key, bytes)))
 }
 
 pub(super) fn load_autocommit(bytes: &[u8]) -> Result<AutoCommit, BTreeError> {

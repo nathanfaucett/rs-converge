@@ -5,13 +5,6 @@ use alloc::collections::BTreeMap;
 #[cfg(feature = "std")]
 use std::collections::BTreeMap;
 
-/// Merge base and patch maps for a given range.
-///
-/// - `base`: the underlying committed map
-/// - `patch`: the transaction-local changes
-/// - `range`: the range bounds to iterate
-/// - `include_base`: closure that determines whether a base entry should be included (typically checks if patch contains a deletion for the key)
-/// - `apply_patch`: closure that applies a patch entry to the merged map
 pub fn merge_range_maps<K, V, P, R, FInclude, FApply>(
   base: &BTreeMap<K, V>,
   patch: &BTreeMap<K, P>,

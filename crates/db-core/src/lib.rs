@@ -17,7 +17,9 @@ mod test_helpers;
 mod transaction_patch;
 
 pub use blocking::block_on;
-pub use btree::{BTree, BTreeError, BTreeExecutor, BTreeResult, BTreeTransaction};
+pub use btree::{
+  BTree, BTreeError, BTreeReadExecutor, BTreeResult, BTreeTransaction, BTreeWriteExecutor,
+};
 pub use codec::{
   BufferSink, CURRENT_CODEC_VERSION, Cursor, DecodeError, FastKeyCodec, KeyCodec, KeyScratch,
   ValueCodec, canonical_f64_bits, canonical_f64_bits_into_sink, decode_bool, decode_bytes,

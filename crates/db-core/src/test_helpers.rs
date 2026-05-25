@@ -1,4 +1,4 @@
-use crate::{BTree, BTreeError, BTreeExecutor, BTreeTransaction, TransactionPatch};
+use crate::{BTree, BTreeError, BTreeTransaction, BTreeWriteExecutor, TransactionPatch};
 use async_lock::RwLock;
 use async_stream::stream;
 use core::{borrow::Borrow, ops::RangeBounds};
@@ -40,7 +40,7 @@ pub struct MockBTreeTransaction<K, V> {
   patch: TransactionPatch<K, V>,
 }
 
-impl<K, V> BTreeExecutor<K, V> for MockBTree<K, V>
+impl<K, V> BTreeWriteExecutor<K, V> for MockBTree<K, V>
 where
   K: Clone + Ord + Send + Sync + 'static,
   V: Clone + Send + Sync + 'static,
@@ -103,7 +103,7 @@ where
   }
 }
 
-impl<K, V> BTreeExecutor<K, V> for MockBTreeTransaction<K, V>
+impl<K, V> BTreeWriteExecutor<K, V> for MockBTreeTransaction<K, V>
 where
   K: Clone + Ord + Send + Sync + 'static,
   V: Clone + Send + Sync + 'static,

@@ -2,8 +2,8 @@ use async_lock::RwLock;
 use async_stream::stream;
 use core::{borrow::Borrow, ops::RangeBounds};
 use db_core::{
-  BTree, BTreeExecutor, BTreeResult, BTreeTransaction, MaybeSend, NamedBTreeMap, TransactionEntry,
-  TransactionPatch,
+  BTree, BTreeReadExecutor, BTreeResult, BTreeTransaction, BTreeWriteExecutor, MaybeSend,
+  NamedBTreeMap, TransactionEntry, TransactionPatch,
 };
 use futures::Stream;
 
@@ -75,7 +75,7 @@ pub struct InMemoryNamedTreeTransaction<K, V> {
   patch: TransactionPatch<K, V>,
 }
 
-impl<K, V> BTreeExecutor<K, V> for InMemoryNamedTree<K, V>
+impl<K, V> BTreeReadExecutor<K, V> for InMemoryNamedTree<K, V>
 where
   K: Clone + Ord + Send + Sync + 'static,
   V: Clone + Send + Sync + 'static,
@@ -94,6 +94,30 @@ where
     )
   }
 
+  fn range<'a, R>(&'a self, range: R) -> impl Stream<Item = BTreeResult<(K, V)>> + 'a
+  where
+    K: Ord + Clone,
+    R: RangeBounds<K> + MaybeSend + 'a,
+  {
+    let inner = Arc::clone(&self.inner);
+    let name = self.name.clone();
+
+    stream! {
+      let guard = inner.read().await;
+      if let Some(tree) = guard.get(&name) {
+        for (key, value) in tree.range(range) {
+          yield Ok((key.clone(), value.clone()));
+        }
+      }
+    }
+  }
+}
+
+impl<K, V> BTreeWriteExecutor<K, V> for InMemoryNamedTree<K, V>
+where
+  K: Clone + Ord + Send + Sync + 'static,
+  V: Clone + Send + Sync + 'static,
+{
   async fn insert(&mut self, key: K, value: V) -> BTreeResult<()>
   where
     K: Ord,
@@ -118,24 +142,6 @@ where
         .and_then(|m| m.remove(key.borrow())),
     )
   }
-
-  fn range<'a, R>(&'a self, range: R) -> impl Stream<Item = BTreeResult<(K, V)>> + 'a
-  where
-    K: Ord + Clone,
-    R: RangeBounds<K> + MaybeSend + 'a,
-  {
-    let inner = Arc::clone(&self.inner);
-    let name = self.name.clone();
-
-    stream! {
-      let guard = inner.read().await;
-      if let Some(tree) = guard.get(&name) {
-        for (key, value) in tree.range(range) {
-          yield Ok((key.clone(), value.clone()));
-        }
-      }
-    }
-  }
 }
 
 impl<K, V> BTreeTransaction<K, V> for InMemoryNamedTreeTransaction<K, V>
@@ -155,7 +161,7 @@ where
   }
 }
 
-impl<K, V> BTreeExecutor<K, V> for InMemoryNamedTreeTransaction<K, V>
+impl<K, V> BTreeReadExecutor<K, V> for InMemoryNamedTreeTransaction<K, V>
 where
   K: Clone + Ord + Send + Sync + 'static,
   V: Clone + Send + Sync + 'static,
@@ -170,6 +176,31 @@ where
     Ok(get_from_patch_then_map(&self.patch, tree, key.borrow()))
   }
 
+  fn range<'a, R>(&'a self, range: R) -> impl Stream<Item = BTreeResult<(K, V)>> + 'a
+  where
+    K: Ord + Clone,
+    R: RangeBounds<K> + MaybeSend + 'a,
+  {
+    let inner = Arc::clone(&self.inner);
+    let name = self.name.clone();
+    let patch = self.patch.clone();
+
+    stream! {
+      let guard = inner.read().await;
+      tree_or_empty!(tree, guard, &name);
+      let merged = merge_patch_range(&patch, tree, range);
+      for (key, value) in merged {
+        yield Ok((key, value));
+      }
+    }
+  }
+}
+
+impl<K, V> BTreeWriteExecutor<K, V> for InMemoryNamedTreeTransaction<K, V>
+where
+  K: Clone + Ord + Send + Sync + 'static,
+  V: Clone + Send + Sync + 'static,
+{
   async fn insert(&mut self, key: K, value: V) -> BTreeResult<()>
   where
     K: Ord,
@@ -190,25 +221,6 @@ where
       tree,
       key.borrow(),
     ))
-  }
-
-  fn range<'a, R>(&'a self, range: R) -> impl Stream<Item = BTreeResult<(K, V)>> + 'a
-  where
-    K: Ord + Clone,
-    R: RangeBounds<K> + MaybeSend + 'a,
-  {
-    let inner = Arc::clone(&self.inner);
-    let name = self.name.clone();
-    let patch = self.patch.clone();
-
-    stream! {
-      let guard = inner.read().await;
-      tree_or_empty!(tree, guard, &name);
-      let merged = merge_patch_range(&patch, tree, range);
-      for (key, value) in merged {
-        yield Ok((key, value));
-      }
-    }
   }
 }
 
@@ -384,8 +396,9 @@ where
 
 #[cfg(test)]
 mod tests {
+  use db_core::block_on;
+
   use super::*;
-  use db_core::{BTreeExecutor, BTreeTransaction, NamedBTreeMap, block_on};
 
   #[test]
   fn get_tree_returns_shared_isolated_trees() {

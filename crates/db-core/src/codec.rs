@@ -13,36 +13,25 @@ pub trait ValueCodec<T>: Send + Sync + 'static {
     None
   }
 
-  /// Encodes the provided value.
   fn encode<'a>(value: &'a T) -> Self::Bytes<'a>;
 
-  /// Decodes a stored value.
   fn decode(data: &[u8]) -> T;
 
-  /// Decode a stored value, returning a `Result` for callers that want to
-  /// handle decode failures instead of panicking. Default implementation
-  /// simply calls `decode` and wraps the result in `Ok`, allowing existing
-  /// codecs to opt into fallible decoding by overriding this method.
   fn decode_checked(data: &[u8]) -> Result<T, crate::DecodeError> {
     Ok(Self::decode(data))
   }
 
-  /// Convenience helper for codecs that always allocate.
   fn encode_to_vec(value: &T) -> Vec<u8> {
     Self::encode(value).as_ref().to_vec()
   }
 }
 
-/// Extends a value codec with key comparison over encoded bytes.
 pub trait KeyCodec<T>: ValueCodec<T> {
-  /// Compares two encoded keys using the domain ordering.
   fn compare(left: &[u8], right: &[u8]) -> Ordering;
 }
 
-/// Stable wire format version currently used by engine codecs.
 pub const CURRENT_CODEC_VERSION: u8 = 1;
 
-/// Errors that can occur while decoding a stored value.
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -57,7 +46,6 @@ pub enum DecodeError {
   Malformed,
 }
 
-/// Reusable scratch buffer used by hot-path encode helpers to avoid allocations.
 pub struct KeyScratch {
   pub buf: Vec<u8>,
 }
@@ -86,11 +74,6 @@ impl KeyScratch {
   }
 }
 
-/// Lightweight sink trait for writer-based/streaming encoders.
-///
-/// This abstraction lets encoder helpers append bytes into either a
-/// `Vec<u8>`, a `KeyScratch`, or any `std::io::Write` when the `std`
-/// feature is enabled without allocating intermediate `Vec`s.
 pub trait BufferSink {
   /// Append bytes to the sink.
   fn push_bytes(&mut self, bytes: &[u8]);
@@ -112,18 +95,10 @@ impl BufferSink for Vec<u8> {
 #[cfg(feature = "std")]
 impl<T: std::io::Write> BufferSink for T {
   fn push_bytes(&mut self, bytes: &[u8]) {
-    // Best-effort: ignore write errors inside codec helpers; callers may
-    // prefer explicit writers and handle errors themselves. Keep this
-    // intentionally simple for hot-path encoders.
     let _ = self.write_all(bytes);
   }
 }
 
-/// Fast-path helpers for common engine callers. Implementations SHOULD provide
-/// efficient, allocation-minimizing encoders that append into a provided
-/// `KeyScratch`. The trait extends `KeyCodec<T>` so default helpers can fall
-/// back to the existing encoding when a specialized implementation is not
-/// available.
 pub trait FastKeyCodec<T>: KeyCodec<T> {
   /// Append an encoded representation of `value` into `scratch`.
   fn encode_into(&self, value: &T, scratch: &mut KeyScratch) {
@@ -132,14 +107,10 @@ pub trait FastKeyCodec<T>: KeyCodec<T> {
     scratch.buf.extend_from_slice(bytes.as_ref());
   }
 
-  /// Compare two encoded byte slices using codec ordering. Default falls back
-  /// to decoding and comparing via `KeyCodec::compare`.
   fn compare_encoded(&self, left: &[u8], right: &[u8]) -> Ordering {
     <Self as KeyCodec<T>>::compare(left, right)
   }
 }
-
-// --- Primitives (was codec_primitives.rs) ----------------------------
 
 use alloc::string::String;
 
@@ -292,8 +263,6 @@ pub fn canonical_f64_bits(value: f64) -> u64 {
     value.to_bits()
   }
 }
-
-// --- Helpers (was codec_helpers.rs) -----------------------------------
 
 pub fn encode_with_version<F>(buffer: &mut Vec<u8>, f: F)
 where

@@ -651,7 +651,7 @@ impl EngineNamedTreeTransaction<EngineKey, Vec<u8>> for StoreAdapterTransaction 
   }
 }
 
-impl db_core::BTreeExecutor<EngineKey, Vec<u8>> for StoreAdapterTree {
+impl db_core::BTreeWriteExecutor<EngineKey, Vec<u8>> for StoreAdapterTree {
   fn get<'a, Q>(
     &'a self,
     key: Q,
@@ -705,10 +705,10 @@ impl db_core::BTreeExecutor<EngineKey, Vec<u8>> for StoreAdapterTree {
   }
 }
 
-impl db_core::BTreeExecutor<EngineKey, Vec<u8>> for StoreAdapterTransaction {
+impl db_core::BTreeWriteExecutor<EngineKey, Vec<u8>> for StoreAdapterTransaction {
   fn get<'a, Q>(
     &'a self,
-    _key: Q,
+    key: Q,
   ) -> impl core::future::Future<Output = BTreeResult<Option<Vec<u8>>>> + 'a
   where
     EngineKey: Ord,

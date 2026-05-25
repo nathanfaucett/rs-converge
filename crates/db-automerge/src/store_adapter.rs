@@ -6,7 +6,7 @@ use futures::StreamExt;
 use uuid::Uuid;
 
 use crate::automerge_btree::{AutomergeBTree, AutomergeEntry, DocumentChangeKey};
-use db_core::{BTree, BTreeError, BTreeExecutor, BTreeTransaction};
+use db_core::{BTree, BTreeError, BTreeTransaction};
 
 /// Automerge **format** store: each logical key maps to an `AutoCommit` document
 /// in an underlying B-tree backend (`AutomergeBTree<B>`). Encoding and merge
@@ -29,14 +29,13 @@ where
   }
 }
 
-pub async fn collect_documents<B>(
-  store: &AutomergeEngineStore<B>,
+pub async fn collect_documents_with_tx<T>(
+  tx: &mut T,
 ) -> Result<BTreeMap<Uuid, AutoCommit>, BTreeError>
 where
-  B: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
+  T: BTreeTransaction<Uuid, AutoCommit>,
 {
-  let guard = store.automerge.read().await;
-  let stream = guard.range(Uuid::from_u128(0)..=Uuid::from_u128(u128::MAX));
+  let stream = tx.range(Uuid::from_u128(0)..=Uuid::from_u128(u128::MAX));
   futures::pin_mut!(stream);
 
   let mut docs = BTreeMap::new();
@@ -52,6 +51,31 @@ where
   Ok(docs)
 }
 
+pub async fn collect_documents<B>(
+  store: &AutomergeEngineStore<B>,
+) -> Result<BTreeMap<Uuid, AutoCommit>, BTreeError>
+where
+  B: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
+{
+  let guard = store.automerge.read().await;
+  let mut tx = guard.transaction().await?;
+  let docs = collect_documents_with_tx(&mut tx).await?;
+  Ok(docs)
+}
+
+pub async fn apply_documents_with_tx<T>(
+  tx: &mut T,
+  docs: &BTreeMap<Uuid, AutoCommit>,
+) -> Result<(), BTreeError>
+where
+  T: BTreeTransaction<Uuid, AutoCommit>,
+{
+  for (doc_id, doc) in docs {
+    tx.insert(*doc_id, doc.clone()).await?;
+  }
+  Ok(())
+}
+
 pub async fn apply_documents<B>(
   store: &AutomergeEngineStore<B>,
   docs: &BTreeMap<Uuid, AutoCommit>,
@@ -62,10 +86,7 @@ where
   let guard = store.automerge.read().await;
   let mut tx = guard.transaction().await?;
 
-  for (doc_id, doc) in docs {
-    tx.insert(*doc_id, doc.clone()).await?;
-  }
-
+  apply_documents_with_tx(&mut tx, docs).await?;
   tx.commit().await?;
   Ok(())
 }

@@ -7,7 +7,9 @@ use std::borrow::Borrow;
 
 use async_stream::stream;
 use db_automerge::{AutomergeEngineStore, AutomergeEntry, DocumentChangeKey};
-use db_core::{BTree, BTreeError, BTreeExecutor, BTreeTransaction, NamedBTreeMap};
+use db_core::{
+  BTree, BTreeError, BTreeReadExecutor, BTreeTransaction, BTreeWriteExecutor, NamedBTreeMap,
+};
 use db_engine::EngineKey;
 use db_engine::{EngineNamedTreeBackend, EngineNamedTreeTransaction};
 use futures::{StreamExt, pin_mut};
@@ -389,7 +391,7 @@ where
   }
 }
 
-impl<P> BTreeExecutor<EngineKey, Vec<u8>> for AutomergeFormatTree<P>
+impl<P> BTreeReadExecutor<EngineKey, Vec<u8>> for AutomergeFormatTree<P>
 where
   P: NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
     + EngineNamedTreeBackend<DocumentChangeKey, AutomergeEntry>
@@ -406,26 +408,6 @@ where
   {
     let mut tx = self.store.begin_transaction().await?;
     tx.get(&self.name, key.borrow()).await
-  }
-
-  async fn insert(&mut self, key: EngineKey, value: Vec<u8>) -> Result<(), BTreeError>
-  where
-    EngineKey: Ord,
-  {
-    let mut tx = self.store.begin_transaction().await?;
-    tx.insert(&self.name, key, value).await?;
-    tx.commit().await
-  }
-
-  async fn remove<'a, Q>(&'a mut self, key: Q) -> Result<Option<Vec<u8>>, BTreeError>
-  where
-    EngineKey: Ord,
-    Q: Borrow<EngineKey> + Send + 'a,
-  {
-    let mut tx = self.store.begin_transaction().await?;
-    let removed = tx.remove(&self.name, key.borrow()).await?;
-    tx.commit().await?;
-    Ok(removed)
   }
 
   fn range<'a, R>(
@@ -450,6 +432,37 @@ where
   }
 }
 
+impl<P> BTreeWriteExecutor<EngineKey, Vec<u8>> for AutomergeFormatTree<P>
+where
+  P: NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
+    + EngineNamedTreeBackend<DocumentChangeKey, AutomergeEntry>
+    + Clone
+    + Send
+    + Sync
+    + 'static,
+  P::Tree: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
+{
+  async fn insert(&mut self, key: EngineKey, value: Vec<u8>) -> Result<(), BTreeError>
+  where
+    EngineKey: Ord,
+  {
+    let mut tx = self.store.begin_transaction().await?;
+    tx.insert(&self.name, key, value).await?;
+    tx.commit().await
+  }
+
+  async fn remove<'a, Q>(&'a mut self, key: Q) -> Result<Option<Vec<u8>>, BTreeError>
+  where
+    EngineKey: Ord,
+    Q: Borrow<EngineKey> + Send + 'a,
+  {
+    let mut tx = self.store.begin_transaction().await?;
+    let removed = tx.remove(&self.name, key.borrow()).await?;
+    tx.commit().await?;
+    Ok(removed)
+  }
+}
+
 impl<P> BTreeTransaction<EngineKey, Vec<u8>> for AutomergeFormatTreeTransaction<P>
 where
   P: NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
@@ -469,7 +482,7 @@ where
   }
 }
 
-impl<P> BTreeExecutor<EngineKey, Vec<u8>> for AutomergeFormatTreeTransaction<P>
+impl<P> BTreeReadExecutor<EngineKey, Vec<u8>> for AutomergeFormatTreeTransaction<P>
 where
   P: NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
     + EngineNamedTreeBackend<DocumentChangeKey, AutomergeEntry>
@@ -488,6 +501,28 @@ where
     inner.get(&self.name, key.borrow()).await
   }
 
+  fn range<'a, R>(
+    &'a self,
+    range: R,
+  ) -> impl futures::Stream<Item = Result<(EngineKey, Vec<u8>), BTreeError>> + Send + 'a
+  where
+    EngineKey: Ord + Clone,
+    R: core::ops::RangeBounds<EngineKey> + Send + 'a,
+  {
+    self.inner.range(&self.name, range)
+  }
+}
+
+impl<P> BTreeWriteExecutor<EngineKey, Vec<u8>> for AutomergeFormatTreeTransaction<P>
+where
+  P: NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
+    + EngineNamedTreeBackend<DocumentChangeKey, AutomergeEntry>
+    + Clone
+    + Send
+    + Sync
+    + 'static,
+  P::Tree: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
+{
   async fn insert(&mut self, key: EngineKey, value: Vec<u8>) -> Result<(), BTreeError>
   where
     EngineKey: Ord,
@@ -501,17 +536,6 @@ where
     Q: Borrow<EngineKey> + Send + 'a,
   {
     self.inner.remove(&self.name, key.borrow()).await
-  }
-
-  fn range<'a, R>(
-    &'a self,
-    range: R,
-  ) -> impl futures::Stream<Item = Result<(EngineKey, Vec<u8>), BTreeError>> + Send + 'a
-  where
-    EngineKey: Ord + Clone,
-    R: core::ops::RangeBounds<EngineKey> + Send + 'a,
-  {
-    self.inner.range(&self.name, range)
   }
 }
 

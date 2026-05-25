@@ -6,11 +6,6 @@ use std::string::String;
 use crate::btree::{BTree, BTreeResult};
 use crate::{MaybeSend, MaybeSendFuture, MaybeSync};
 
-/// A map of named BTree instances.
-///
-/// The trait only exposes operations that create, read, or delete a whole
-/// BTree. Entry-level operations are performed on the returned `BTree`
-/// directly.
 pub trait NamedBTreeMap<K, V>: Clone + MaybeSend + MaybeSync {
   type Tree: BTree<K, V>;
 

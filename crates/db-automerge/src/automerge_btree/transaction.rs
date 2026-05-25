@@ -4,7 +4,7 @@ use async_stream::stream;
 use futures::{Stream, StreamExt};
 
 use automerge::AutoCommit;
-use db_core::{BTreeError, BTreeExecutor, BTreeTransaction, MaybeSend};
+use db_core::{BTreeError, BTreeReadExecutor, BTreeTransaction, BTreeWriteExecutor, MaybeSend};
 use uuid::Uuid;
 
 use super::codec::encode_doc_key_range_value_codec;
@@ -141,13 +141,9 @@ where
     match op {
       Some(snapshot_doc) => {
         let existing_state = Self::load_existing_state(inner_tx, doc_id).await?;
-        let existing_doc = existing_state
-          .as_ref()
-          .map(|bytes| load_autocommit(bytes))
-          .transpose()?;
 
         if let Some((entry_key, entry_bytes)) =
-          build_lifecycle_write(doc_id, snapshot_doc, existing_doc)
+          build_lifecycle_write(doc_id, snapshot_doc, existing_state).map_err(BTreeError::other)?
         {
           inner_tx.insert(entry_key, entry_bytes).await?;
         }
@@ -199,7 +195,7 @@ where
 }
 
 #[allow(clippy::needless_lifetimes)]
-impl<T> BTreeExecutor<Uuid, AutoCommit> for AutomergeTransaction<T>
+impl<T> BTreeReadExecutor<Uuid, AutoCommit> for AutomergeTransaction<T>
 where
   T: BTreeTransaction<DocumentChangeKey, AutomergeEntry> + Send,
 {
@@ -213,36 +209,6 @@ where
       return Ok(pending.clone());
     }
     match self.reconstruct_inner_doc(doc_id).await? {
-      Some(bytes) => load_autocommit(&bytes).map(Some),
-      None => Ok(None),
-    }
-  }
-
-  async fn insert<'a>(&'a mut self, key: Uuid, value: AutoCommit) -> Result<(), BTreeError>
-  where
-    Uuid: Ord,
-  {
-    self.pending.insert(key, Some(value));
-    Ok(())
-  }
-
-  async fn remove<'a, Q>(&'a mut self, key: Q) -> Result<Option<AutoCommit>, BTreeError>
-  where
-    Uuid: Ord,
-    Q: Borrow<Uuid> + MaybeSend + 'a,
-  {
-    let doc_id = *key.borrow();
-
-    if let Some(existing) = self.pending.remove(&doc_id) {
-      self.pending.insert(doc_id, None);
-      return Ok(existing);
-    }
-
-    let existing_bytes = self.reconstruct_inner_doc(doc_id).await?;
-    if existing_bytes.is_some() {
-      self.pending.insert(doc_id, None);
-    }
-    match existing_bytes {
       Some(bytes) => load_autocommit(&bytes).map(Some),
       None => Ok(None),
     }
@@ -311,6 +277,42 @@ where
           Err(e) => yield Err(e),
         }
       }
+    }
+  }
+}
+
+#[allow(clippy::needless_lifetimes)]
+impl<T> BTreeWriteExecutor<Uuid, AutoCommit> for AutomergeTransaction<T>
+where
+  T: BTreeTransaction<DocumentChangeKey, AutomergeEntry> + Send,
+{
+  async fn insert<'a>(&'a mut self, key: Uuid, value: AutoCommit) -> Result<(), BTreeError>
+  where
+    Uuid: Ord,
+  {
+    self.pending.insert(key, Some(value));
+    Ok(())
+  }
+
+  async fn remove<'a, Q>(&'a mut self, key: Q) -> Result<Option<AutoCommit>, BTreeError>
+  where
+    Uuid: Ord,
+    Q: Borrow<Uuid> + MaybeSend + 'a,
+  {
+    let doc_id = *key.borrow();
+
+    if let Some(existing) = self.pending.remove(&doc_id) {
+      self.pending.insert(doc_id, None);
+      return Ok(existing);
+    }
+
+    let existing_bytes = self.reconstruct_inner_doc(doc_id).await?;
+    if existing_bytes.is_some() {
+      self.pending.insert(doc_id, None);
+    }
+    match existing_bytes {
+      Some(bytes) => load_autocommit(&bytes).map(Some),
+      None => Ok(None),
     }
   }
 }
@@ -388,13 +390,9 @@ where
     key_codec: &KC,
   ) -> Result<(), BTreeError> {
     let existing_state = Self::load_existing_state(inner_tx, doc_id, key_codec).await?;
-    let existing_doc = existing_state
-      .as_ref()
-      .map(|bytes| load_autocommit(bytes))
-      .transpose()?;
 
     if let Some((entry_key, entry_bytes)) =
-      build_lifecycle_write(doc_id, snapshot_doc, existing_doc)
+      build_lifecycle_write(doc_id, snapshot_doc, existing_state).map_err(BTreeError::other)?
     {
       Self::write_pending_snapshot(inner_tx, key_codec, entry_key, entry_bytes).await?;
     }
@@ -540,7 +538,7 @@ where
 }
 
 #[allow(clippy::needless_lifetimes)]
-impl<T, KC, VC> BTreeExecutor<Uuid, AutoCommit> for AutomergeEncodedTransaction<T, KC, VC>
+impl<T, KC, VC> BTreeReadExecutor<Uuid, AutoCommit> for AutomergeEncodedTransaction<T, KC, VC>
 where
   T: BTreeTransaction<Vec<u8>, Vec<u8>> + Send,
   KC: db_core::FastKeyCodec<DocumentChangeKey> + Clone + Send + Sync + 'static,
@@ -556,34 +554,6 @@ where
       return Ok(pending.clone());
     }
     match self.reconstruct_inner_doc(doc_id).await? {
-      Some(bytes) => load_autocommit(&bytes).map(Some),
-      None => Ok(None),
-    }
-  }
-
-  async fn insert<'a>(&'a mut self, key: Uuid, value: AutoCommit) -> Result<(), BTreeError>
-  where
-    Uuid: Ord,
-  {
-    self.pending.insert(key, Some(value));
-    Ok(())
-  }
-
-  async fn remove<'a, Q>(&'a mut self, key: Q) -> Result<Option<AutoCommit>, BTreeError>
-  where
-    Uuid: Ord,
-    Q: Borrow<Uuid> + MaybeSend + 'a,
-  {
-    let doc_id = *key.borrow();
-    if let Some(existing) = self.pending.remove(&doc_id) {
-      self.pending.insert(doc_id, None);
-      return Ok(existing);
-    }
-    let existing_bytes = self.reconstruct_inner_doc(doc_id).await?;
-    if existing_bytes.is_some() {
-      self.pending.insert(doc_id, None);
-    }
-    match existing_bytes {
       Some(bytes) => load_autocommit(&bytes).map(Some),
       None => Ok(None),
     }
@@ -646,12 +616,50 @@ where
   }
 }
 
+#[allow(clippy::needless_lifetimes)]
+impl<T, KC, VC> BTreeWriteExecutor<Uuid, AutoCommit> for AutomergeEncodedTransaction<T, KC, VC>
+where
+  T: BTreeTransaction<Vec<u8>, Vec<u8>> + Send,
+  KC: db_core::FastKeyCodec<DocumentChangeKey> + Clone + Send + Sync + 'static,
+  VC: db_core::ValueCodec<AutomergeEntry> + Clone + Send + Sync + 'static,
+{
+  async fn insert<'a>(&'a mut self, key: Uuid, value: AutoCommit) -> Result<(), BTreeError>
+  where
+    Uuid: Ord,
+  {
+    self.pending.insert(key, Some(value));
+    Ok(())
+  }
+
+  async fn remove<'a, Q>(&'a mut self, key: Q) -> Result<Option<AutoCommit>, BTreeError>
+  where
+    Uuid: Ord,
+    Q: Borrow<Uuid> + MaybeSend + 'a,
+  {
+    let doc_id = *key.borrow();
+    if let Some(existing) = self.pending.remove(&doc_id) {
+      self.pending.insert(doc_id, None);
+      return Ok(existing);
+    }
+    let existing_bytes = self.reconstruct_inner_doc(doc_id).await?;
+    if existing_bytes.is_some() {
+      self.pending.insert(doc_id, None);
+    }
+    match existing_bytes {
+      Some(bytes) => load_autocommit(&bytes).map(Some),
+      None => Ok(None),
+    }
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::{AutomergeEntry, DocumentChangeKey};
   use automerge::AutoCommit;
   use automerge::transaction::Transactable;
-  use db_core::{BTree, BTreeError, BTreeExecutor, BTreeTransaction, block_on};
+  use db_core::{
+    BTree, BTreeError, BTreeReadExecutor, BTreeTransaction, BTreeWriteExecutor, block_on,
+  };
   use db_in_memory::InMemoryBTree;
   use futures::StreamExt;
   use uuid::Uuid;

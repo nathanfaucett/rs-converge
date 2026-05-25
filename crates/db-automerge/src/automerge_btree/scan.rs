@@ -1,6 +1,6 @@
 use std::ops::RangeBounds;
 
-use automerge::AutoCommit;
+use automerge::{AutoCommit, AutomergeError};
 use db_core::BTreeError;
 use futures::{Stream, StreamExt, pin_mut};
 use uuid::Uuid;
@@ -97,10 +97,6 @@ where
   Ok(keys)
 }
 
-pub(super) fn load_document(bytes: &[u8]) -> Result<AutoCommit, BTreeError> {
-  AutoCommit::load(bytes).map_err(BTreeError::other)
-}
-
 pub(super) fn uuid_in_range<R>(range: &R, doc_id: &Uuid) -> bool
 where
   R: RangeBounds<Uuid>,
@@ -121,8 +117,11 @@ where
 pub(super) fn flush_reconstructed_doc(
   current_doc: &mut Option<Uuid>,
   accumulator: &mut ReconstructionAccumulator,
-) -> Option<Result<(Uuid, AutoCommit), BTreeError>> {
-  let doc_id = current_doc.take()?;
-  let state = core::mem::replace(accumulator, ReconstructionAccumulator::new()).finish();
-  Some(load_document(&state).map(|doc| (doc_id, doc)))
+) -> Result<Option<(Uuid, AutoCommit)>, AutomergeError> {
+  if let Some(doc_id) = current_doc.take() {
+    let state = core::mem::replace(accumulator, ReconstructionAccumulator::new()).finish();
+    AutoCommit::load(&state).map(|doc| Some((doc_id, doc)))
+  } else {
+    Ok(None)
+  }
 }
