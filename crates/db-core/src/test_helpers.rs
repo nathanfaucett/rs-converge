@@ -1,8 +1,10 @@
-use crate::{BTree, BTreeError, BTreeTransaction, BTreeWriteExecutor, TransactionPatch};
+use crate::{
+  BTree, BTreeError, BTreeReadExecutor, BTreeTransaction, BTreeWriteExecutor, MaybeSend,
+  MaybeSendStream, TransactionPatch,
+};
 use async_lock::RwLock;
 use async_stream::stream;
 use core::{borrow::Borrow, ops::RangeBounds};
-use futures::Stream;
 
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeMap, sync::Arc};
@@ -40,7 +42,7 @@ pub struct MockBTreeTransaction<K, V> {
   patch: TransactionPatch<K, V>,
 }
 
-impl<K, V> BTreeWriteExecutor<K, V> for MockBTree<K, V>
+impl<K, V> BTreeReadExecutor<K, V> for MockBTree<K, V>
 where
   K: Clone + Ord + Send + Sync + 'static,
   V: Clone + Send + Sync + 'static,
@@ -48,12 +50,35 @@ where
   async fn get<'a, Q>(&'a self, key: Q) -> Result<Option<V>, BTreeError>
   where
     K: Ord,
-    Q: Borrow<K> + Send + 'a,
+    Q: Borrow<K> + MaybeSend + 'a,
   {
     let guard = self.inner.read().await;
     Ok(guard.get(key.borrow()).cloned())
   }
 
+  fn range<'a, R>(
+    &'a self,
+    range: R,
+  ) -> impl MaybeSendStream<Item = Result<(K, V), BTreeError>> + 'a
+  where
+    K: Ord + Clone,
+    R: RangeBounds<K> + MaybeSend + 'a,
+  {
+    let inner = self.inner.clone();
+    stream! {
+        let guard = inner.read().await;
+        for (k, v) in guard.range(range) {
+            yield Ok((k.clone(), v.clone()));
+        }
+    }
+  }
+}
+
+impl<K, V> BTreeWriteExecutor<K, V> for MockBTree<K, V>
+where
+  K: Clone + Ord + Send + Sync + 'static,
+  V: Clone + Send + Sync + 'static,
+{
   async fn insert(&mut self, key: K, value: V) -> Result<(), BTreeError>
   where
     K: Ord,
@@ -70,20 +95,6 @@ where
   {
     let mut guard = self.inner.write().await;
     Ok(guard.remove(key.borrow()))
-  }
-
-  fn range<'a, R>(&'a self, range: R) -> impl Stream<Item = Result<(K, V), BTreeError>> + Send + 'a
-  where
-    K: Ord + Clone,
-    R: RangeBounds<K> + Send + 'a,
-  {
-    let inner = self.inner.clone();
-    stream! {
-        let guard = inner.read().await;
-        for (k, v) in guard.range(range) {
-            yield Ok((k.clone(), v.clone()));
-        }
-    }
   }
 }
 
@@ -103,7 +114,7 @@ where
   }
 }
 
-impl<K, V> BTreeWriteExecutor<K, V> for MockBTreeTransaction<K, V>
+impl<K, V> BTreeReadExecutor<K, V> for MockBTreeTransaction<K, V>
 where
   K: Clone + Ord + Send + Sync + 'static,
   V: Clone + Send + Sync + 'static,
@@ -111,12 +122,38 @@ where
   async fn get<'a, Q>(&'a self, key: Q) -> Result<Option<V>, BTreeError>
   where
     K: Ord,
-    Q: Borrow<K> + Send + 'a,
+    Q: Borrow<K> + MaybeSend + 'a,
   {
     let guard = self.inner.read().await;
     Ok(self.patch.get_base_value(&guard, key.borrow()))
   }
 
+  fn range<'a, R>(
+    &'a self,
+    range: R,
+  ) -> impl MaybeSendStream<Item = Result<(K, V), BTreeError>> + 'a
+  where
+    K: Ord + Clone,
+    R: RangeBounds<K> + MaybeSend + 'a,
+  {
+    let inner = self.inner.clone();
+    let patch = self.patch.clone();
+    stream! {
+      let guard = inner.read().await;
+      let merged = patch.merge_range(&*guard, range);
+
+      for (k, v) in merged {
+        yield Ok((k, v));
+      }
+    }
+  }
+}
+
+impl<K, V> BTreeWriteExecutor<K, V> for MockBTreeTransaction<K, V>
+where
+  K: Clone + Ord + Send + Sync + 'static,
+  V: Clone + Send + Sync + 'static,
+{
   async fn insert(&mut self, key: K, value: V) -> Result<(), BTreeError>
   where
     K: Ord,
@@ -139,23 +176,6 @@ where
       self.patch.delete(owned_key.clone());
     }
     Ok(val)
-  }
-
-  fn range<'a, R>(&'a self, range: R) -> impl Stream<Item = Result<(K, V), BTreeError>> + Send + 'a
-  where
-    K: Ord + Clone,
-    R: RangeBounds<K> + Send + 'a,
-  {
-    let inner = self.inner.clone();
-    let patch = self.patch.clone();
-    stream! {
-      let guard = inner.read().await;
-      let merged = patch.merge_range(&*guard, range);
-
-      for (k, v) in merged {
-        yield Ok((k, v));
-      }
-    }
   }
 }
 
