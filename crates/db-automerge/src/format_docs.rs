@@ -1,7 +1,7 @@
-//! Automerge **format** document encoding for facade named-tree values.
+//! Automerge document encoding for engine-facing named-tree values.
 //!
 //! Maps engine keys and row bytes to Automerge document fields. Merge and CRDT
-//! semantics live in `db_automerge`; this module only builds and reads documents.
+//! semantics live in `db-automerge`; this module only builds and reads documents.
 
 use automerge::transaction::Transactable;
 use automerge::{AutoCommit, ObjType, ReadDoc, ScalarValue, Value};

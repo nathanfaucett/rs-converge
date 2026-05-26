@@ -5,6 +5,8 @@ extern crate alloc;
 use alloc::{format, string::String, vec::Vec};
 use core::fmt;
 
+#[cfg(feature = "automerge")]
+use db_automerge::AutomergeFormatAdapter;
 #[cfg(all(feature = "automerge", feature = "redb"))]
 use db_automerge::DocumentType;
 #[cfg(feature = "automerge")]
@@ -16,8 +18,6 @@ use db_engine::{
   EngineDatabase, EngineKey, EngineNamedTreeBackend, EngineValue, NamedTreeEngineStore,
 };
 use db_in_memory::InMemoryNamedBTree;
-#[cfg(feature = "automerge")]
-use db_named_bridge::automerge::AutomergeFormatAdapter;
 #[cfg(feature = "redb")]
 use db_redb::REDBNamedBTree;
 #[cfg(feature = "redb")]

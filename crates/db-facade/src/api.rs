@@ -12,6 +12,8 @@ use std::vec::Vec;
 use super::types::InMemoryAutomergeLayoutBackend;
 #[cfg(not(feature = "std"))]
 use alloc::sync::Arc;
+#[cfg(feature = "automerge")]
+use db_automerge::AutomergeFormatAdapter;
 #[cfg(feature = "redb")]
 use db_engine::EngineKey;
 use db_engine::{
@@ -19,8 +21,6 @@ use db_engine::{
   SyncScope, TableSchema,
 };
 use db_in_memory::InMemoryNamedBTree;
-#[cfg(feature = "automerge")]
-use db_named_bridge::automerge::AutomergeFormatAdapter;
 #[cfg(feature = "redb")]
 use db_redb::REDBNamedBTree;
 #[cfg(feature = "redb")]
@@ -68,7 +68,7 @@ impl Database<InMemoryEngineStore> {
   }
 }
 
-// Automerge facade constructors: layout backend + format bridge (see `db-named-bridge`).
+// Automerge facade constructors: layout backend + format bridge (see `db_automerge`).
 #[cfg(feature = "automerge")]
 impl Database<InMemoryAutomergeStore> {
   /// Open an in-memory database with Automerge document encoding on the
@@ -80,7 +80,7 @@ impl Database<InMemoryAutomergeStore> {
     Ok(Self { engine })
   }
 
-  /// Layout backend used for catalog/sync (see `db_named_bridge::sync_automerge_layouts`).
+  /// Layout backend used for catalog/sync (see `db_automerge::sync_automerge_layouts`).
   pub fn automerge_layout(&self) -> &InMemoryAutomergeLayoutBackend {
     AutomergeFormatAdapter::layout_backend(self.engine.store().inner())
   }

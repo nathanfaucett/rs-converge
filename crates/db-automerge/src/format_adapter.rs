@@ -1,28 +1,22 @@
-//! Automerge **format** adapter over a named-tree **layout backend**.
-//!
-//! - **Layout backend**: owns named B-tree storage (`REDBNamedBTree`, `InMemoryNamedBTree`).
-//! - **Format adapter**: wires layout trees to `db_automerge` for document merge and sync.
-
 use std::borrow::Borrow;
 
 use async_stream::stream;
-use db_automerge::{AutomergeEngineStore, AutomergeEntry, DocumentChangeKey};
 use db_core::{
   BTree, BTreeError, BTreeReadExecutor, BTreeTransaction, BTreeWriteExecutor, NamedBTreeMap,
 };
-use db_engine::EngineKey;
-use db_engine::{EngineNamedTreeBackend, EngineNamedTreeTransaction};
+use db_engine::{EngineKey, EngineNamedTreeBackend, EngineNamedTreeTransaction};
 use futures::{StreamExt, pin_mut};
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
-use crate::automerge::catalog::{ensure_tree_initialized, register_tree_name};
-use crate::automerge::format_docs::{
+use crate::automerge_btree::{AutomergeEntry, DocumentChangeKey};
+use crate::catalog::{ensure_tree_initialized, known_tree_names, register_tree_name};
+use crate::format_docs::{
   build_named_tree_document, build_removed_named_doc, build_removed_named_row_doc, doc_id_for_key,
   encode_row_bytes, is_named_tombstone, is_row_tree, read_named_key_metadata,
   read_named_value_bytes, read_row_columns, row_key_from_doc,
 };
-use crate::glue::LayoutFormatBridge;
+use crate::store_adapter::AutomergeEngineStore;
 
 #[derive(Clone)]
 pub struct AutomergeFormatAdapter<P>
@@ -64,23 +58,6 @@ where
 
   pub fn layout_backend(&self) -> &P {
     &self.backend
-  }
-}
-
-impl<P> LayoutFormatBridge for AutomergeFormatAdapter<P>
-where
-  P: NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
-    + EngineNamedTreeBackend<DocumentChangeKey, AutomergeEntry>
-    + Clone
-    + Send
-    + Sync
-    + 'static,
-  P::Tree: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
-{
-  type LayoutBackend = P;
-
-  fn layout_backend(&self) -> &P {
-    AutomergeFormatAdapter::layout_backend(self)
   }
 }
 
@@ -679,4 +656,65 @@ where
       })
     }
   }
+}
+
+pub struct AutomergeSyncMetrics {
+  pub document_count: usize,
+  pub total_document_bytes: usize,
+}
+
+pub async fn sync_automerge_layouts<L>(left: &L, right: &L) -> Result<(), BTreeError>
+where
+  L: NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
+    + EngineNamedTreeBackend<DocumentChangeKey, AutomergeEntry>
+    + Clone
+    + Send
+    + Sync
+    + 'static,
+  L::Tree: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
+{
+  let mut names = known_tree_names(left).await;
+  names.extend(known_tree_names(right).await);
+  names.sort();
+  names.dedup();
+
+  for tree in names {
+    for layout in [left, right] {
+      ensure_tree_initialized(layout, &tree).await?;
+      register_tree_name(layout, &tree).await?;
+    }
+    let left_store = AutomergeEngineStore::new_with_backend(left.get_tree(&tree).await?);
+    let right_store = AutomergeEngineStore::new_with_backend(right.get_tree(&tree).await?);
+    crate::store_adapter::sync_automerge_stores(&left_store, &right_store).await?;
+  }
+  Ok(())
+}
+
+pub async fn automerge_layout_metrics<L>(layout: &L) -> Result<AutomergeSyncMetrics, BTreeError>
+where
+  L: NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
+    + EngineNamedTreeBackend<DocumentChangeKey, AutomergeEntry>
+    + Clone
+    + Send
+    + Sync
+    + 'static,
+  L::Tree: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
+{
+  let mut total_document_count = 0usize;
+  let mut total_document_bytes = 0usize;
+
+  for tree in known_tree_names(layout).await {
+    ensure_tree_initialized(layout, &tree).await?;
+    register_tree_name(layout, &tree).await?;
+    let store = AutomergeEngineStore::new_with_backend(layout.get_tree(&tree).await?);
+    let docs = crate::store_adapter::collect_documents(&store).await?;
+    let (document_count, document_bytes) = crate::store_adapter::automerge_metrics(&docs);
+    total_document_count += document_count;
+    total_document_bytes += document_bytes;
+  }
+
+  Ok(AutomergeSyncMetrics {
+    document_count: total_document_count,
+    total_document_bytes,
+  })
 }

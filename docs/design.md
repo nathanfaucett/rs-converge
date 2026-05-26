@@ -180,18 +180,11 @@ The engine layer includes unit tests that exercise the new features and verify s
 
 ### Layout backend, format bridge, and facade
 
-Crate **`db-named-bridge`** glues any named-tree layout backend to a format handler:
-
-- **`TreeLayoutCatalog`** — tree registry and discovery on the layout backend.
-- **`PerTreeFormatSync`** — format-specific merge for one logical tree.
-- **`sync_cataloged_layouts`** — layout-level sync (catalog + per-tree format sync).
-- **`LayoutFormatBridge`** — engine-facing `NamedBTreeMap` + `EngineNamedTreeBackend<EngineKey, Vec<u8>>` built
-  from a layout backend.
-
-Automerge is one format implementation (`db-named-bridge::automerge`):
+`db-automerge` provides the Automerge format adapter for named-tree layout backends.
 
 - **Layout backend**: `InMemoryAutomergeLayoutBackend`, `RedbAutomergeLayoutBackend`.
-- **Bridge**: `AutomergeFormatAdapter` (document encoding only; no sync on the bridge).
+- **Bridge**: `AutomergeFormatAdapter` implements `NamedBTreeMap<EngineKey, Vec<u8>>` and
+  `EngineNamedTreeBackend<EngineKey, Vec<u8>>` so the engine can use Automerge-backed storage.
 - **Layout sync**: `sync_automerge_layouts`, `automerge_layout_metrics`.
 
 **`db-facade`** only opens `Database` via constructors and exposes `automerge_layout()` for

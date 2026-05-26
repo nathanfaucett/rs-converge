@@ -1,5 +1,5 @@
 use std::{
-  collections::BTreeMap,
+  collections::HashMap,
   fmt::Debug,
   marker::PhantomData,
   path::Path,
@@ -20,13 +20,13 @@ type RedbNamedTableDefinition<'a, K, V, KC, VC> =
   TableDefinition<'a, EncodedKey<K, KC>, EncodedValue<V, VC>>;
 
 struct NameStore {
-  names: Mutex<BTreeMap<String, Arc<str>>>,
+  names: Mutex<HashMap<String, Arc<str>>>,
 }
 
 impl NameStore {
   fn new() -> Self {
     Self {
-      names: Mutex::new(BTreeMap::new()),
+      names: Mutex::new(HashMap::new()),
     }
   }
 

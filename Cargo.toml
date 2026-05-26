@@ -14,7 +14,6 @@ workspace = true
 [package.license]
 workspace = true
 
-
 [features]
 default = ["std", "automerge", "redb"]
 std = []
@@ -26,38 +25,34 @@ name = "db"
 
 [dependencies]
 db-facade = { path = "crates/db-facade", default-features = false, features = [
-    "std",
+  "std",
 ] }
 
 [dev-dependencies]
 db-core = { path = "crates/db-core", default-features = false, features = [
   "std",
 ] }
-db-named-bridge = { path = "crates/db-named-bridge", default-features = false, features = [
-  "automerge",
-] }
 db-facade = { path = "crates/db-facade", default-features = false, features = [
   "std",
   "automerge",
 ] }
 db-engine = { path = "crates/db-engine", default-features = false, features = [
-    "std",
+  "std",
 ] }
 futures = { version = "0.3", default-features = false, features = ["executor"] }
 serde = { version = "1.0", default-features = false, features = ["derive"] }
 uuid = { version = "1.0", default-features = false, features = ["v4"] }
 [workspace]
 members = [
-    "crates/db-facade",
-    "crates/db-named-bridge",
-    "crates/db-core",
-    "crates/db-types",
-    "crates/db-engine",
-    "crates/db-in-memory",
-    "crates/db-redb",
-    "crates/db-automerge",
-    "crates/db-sql-to-engine",
-    "crates/db-wasm",
+  "crates/db-facade",
+  "crates/db-core",
+  "crates/db-types",
+  "crates/db-engine",
+  "crates/db-in-memory",
+  "crates/db-redb",
+  "crates/db-automerge",
+  "crates/db-sql-to-engine",
+  "crates/db-wasm",
 ]
 resolver = "2"
 

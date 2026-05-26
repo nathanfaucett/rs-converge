@@ -1,17 +1,11 @@
-//! Automerge layout tree catalog (registry of logical tree names).
-
-use db_automerge::{AutomergeEntry, DocumentChangeKey, DocumentType};
-use db_core::{BTree, BTreeError, NamedBTreeMap};
+use crate::automerge_btree::{AutomergeEntry, DocumentChangeKey, DocumentType};
+use db_core::{BTreeError, NamedBTreeMap};
 use db_engine::{EngineNamedTreeBackend, EngineNamedTreeTransaction};
 use futures::{StreamExt, pin_mut};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::layout_catalog::TreeLayoutCatalog;
-
 pub const TREE_CATALOG_NAME: &str = "sys:automerge_trees";
-
-pub struct AutomergeTreeCatalog;
 
 pub fn init_sentinel_key() -> DocumentChangeKey {
   DocumentChangeKey {
@@ -42,7 +36,12 @@ pub fn tree_catalog_key(tree: &str) -> DocumentChangeKey {
 
 pub async fn ensure_tree_initialized<L>(layout: &L, tree: &str) -> Result<(), BTreeError>
 where
-  L: AutomergeLayout,
+  L: NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
+    + EngineNamedTreeBackend<DocumentChangeKey, AutomergeEntry>
+    + Clone
+    + Send
+    + Sync
+    + 'static,
 {
   let mut tx = layout.begin_transaction().await?;
   let _ = tx.remove(tree, &init_sentinel_key()).await?;
@@ -51,7 +50,12 @@ where
 
 pub async fn register_tree_name<L>(layout: &L, tree: &str) -> Result<(), BTreeError>
 where
-  L: AutomergeLayout,
+  L: NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
+    + EngineNamedTreeBackend<DocumentChangeKey, AutomergeEntry>
+    + Clone
+    + Send
+    + Sync
+    + 'static,
 {
   let mut tx = layout.begin_transaction().await?;
   tx.insert(
@@ -65,7 +69,12 @@ where
 
 pub async fn known_tree_names<L>(layout: &L) -> Vec<String>
 where
-  L: AutomergeLayout,
+  L: NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
+    + EngineNamedTreeBackend<DocumentChangeKey, AutomergeEntry>
+    + Clone
+    + Send
+    + Sync
+    + 'static,
 {
   let mut names = layout.list_names().await;
   if !names.is_empty() {
@@ -96,42 +105,4 @@ where
   names.sort();
   names.dedup();
   names
-}
-
-pub trait AutomergeLayout:
-  NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
-  + EngineNamedTreeBackend<DocumentChangeKey, AutomergeEntry>
-  + Clone
-  + Send
-  + Sync
-  + 'static
-{
-}
-
-impl<T> AutomergeLayout for T where
-  T: NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
-    + EngineNamedTreeBackend<DocumentChangeKey, AutomergeEntry>
-    + Clone
-    + Send
-    + Sync
-    + 'static
-{
-}
-
-impl<L> TreeLayoutCatalog<L> for AutomergeTreeCatalog
-where
-  L: AutomergeLayout,
-  L::Tree: BTree<DocumentChangeKey, AutomergeEntry> + Clone + Send + Sync + 'static,
-{
-  async fn prepare_tree(layout: &L, tree: &str) -> Result<(), BTreeError> {
-    ensure_tree_initialized(layout, tree).await
-  }
-
-  async fn record_tree(layout: &L, tree: &str) -> Result<(), BTreeError> {
-    register_tree_name(layout, tree).await
-  }
-
-  async fn list_trees(layout: &L) -> Vec<String> {
-    known_tree_names(layout).await
-  }
 }

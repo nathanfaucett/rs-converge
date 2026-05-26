@@ -4,11 +4,8 @@ mod api;
 mod types;
 
 #[cfg(feature = "automerge")]
-pub use db_named_bridge::LayoutFormatBridge;
-#[cfg(feature = "automerge")]
-pub use db_named_bridge::automerge::{
-  AutomergeFormatAdapter, AutomergeLayout, AutomergeSyncMetrics, automerge_layout_metrics,
-  sync_automerge_layouts,
+pub use db_automerge::{
+  AutomergeFormatAdapter, AutomergeSyncMetrics, automerge_layout_metrics, sync_automerge_layouts,
 };
 pub use db_sql_to_engine::SqlParams;
 #[cfg(feature = "redb")]

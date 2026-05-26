@@ -266,7 +266,6 @@ dependencies = [
  "db-core",
  "db-engine",
  "db-facade",
- "db-named-bridge",
  "futures",
  "serde",
  "uuid",
@@ -281,6 +280,7 @@ dependencies = [
  "automerge",
  "base64",
  "db-core",
+ "db-engine",
  "db-in-memory",
  "db-types",
  "futures",
@@ -333,7 +333,6 @@ dependencies = [
  "db-core",
  "db-engine",
  "db-in-memory",
- "db-named-bridge",
  "db-redb",
  "db-sql-to-engine",
  "db-types",
@@ -351,21 +350,6 @@ dependencies = [
  "db-core",
  "db-engine",
  "futures",
-]
-
-[[package]]
-name = "db-named-bridge"
-version = "0.1.0"
-dependencies = [
- "async-stream",
- "automerge",
- "db-automerge",
- "db-core",
- "db-engine",
- "db-types",
- "futures",
- "sha2 0.10.9",
- "uuid",
 ]
 
 [[package]]
