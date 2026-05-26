@@ -1,7 +1,7 @@
 #[cfg(not(feature = "std"))]
-use alloc::string::String;
+use alloc::{string::String, vec::Vec};
 #[cfg(feature = "std")]
-use std::string::String;
+use std::{string::String, vec::Vec};
 
 use crate::btree::{BTree, BTreeResult};
 use crate::{MaybeSend, MaybeSendFuture, MaybeSync};

@@ -39,9 +39,6 @@ db-in-memory = { path = "../db-in-memory", default-features = false }
 db-sql-to-engine = { path = "../db-sql-to-engine", default-features = false, features = [
   "wasm",
 ] }
-db-types = { path = "../db-types", default-features = false, features = [
-  "wasm",
-] }
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test = "0.3"

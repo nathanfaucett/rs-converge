@@ -11,14 +11,13 @@ name = "db_engine"
 
 [features]
 default = ["std", "in-memory"]
-std = ["futures/std", "db-core/std", "db-in-memory?/std", "db-types/std"]
+std = ["futures/std", "db-core/std", "db-in-memory?/std"]
 in-memory = ["dep:db-in-memory"]
-wasm = ["tsify", "serde-wasm-bindgen", "wasm-bindgen", "db-types/wasm"]
+wasm = ["tsify", "serde-wasm-bindgen", "wasm-bindgen"]
 
 [dependencies]
 db-core = { path = "../db-core", default-features = false }
 db-in-memory = { path = "../db-in-memory", default-features = false, optional = true }
-db-types = { path = "../db-types", default-features = false }
 async-stream = { version = "0.3", default-features = false, features = [] }
 futures = { version = "0.3", default-features = false, features = [] }
 serde = { version = "1.0", default-features = false, features = ["derive"] }

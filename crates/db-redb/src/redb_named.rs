@@ -1,12 +1,7 @@
-use std::{
-  collections::HashMap,
-  fmt::Debug,
-  marker::PhantomData,
-  path::Path,
-  sync::{Arc, Mutex},
-};
+use std::{fmt::Debug, marker::PhantomData, path::Path, sync::Arc};
 
 use async_stream::stream;
+use dashmap::DashMap;
 use db_core::{BTreeError, BTreeResult, KeyCodec, MaybeSend, NamedBTreeMap, ValueCodec};
 use db_engine::{EngineNamedTreeBackend, EngineNamedTreeTransaction};
 use futures::Stream;
@@ -20,36 +15,37 @@ type RedbNamedTableDefinition<'a, K, V, KC, VC> =
   TableDefinition<'a, EncodedKey<K, KC>, EncodedValue<V, VC>>;
 
 struct NameStore {
-  names: Mutex<HashMap<String, Arc<str>>>,
+  names: DashMap<String, Arc<str>>,
 }
 
 impl NameStore {
   fn new() -> Self {
     Self {
-      names: Mutex::new(HashMap::new()),
+      names: DashMap::new(),
     }
   }
 
-  fn intern(&self, name: &str) -> Arc<str> {
-    let mut guard = self.names.lock().unwrap();
-    if let Some(existing) = guard.get(name) {
-      return Arc::clone(existing);
+  fn get(&self, name: &str) -> Arc<str> {
+    if let Some(existing) = self.names.get(name) {
+      return Arc::clone(existing.value());
     }
 
     let key = name.to_string();
     let arc_name = Arc::<str>::from(key.clone());
-    guard.insert(key, Arc::clone(&arc_name));
+    self.names.insert(key, Arc::clone(&arc_name));
     arc_name
   }
 
-  fn list_names(&self) -> Vec<String> {
-    let guard = self.names.lock().unwrap();
-    guard.keys().cloned().collect()
+  fn list(&self) -> Vec<String> {
+    self
+      .names
+      .iter()
+      .map(|entry| entry.key().to_owned())
+      .collect()
   }
 
   fn remove(&self, name: &str) {
-    let mut guard = self.names.lock().unwrap();
-    guard.remove(name);
+    self.names.remove(name);
   }
 }
 
@@ -111,7 +107,7 @@ where
   where
     K: Ord,
   {
-    let table_name = self.names.intern(tree);
+    let table_name = self.names.get(tree);
     let name = arc_str_to_static(&table_name);
     let def: RedbNamedTableDefinition<K, V, KC, VC> = TableDefinition::new(name);
     match &mut self.txn {
@@ -132,7 +128,7 @@ where
   where
     K: Ord,
   {
-    let table_name = self.names.intern(tree);
+    let table_name = self.names.get(tree);
     let name = arc_str_to_static(&table_name);
     let def: RedbNamedTableDefinition<K, V, KC, VC> = TableDefinition::new(name);
     match &mut self.txn {
@@ -149,7 +145,7 @@ where
   where
     K: Ord,
   {
-    let table_name = self.names.intern(tree);
+    let table_name = self.names.get(tree);
     let name = arc_str_to_static(&table_name);
     let def: RedbNamedTableDefinition<K, V, KC, VC> = TableDefinition::new(name);
     match &mut self.txn {
@@ -167,7 +163,7 @@ where
     K: Ord,
     R: core::ops::RangeBounds<K> + MaybeSend + 'a,
   {
-    let table_name = self.names.intern(tree);
+    let table_name = self.names.get(tree);
     let name = arc_str_to_static(&table_name);
     let def: RedbNamedTableDefinition<K, V, KC, VC> = TableDefinition::new(name);
     stream! {
@@ -297,7 +293,7 @@ where
     &'a self,
     name: &str,
   ) -> impl core::future::Future<Output = BTreeResult<REDBBTree<K, V, KC, VC>>> + 'a {
-    let table_name = self.names.intern(name);
+    let table_name = self.names.get(name);
     let db = Arc::clone(&self.db);
     async move { Ok(REDBBTree::from_arc_with_codecs(db, table_name)) }
   }
@@ -307,7 +303,7 @@ where
     name: &str,
     tree: Self::Tree,
   ) -> impl core::future::Future<Output = BTreeResult<()>> + '_ {
-    let dest_table_name = self.names.intern(name);
+    let dest_table_name = self.names.get(name);
     let db = Arc::clone(&self.db);
     async move {
       let write_tx = db.begin_write().map_err(BTreeError::other)?;
@@ -335,7 +331,7 @@ where
 
   fn delete_tree(&self, name: &str) -> impl core::future::Future<Output = BTreeResult<()>> + '_ {
     let table_name_string = name.to_string();
-    let table_name = self.names.intern(&table_name_string);
+    let table_name = self.names.get(&table_name_string);
     let db = Arc::clone(&self.db);
     let names = Arc::clone(&self.names);
     async move {
@@ -350,7 +346,7 @@ where
   }
 
   async fn list_names(&self) -> Vec<String> {
-    self.names.list_names()
+    self.names.list()
   }
 }
 

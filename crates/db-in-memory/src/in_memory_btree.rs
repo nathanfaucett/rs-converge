@@ -1,15 +1,11 @@
 use async_lock::RwLock;
 use async_stream::stream;
-use core::{borrow::Borrow, ops::RangeBounds};
+use core::{borrow::Borrow, mem::take, ops::RangeBounds};
 use db_core::{
   BTree, BTreeError, BTreeReadExecutor, BTreeTransaction, BTreeWriteExecutor, MaybeSend,
   TransactionPatch,
 };
 use futures::Stream;
-
-use crate::patch_map::{
-  commit_patch_into_map, get_from_patch_then_map, merge_patch_range, remove_from_patch_then_map,
-};
 
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeMap, sync::Arc};
@@ -19,12 +15,6 @@ use std::{collections::BTreeMap, sync::Arc};
 #[derive(Debug, Clone)]
 pub struct InMemoryBTree<K, V> {
   inner: Arc<RwLock<BTreeMap<K, V>>>,
-}
-
-#[derive(Debug)]
-pub struct InMemoryBTreeTransaction<K, V> {
-  inner: Arc<RwLock<BTreeMap<K, V>>>,
-  patch: TransactionPatch<K, V>,
 }
 
 impl<K, V> InMemoryBTree<K, V> {
@@ -106,18 +96,25 @@ where
   }
 }
 
+#[derive(Debug)]
+pub struct InMemoryBTreeTransaction<K, V> {
+  inner: Arc<RwLock<BTreeMap<K, V>>>,
+  patch: Arc<RwLock<TransactionPatch<K, V>>>,
+}
+
 impl<K, V> BTreeTransaction<K, V> for InMemoryBTreeTransaction<K, V>
 where
   K: Clone + Ord + Send + Sync + 'static,
   V: Clone + Send + Sync + 'static,
 {
   async fn commit(self) -> Result<(), BTreeError> {
-    let mut guard = self.inner.write().await;
-    commit_patch_into_map(self.patch, &mut guard);
+    let patch = take(&mut *self.patch.write().await);
+    patch.commit(&mut *self.inner.write().await);
     Ok(())
   }
 
   async fn rollback(self) -> Result<(), BTreeError> {
+    let _ = take(&mut *self.patch.write().await);
     Ok(())
   }
 }
@@ -132,8 +129,8 @@ where
     K: Ord,
     Q: Borrow<K> + MaybeSend + 'a,
   {
-    let guard = self.inner.read().await;
-    Ok(get_from_patch_then_map(&self.patch, &guard, key.borrow()))
+    let value = self.patch.read().await.get(&*self.inner.read().await, &key);
+    Ok(value)
   }
 
   fn range<'a, R>(&'a self, range: R) -> impl Stream<Item = Result<(K, V), BTreeError>> + 'a
@@ -143,9 +140,12 @@ where
   {
     let inner = self.inner.clone();
     let patch = self.patch.clone();
+
     stream! {
-      let guard = inner.read().await;
-      let merged = merge_patch_range(&patch, &guard, range);
+      let inner_guard = inner.read().await;
+      let patch_guard = patch.read().await;
+
+      let merged = patch_guard.range(&*inner_guard, range);
 
       for (key, value) in merged {
         yield Ok((key, value));
@@ -163,7 +163,7 @@ where
   where
     K: Ord,
   {
-    self.patch.insert(key, value);
+    self.patch.write().await.insert(key, value);
     Ok(())
   }
 
@@ -172,12 +172,12 @@ where
     K: Ord + Clone,
     Q: Borrow<K> + MaybeSend + 'a,
   {
-    let guard = self.inner.read().await;
-    Ok(remove_from_patch_then_map(
-      &mut self.patch,
-      &guard,
-      key.borrow(),
-    ))
+    let value = self
+      .patch
+      .write()
+      .await
+      .remove(&*self.inner.read().await, key);
+    Ok(value)
   }
 }
 
@@ -192,7 +192,7 @@ where
     let inner = self.inner.clone();
     Ok(InMemoryBTreeTransaction {
       inner,
-      patch: TransactionPatch::default(),
+      patch: Arc::new(RwLock::new(TransactionPatch::default())),
     })
   }
 }

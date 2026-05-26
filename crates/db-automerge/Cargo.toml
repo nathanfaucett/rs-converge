@@ -23,9 +23,6 @@ db-engine = { path = "../db-engine", default-features = false }
 db-in-memory = { path = "../db-in-memory", default-features = false, features = [
   "std",
 ] }
-db-types = { path = "../db-types", default-features = false, features = [
-  "std",
-] }
 async-lock = { version = "3.4", default-features = false, features = ["std"] }
 base64 = { version = "0.21", default-features = false, features = ["std"] }
 

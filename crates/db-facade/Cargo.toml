@@ -16,7 +16,6 @@ std = [
   "db-engine/std",
   "db-in-memory/std",
   "db-sql-to-engine/std",
-  "db-types/std",
 ]
 redb = ["std", "db-redb", "dep:redb"]
 automerge = ["std", "db-automerge"]
@@ -31,7 +30,6 @@ db-engine = { path = "../db-engine", default-features = false, features = [
 db-in-memory = { path = "../db-in-memory", default-features = false }
 db-redb = { path = "../db-redb", default-features = false, optional = true }
 db-sql-to-engine = { path = "../db-sql-to-engine", default-features = false }
-db-types = { path = "../db-types", default-features = false }
 
 # External crates
 futures = { version = "0.3", default-features = false }

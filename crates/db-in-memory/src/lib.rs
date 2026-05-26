@@ -5,7 +5,6 @@ extern crate alloc;
 
 mod in_memory_btree;
 mod in_memory_named;
-mod patch_map;
 
 pub use in_memory_btree::{InMemoryBTree, InMemoryBTreeTransaction};
-pub use in_memory_named::{InMemoryNamedBTree, InMemoryNamedTransaction, InMemoryNamedTree};
+pub use in_memory_named::{InMemoryNamedBTree, InMemoryNamedTree};

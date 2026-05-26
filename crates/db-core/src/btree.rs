@@ -1,5 +1,5 @@
 #[cfg(not(feature = "std"))]
-use alloc::boxed::Box;
+use alloc::{boxed::Box, string::String};
 #[cfg(not(feature = "std"))]
 use core::{borrow::Borrow, error::Error, ops::RangeBounds};
 #[cfg(feature = "std")]

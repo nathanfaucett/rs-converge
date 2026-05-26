@@ -14,6 +14,7 @@ async-stream = { version = "0.3", default-features = false, features = [] }
 futures = { version = "0.3", default-features = false, features = ["std"] }
 async-lock = { version = "3.4", default-features = false, features = [] }
 redb = { version = "4.0", default-features = false, features = [] }
+dashmap = { version = "6.2", default-features = false, features = [] }
 
 [dev-dependencies]
 db-core = { path = "../db-core", default-features = false, features = ["std"] }
