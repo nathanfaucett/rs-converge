@@ -113,10 +113,7 @@ impl Database<RedbAutomergeStore> {
 
 #[cfg(feature = "redb")]
 impl Database<RedbEngineStore> {
-  pub async fn open_in_redb(
-    path: impl AsRef<Path>,
-    _table_name: &'static str,
-  ) -> Result<Self, DatabaseError> {
+  pub async fn open_in_redb(path: impl AsRef<Path>) -> Result<Self, DatabaseError> {
     let store = REDBNamedBTree::<EngineKey, Vec<u8>, EngineKeyCodec>::open_with_codecs(path)
       .map_err(|e| DatabaseError::Engine(format!("{e}")))?;
     let engine = EngineDatabase::new(store.into_engine_store());

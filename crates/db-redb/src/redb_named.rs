@@ -1,4 +1,5 @@
 use std::{
+  collections::BTreeMap,
   fmt::Debug,
   marker::PhantomData,
   path::Path,
@@ -9,46 +10,62 @@ use async_stream::stream;
 use db_core::{BTreeError, BTreeResult, KeyCodec, MaybeSend, NamedBTreeMap, ValueCodec};
 use db_engine::{EngineNamedTreeBackend, EngineNamedTreeTransaction};
 use futures::Stream;
-use redb::{Database, ReadableTable, TableDefinition, WriteTransaction};
+use redb::{
+  Database, ReadTransaction, ReadableDatabase, ReadableTable, TableDefinition, WriteTransaction,
+};
 
 use crate::redb_btree::{EncodedKey, EncodedValue, REDBBTree, RedbKeyCodec, RedbValueCodec};
-
-type RedbNamedTable<'a, K, V, KC, VC> = redb::Table<'a, EncodedKey<K, KC>, EncodedValue<V, VC>>;
 
 type RedbNamedTableDefinition<'a, K, V, KC, VC> =
   TableDefinition<'a, EncodedKey<K, KC>, EncodedValue<V, VC>>;
 
-/// Interns a string as a `'static` reference.
-///
-/// The set of distinct names is bounded by the number of tables, indexes, and
-/// schema namespaces: small and stable over the process lifetime.
-pub fn intern(name: &str) -> &'static str {
-  use std::collections::BTreeSet;
-  static INTERNED: Mutex<Option<BTreeSet<&'static str>>> = Mutex::new(None);
-  let mut guard = INTERNED.lock().unwrap();
-  let set = guard.get_or_insert_with(BTreeSet::new);
-  if let Some(&existing) = set.get(name) {
-    return existing;
-  }
-  let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
-  set.insert(leaked);
-  leaked
+struct NameStore {
+  names: Mutex<BTreeMap<String, Arc<str>>>,
 }
 
-fn interned_names() -> Vec<String> {
-  use std::collections::BTreeSet;
-  static INTERNED: Mutex<Option<BTreeSet<&'static str>>> = Mutex::new(None);
-  let guard = INTERNED.lock().unwrap();
-  guard
-    .as_ref()
-    .map(|set| set.iter().map(|name| (*name).to_string()).collect())
-    .unwrap_or_default()
+impl NameStore {
+  fn new() -> Self {
+    Self {
+      names: Mutex::new(BTreeMap::new()),
+    }
+  }
+
+  fn intern(&self, name: &str) -> Arc<str> {
+    let mut guard = self.names.lock().unwrap();
+    if let Some(existing) = guard.get(name) {
+      return Arc::clone(existing);
+    }
+
+    let key = name.to_string();
+    let arc_name = Arc::<str>::from(key.clone());
+    guard.insert(key, Arc::clone(&arc_name));
+    arc_name
+  }
+
+  fn list_names(&self) -> Vec<String> {
+    let guard = self.names.lock().unwrap();
+    guard.keys().cloned().collect()
+  }
+
+  fn remove(&self, name: &str) {
+    let mut guard = self.names.lock().unwrap();
+    guard.remove(name);
+  }
+}
+
+fn arc_str_to_static(name: &Arc<str>) -> &'static str {
+  unsafe { std::mem::transmute::<&str, &'static str>(&**name) }
 }
 
 /// An atomic transaction spanning multiple named REDB tables.
 ///
 /// REDB's `WriteTransaction` already provides multi-table atomicity natively:
 /// committing commits all open tables together.
+enum REDBNamedTransactionKind {
+  Read(ReadTransaction),
+  Write(WriteTransaction),
+}
+
 pub struct REDBNamedTransaction<K, V, KC = RedbKeyCodec, VC = RedbValueCodec>
 where
   K: Debug + 'static,
@@ -56,7 +73,8 @@ where
   KC: KeyCodec<K>,
   VC: ValueCodec<V>,
 {
-  write_tx: WriteTransaction,
+  txn: REDBNamedTransactionKind,
+  names: Arc<NameStore>,
   _phantom: PhantomData<(K, V, KC, VC)>,
 }
 
@@ -67,21 +85,18 @@ where
   KC: KeyCodec<K> + Default + Send + Sync + 'static,
   VC: ValueCodec<V> + Default + Send + Sync + 'static,
 {
-  pub fn open_table<'a>(
-    &'a self,
-    tree: &'a str,
-  ) -> Result<RedbNamedTable<'a, K, V, KC, VC>, BTreeError> {
-    let name = intern(tree);
-    let def: RedbNamedTableDefinition<K, V, KC, VC> = TableDefinition::new(name);
-    self.write_tx.open_table(def).map_err(BTreeError::other)
-  }
-
   pub fn named_commit(self) -> BTreeResult<()> {
-    self.write_tx.commit().map_err(BTreeError::other)
+    match self.txn {
+      REDBNamedTransactionKind::Read(_) => Ok(()),
+      REDBNamedTransactionKind::Write(write_tx) => write_tx.commit().map_err(BTreeError::other),
+    }
   }
 
   pub fn named_rollback(self) -> BTreeResult<()> {
-    self.write_tx.abort().map_err(BTreeError::other)
+    match self.txn {
+      REDBNamedTransactionKind::Read(_) => Ok(()),
+      REDBNamedTransactionKind::Write(write_tx) => write_tx.abort().map_err(BTreeError::other),
+    }
   }
 }
 
@@ -96,27 +111,55 @@ where
   where
     K: Ord,
   {
-    let table = self.open_table(tree)?;
-    let guard = table.get(key).map_err(BTreeError::other)?;
-    Ok(guard.map(|g| g.value()))
+    let table_name = self.names.intern(tree);
+    let name = arc_str_to_static(&table_name);
+    let def: RedbNamedTableDefinition<K, V, KC, VC> = TableDefinition::new(name);
+    match &mut self.txn {
+      REDBNamedTransactionKind::Read(read_tx) => {
+        let table = read_tx.open_table(def).map_err(BTreeError::other)?;
+        let guard = table.get(key).map_err(BTreeError::other)?;
+        Ok(guard.map(|g| g.value()))
+      }
+      REDBNamedTransactionKind::Write(write_tx) => {
+        let table = write_tx.open_table(def).map_err(BTreeError::other)?;
+        let guard = table.get(key).map_err(BTreeError::other)?;
+        Ok(guard.map(|g| g.value()))
+      }
+    }
   }
 
   async fn insert<'a>(&'a mut self, tree: &'a str, key: K, value: V) -> BTreeResult<()>
   where
     K: Ord,
   {
-    let mut table = self.open_table(tree)?;
-    table.insert(key, value).map_err(BTreeError::other)?;
-    Ok(())
+    let table_name = self.names.intern(tree);
+    let name = arc_str_to_static(&table_name);
+    let def: RedbNamedTableDefinition<K, V, KC, VC> = TableDefinition::new(name);
+    match &mut self.txn {
+      REDBNamedTransactionKind::Read(_) => Err(BTreeError::UnsupportedOperation),
+      REDBNamedTransactionKind::Write(write_tx) => {
+        let mut table = write_tx.open_table(def).map_err(BTreeError::other)?;
+        table.insert(key, value).map_err(BTreeError::other)?;
+        Ok(())
+      }
+    }
   }
 
   async fn remove<'a>(&'a mut self, tree: &'a str, key: &'a K) -> BTreeResult<Option<V>>
   where
     K: Ord,
   {
-    let mut table = self.open_table(tree)?;
-    let guard = table.remove(key).map_err(BTreeError::other)?;
-    Ok(guard.map(|g| g.value()))
+    let table_name = self.names.intern(tree);
+    let name = arc_str_to_static(&table_name);
+    let def: RedbNamedTableDefinition<K, V, KC, VC> = TableDefinition::new(name);
+    match &mut self.txn {
+      REDBNamedTransactionKind::Read(_) => Err(BTreeError::UnsupportedOperation),
+      REDBNamedTransactionKind::Write(write_tx) => {
+        let mut table = write_tx.open_table(def).map_err(BTreeError::other)?;
+        let guard = table.remove(key).map_err(BTreeError::other)?;
+        Ok(guard.map(|g| g.value()))
+      }
+    }
   }
 
   fn range<'a, R>(&'a self, tree: &'a str, range: R) -> impl Stream<Item = BTreeResult<(K, V)>> + 'a
@@ -124,19 +167,42 @@ where
     K: Ord,
     R: core::ops::RangeBounds<K> + MaybeSend + 'a,
   {
+    let table_name = self.names.intern(tree);
+    let name = arc_str_to_static(&table_name);
+    let def: RedbNamedTableDefinition<K, V, KC, VC> = TableDefinition::new(name);
     stream! {
-      let table = match self.open_table(tree) {
-        Ok(t) => t,
-        Err(e) => { yield Err(e); return; }
-      };
-      let range_iter = match table.range(range) {
-        Ok(r) => r,
-        Err(e) => { yield Err(BTreeError::other(e)); return; }
-      };
-      for entry in range_iter {
-        match entry {
-          Ok((k, v)) => yield Ok((k.value(), v.value())),
-          Err(e) => { yield Err(BTreeError::other(e)); return; }
+      match &self.txn {
+        REDBNamedTransactionKind::Read(read_tx) => {
+          let table = match read_tx.open_table(def) {
+            Ok(table) => table,
+            Err(e) => { yield Err(BTreeError::other(e)); return; }
+          };
+          let range_iter = match table.range(range) {
+            Ok(r) => r,
+            Err(e) => { yield Err(BTreeError::other(e)); return; }
+          };
+          for entry in range_iter {
+            match entry {
+              Ok((k, v)) => yield Ok((k.value(), v.value())),
+              Err(e) => { yield Err(BTreeError::other(e)); return; }
+            }
+          }
+        }
+        REDBNamedTransactionKind::Write(write_tx) => {
+          let table = match write_tx.open_table(def) {
+            Ok(table) => table,
+            Err(e) => { yield Err(BTreeError::other(e)); return; }
+          };
+          let range_iter = match table.range(range) {
+            Ok(r) => r,
+            Err(e) => { yield Err(BTreeError::other(e)); return; }
+          };
+          for entry in range_iter {
+            match entry {
+              Ok((k, v)) => yield Ok((k.value(), v.value())),
+              Err(e) => { yield Err(BTreeError::other(e)); return; }
+            }
+          }
         }
       }
     }
@@ -164,6 +230,7 @@ where
   VC: ValueCodec<V>,
 {
   db: Arc<Database>,
+  names: Arc<NameStore>,
   _phantom: PhantomData<(K, V, KC, VC)>,
 }
 
@@ -178,6 +245,7 @@ where
     let db = Database::create(path).map_err(BTreeError::other)?;
     Ok(Self {
       db: Arc::new(db),
+      names: Arc::new(NameStore::new()),
       _phantom: PhantomData,
     })
   }
@@ -185,6 +253,7 @@ where
   pub fn from_database(db: Database) -> Self {
     Self {
       db: Arc::new(db),
+      names: Arc::new(NameStore::new()),
       _phantom: PhantomData,
     }
   }
@@ -201,6 +270,7 @@ where
     let db = Database::create(path).map_err(BTreeError::other)?;
     Ok(Self {
       db: Arc::new(db),
+      names: Arc::new(NameStore::new()),
       _phantom: PhantomData,
     })
   }
@@ -208,6 +278,7 @@ where
   pub fn from_database_with_codecs(db: Database) -> Self {
     Self {
       db: Arc::new(db),
+      names: Arc::new(NameStore::new()),
       _phantom: PhantomData,
     }
   }
@@ -226,9 +297,9 @@ where
     &'a self,
     name: &str,
   ) -> impl core::future::Future<Output = BTreeResult<REDBBTree<K, V, KC, VC>>> + 'a {
-    let static_name = intern(name);
+    let table_name = self.names.intern(name);
     let db = Arc::clone(&self.db);
-    async move { Ok(REDBBTree::from_arc_with_codecs(db, static_name)) }
+    async move { Ok(REDBBTree::from_arc_with_codecs(db, table_name)) }
   }
 
   fn insert_tree(
@@ -236,12 +307,13 @@ where
     name: &str,
     tree: Self::Tree,
   ) -> impl core::future::Future<Output = BTreeResult<()>> + '_ {
-    let dest = intern(name);
+    let dest_table_name = self.names.intern(name);
     let db = Arc::clone(&self.db);
     async move {
       let write_tx = db.begin_write().map_err(BTreeError::other)?;
       let source_def = tree.table_definition();
-      let dest_def: RedbNamedTableDefinition<K, V, KC, VC> = TableDefinition::new(dest);
+      let dest_def: RedbNamedTableDefinition<K, V, KC, VC> =
+        TableDefinition::new(arc_str_to_static(&dest_table_name));
 
       {
         let source = write_tx.open_table(source_def).map_err(BTreeError::other)?;
@@ -262,19 +334,23 @@ where
   }
 
   fn delete_tree(&self, name: &str) -> impl core::future::Future<Output = BTreeResult<()>> + '_ {
-    let table_name = intern(name);
+    let table_name_string = name.to_string();
+    let table_name = self.names.intern(&table_name_string);
     let db = Arc::clone(&self.db);
+    let names = Arc::clone(&self.names);
     async move {
       let write_tx = db.begin_write().map_err(BTreeError::other)?;
-      let def: RedbNamedTableDefinition<K, V, KC, VC> = TableDefinition::new(table_name);
+      let def: RedbNamedTableDefinition<K, V, KC, VC> =
+        TableDefinition::new(arc_str_to_static(&table_name));
       write_tx.delete_table(def).map_err(BTreeError::other)?;
       write_tx.commit().map_err(BTreeError::other)?;
+      names.remove(&table_name_string);
       Ok(())
     }
   }
 
   async fn list_names(&self) -> Vec<String> {
-    interned_names()
+    self.names.list_names()
   }
 }
 
@@ -291,12 +367,118 @@ where
     &self,
   ) -> impl core::future::Future<Output = BTreeResult<Self::Transaction>> + '_ {
     let db = Arc::clone(&self.db);
+    let names = Arc::clone(&self.names);
     async move {
       let write_tx = db.begin_write().map_err(BTreeError::other)?;
       Ok(REDBNamedTransaction {
-        write_tx,
+        txn: REDBNamedTransactionKind::Write(write_tx),
+        names,
         _phantom: PhantomData,
       })
     }
+  }
+
+  fn begin_read_transaction(
+    &self,
+  ) -> impl core::future::Future<Output = BTreeResult<Self::Transaction>> + '_ {
+    let db = Arc::clone(&self.db);
+    let names = Arc::clone(&self.names);
+    async move {
+      let read_tx = db.begin_read().map_err(BTreeError::other)?;
+      Ok(REDBNamedTransaction {
+        txn: REDBNamedTransactionKind::Read(read_tx),
+        names,
+        _phantom: PhantomData,
+      })
+    }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use db_core::{BTreeError, block_on};
+  use futures::StreamExt;
+  use std::path::PathBuf;
+  use std::time::{SystemTime, UNIX_EPOCH};
+
+  fn temp_redb_path() -> PathBuf {
+    let suffix = SystemTime::now()
+      .duration_since(UNIX_EPOCH)
+      .expect("time went backwards")
+      .as_nanos();
+    std::env::temp_dir().join(format!("aicacia_redb_test_{suffix}.db"))
+  }
+
+  #[test]
+  fn read_transaction_is_read_only() {
+    let path = temp_redb_path();
+    let backend = REDBNamedBTree::<u64, u64>::open(&path).expect("open redb");
+
+    block_on(async {
+      let mut tx = backend.begin_transaction().await.expect("begin tx");
+      tx.insert("tree", 1, 100).await.expect("insert");
+      tx.commit().await.expect("commit");
+    });
+
+    block_on(async {
+      let mut tx = backend
+        .begin_read_transaction()
+        .await
+        .expect("begin read tx");
+      assert_eq!(tx.get("tree", &1).await.expect("get"), Some(100));
+
+      let err = tx
+        .insert("tree", 1, 200)
+        .await
+        .expect_err("write should fail");
+      assert!(matches!(err, BTreeError::UnsupportedOperation));
+
+      let stream = tx.range("tree", 0..=1);
+      futures::pin_mut!(stream);
+      let first = stream
+        .next()
+        .await
+        .expect("stream item")
+        .expect("range entry");
+      assert_eq!(first, (1, 100));
+      assert!(stream.next().await.is_none());
+    });
+
+    let _ = std::fs::remove_file(path);
+  }
+
+  #[test]
+  fn list_names_is_scoped_to_provider() {
+    let path1 = temp_redb_path();
+    let path2 = temp_redb_path();
+    let provider1 = REDBNamedBTree::<u64, u64>::open(&path1).expect("open provider1");
+    let provider2 = REDBNamedBTree::<u64, u64>::open(&path2).expect("open provider2");
+
+    block_on(async {
+      provider1.get_tree("tree1").await.expect("get tree1");
+      provider2.get_tree("tree2").await.expect("get tree2");
+
+      assert_eq!(provider1.list_names().await, vec!["tree1".to_string()]);
+      assert_eq!(provider2.list_names().await, vec!["tree2".to_string()]);
+    });
+
+    let _ = std::fs::remove_file(path1);
+    let _ = std::fs::remove_file(path2);
+  }
+
+  #[test]
+  fn delete_tree_removes_name_from_list() {
+    let path = temp_redb_path();
+    let provider = REDBNamedBTree::<u64, u64>::open(&path).expect("open redb");
+
+    block_on(async {
+      provider.get_tree("tree").await.expect("get tree");
+      assert_eq!(provider.list_names().await, vec!["tree".to_string()]);
+      provider.delete_tree("tree").await.expect("delete tree");
+      assert_eq!(provider.list_names().await, Vec::<String>::new());
+    });
+
+    let _ = std::fs::remove_file(path);
   }
 }

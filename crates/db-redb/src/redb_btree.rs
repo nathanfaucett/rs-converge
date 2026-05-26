@@ -165,6 +165,10 @@ where
   }
 }
 
+fn arc_str_to_static(name: &Arc<str>) -> &'static str {
+  unsafe { std::mem::transmute::<&str, &'static str>(&**name) }
+}
+
 #[derive(Clone)]
 pub struct REDBBTree<K, V, KC = RedbKeyCodec, VC = RedbValueCodec>
 where
@@ -174,6 +178,7 @@ where
   VC: ValueCodec<V>,
 {
   db: Arc<Database>,
+  _name: Arc<str>,
   table_definition: TableDefinition<'static, EncodedKey<K, KC>, EncodedValue<V, VC>>,
 }
 
@@ -197,15 +202,21 @@ where
 {
   pub fn open(path: impl AsRef<Path>, table_name: &'static str) -> Result<Self, BTreeError> {
     let db = Database::create(path).map_err(BTreeError::other)?;
+    let name = Arc::from(table_name);
+    let table_name = arc_str_to_static(&name);
     Ok(Self {
       db: Arc::new(db),
+      _name: name,
       table_definition: TableDefinition::new(table_name),
     })
   }
 
   pub fn from_database(db: Database, table_name: &'static str) -> Self {
+    let name = Arc::from(table_name);
+    let table_name = arc_str_to_static(&name);
     Self {
       db: Arc::new(db),
+      _name: name,
       table_definition: TableDefinition::new(table_name),
     }
   }
@@ -223,23 +234,31 @@ where
     table_name: &'static str,
   ) -> Result<Self, BTreeError> {
     let db = Database::create(path).map_err(BTreeError::other)?;
+    let name = Arc::from(table_name);
+    let table_name = arc_str_to_static(&name);
     Ok(Self {
       db: Arc::new(db),
+      _name: name,
       table_definition: TableDefinition::new(table_name),
     })
   }
 
   pub fn from_database_with_codecs(db: Database, table_name: &'static str) -> Self {
+    let name = Arc::from(table_name);
+    let table_name = arc_str_to_static(&name);
     Self {
       db: Arc::new(db),
+      _name: name,
       table_definition: TableDefinition::new(table_name),
     }
   }
 
-  pub(crate) fn from_arc_with_codecs(db: Arc<Database>, table_name: &'static str) -> Self {
+  pub(crate) fn from_arc_with_codecs(db: Arc<Database>, table_name: Arc<str>) -> Self {
+    let static_name = arc_str_to_static(&table_name);
     Self {
       db,
-      table_definition: TableDefinition::new(table_name),
+      _name: table_name,
+      table_definition: TableDefinition::new(static_name),
     }
   }
 
