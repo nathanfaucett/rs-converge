@@ -14,9 +14,7 @@ use alloc::collections::BTreeMap;
 #[cfg(feature = "std")]
 use std::collections::BTreeMap;
 
-use db_types::TableSchema;
-
-use crate::{EngineRow, EngineValue, FromRow, RowDeserializeError};
+use crate::{EngineRow, EngineValue, FromRow, RowDeserializeError, TableSchema};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(

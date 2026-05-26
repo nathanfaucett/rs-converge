@@ -16,6 +16,8 @@ use alloc::sync::Arc;
 use db_automerge::AutomergeFormatAdapter;
 #[cfg(feature = "redb")]
 use db_engine::EngineKey;
+#[cfg(feature = "redb")]
+use db_engine::EngineKeyCodec;
 use db_engine::{
   EngineDatabase, EngineQuery, EngineResult, FromRow, IndexSchema, Subscriber, SubscriptionId,
   SyncScope, TableSchema,
@@ -23,8 +25,6 @@ use db_engine::{
 use db_in_memory::InMemoryNamedBTree;
 #[cfg(feature = "redb")]
 use db_redb::REDBNamedBTree;
-#[cfg(feature = "redb")]
-use db_types::EngineKeyCodec;
 #[cfg(feature = "redb")]
 use std::path::Path;
 #[cfg(feature = "std")]

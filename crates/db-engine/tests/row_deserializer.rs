@@ -1,4 +1,4 @@
-use db_types::{ColumnSchema, EngineType, EngineValue, TableSchema};
+use db_engine::{ColumnSchema, EngineType, EngineValue, TableSchema};
 use serde::Deserialize;
 
 use db_engine::{EngineResult, FromRow, ResultColumn, RowDeserializeError};

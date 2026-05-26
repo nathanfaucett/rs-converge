@@ -3,9 +3,7 @@ use alloc::string::ToString;
 
 use serde::de::{DeserializeSeed, MapAccess, Visitor};
 
-use db_types::TableSchema;
-
-use crate::{EngineRow, EngineValue, query::ResultColumn};
+use crate::{EngineRow, EngineValue, TableSchema, query::ResultColumn};
 
 use super::row_deserialize_error::RowDeserializeError;
 

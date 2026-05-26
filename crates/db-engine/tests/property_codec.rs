@@ -1,9 +1,8 @@
 use db_core::KeyCodec;
 use proptest::prelude::*;
 
-use db_engine::{EngineKey, EngineValue};
-use db_types::key_encoding::{DefaultEncoding, KeyEncoding};
-use db_types::{EngineKeyCodec, EngineRowCodec};
+use db_engine::key_encoding::{DefaultEncoding, KeyEncoding};
+use db_engine::{EngineKey, EngineKeyCodec, EngineRowCodec, EngineValue};
 
 /// Use the fully-qualified trait methods for encoding/decoding to avoid
 /// needing to import the trait into the test scope.

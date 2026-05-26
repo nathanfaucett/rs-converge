@@ -1,19 +1,19 @@
 use super::EngineNamedTreeTransaction;
+use crate::persistence::{
+  INDEX_SCHEMA_TREE, TABLE_SCHEMA_TREE, decode_index_schema_rows, decode_table_schema_rows,
+  encode_index_schema, encode_table_schema, index_schema_entry_key, index_tree, row_tree,
+  table_schema_entry_key,
+};
 use crate::{EngineError, EngineKey, EngineRow, IndexSchema, PrimaryKey, TableSchema};
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use async_stream::stream;
 use core::future::Future;
-use db_types::persistence::{
-  INDEX_SCHEMA_TREE, TABLE_SCHEMA_TREE, decode_index_schema_rows, decode_table_schema_rows,
-  encode_index_schema, encode_table_schema, index_schema_entry_key, index_tree, row_tree,
-  table_schema_entry_key,
-};
 use futures::{Stream, StreamExt, pin_mut};
 
 use super::named_tree_backend::{
   collect_tree_rows, decode_row_bytes, encode_row_bytes, get_bytes, insert_bytes,
-  primary_key_from_engine_key, range_bytes, remove_bytes, schema_decode_error,
+  primary_key_from_engine_key, range_bytes, remove_bytes,
 };
 
 pub struct NamedTreeEngineTransaction<T>
@@ -106,8 +106,8 @@ where
     async move {
       let table_rows = collect_tree_rows(&self.inner, TABLE_SCHEMA_TREE).await?;
       let index_rows = collect_tree_rows(&self.inner, INDEX_SCHEMA_TREE).await?;
-      let tables = decode_table_schema_rows(table_rows).map_err(schema_decode_error)?;
-      let indexes = decode_index_schema_rows(index_rows).map_err(schema_decode_error)?;
+      let tables = decode_table_schema_rows(table_rows).map_err(EngineError::from)?;
+      let indexes = decode_index_schema_rows(index_rows).map_err(EngineError::from)?;
       Ok((tables, indexes))
     }
   }

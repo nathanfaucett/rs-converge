@@ -14,14 +14,14 @@ use db_automerge::{AutomergeEntry, DocumentChangeKey};
 #[cfg(all(feature = "automerge", feature = "redb"))]
 use db_core::BufferSink;
 use db_core::{MaybeSend, MaybeSync, NamedBTreeMap};
+#[cfg(feature = "redb")]
+use db_engine::EngineKeyCodec;
 use db_engine::{
   EngineDatabase, EngineKey, EngineNamedTreeBackend, EngineValue, NamedTreeEngineStore,
 };
 use db_in_memory::InMemoryNamedBTree;
 #[cfg(feature = "redb")]
 use db_redb::REDBNamedBTree;
-#[cfg(feature = "redb")]
-use db_types::EngineKeyCodec;
 
 /// Public facade error type.
 #[derive(Debug)]

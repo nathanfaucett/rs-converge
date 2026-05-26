@@ -113,18 +113,19 @@ where
     let indexes = self.catalog.indexes_for_table(table_name);
     let event = ChangeEvent::RowInserted {
       table: table_name.to_string(),
-      pk,
+      pk: pk.clone(),
       row: row.clone(),
     };
 
     let tx = self.transaction().await?;
     if tx.get_table_row(table_name, &pk).await?.is_some() {
-      return Err(EngineError::DuplicatePrimaryKey(pk));
+      return Err(EngineError::DuplicatePrimaryKey(pk.clone()));
     }
 
     ensure_indexes_unique(tx, &indexes, &row, &pk).await?;
 
-    tx.insert_table_row(table_name, pk, row.clone()).await?;
+    tx.insert_table_row(table_name, pk.clone(), row.clone())
+      .await?;
 
     insert_all_index_entries(tx, &indexes, &row, &pk).await?;
 
@@ -286,7 +287,7 @@ where
       delete_row(tx, table_name, &old_pk, &old_row, indexes).await?;
       ensure_indexes_unique(tx, indexes, &updated_row, &new_pk).await?;
 
-      tx.insert_table_row(table_name, new_pk, updated_row.clone())
+      tx.insert_table_row(table_name, new_pk.clone(), updated_row.clone())
         .await?;
       insert_all_index_entries(tx, indexes, &updated_row, &new_pk).await?;
 
@@ -319,7 +320,7 @@ where
     S::Transaction: EngineStoreTransaction,
   {
     if new_pk != old_pk && tx.get_table_row(table_name, new_pk).await?.is_some() {
-      return Err(EngineError::DuplicatePrimaryKey(*new_pk));
+      return Err(EngineError::DuplicatePrimaryKey(new_pk.clone()));
     }
     Ok(())
   }
@@ -570,8 +571,8 @@ where
           "UPDATE JOIN matched target row more than once".into(),
         ));
       }
-      seen.insert(pk);
-      matched.insert(pk, (base_row.clone(), partial));
+      seen.insert(pk.clone());
+      matched.insert(pk.clone(), (base_row.clone(), partial));
     }
 
     Ok(

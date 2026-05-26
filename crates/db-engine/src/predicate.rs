@@ -1,11 +1,11 @@
 use alloc::{string::String, vec::Vec};
 use hashbrown::{HashMap, HashSet};
 
+use crate::key_encoding::{DefaultEncoding, KeyEncoding};
 use crate::{
   EngineKey, EngineQuery, EngineRow, EngineValue, IndexSchema,
   query::{HavingPredicate, QualifiedColumn, QualifiedOperand, QualifiedPredicate, RefOrAgg},
 };
-use db_types::key_encoding::{DefaultEncoding, KeyEncoding};
 
 pub trait RowContext {
   fn get_value(&self, table: &str, col_index: usize) -> Option<&EngineValue>;

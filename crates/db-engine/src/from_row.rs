@@ -1,7 +1,5 @@
-use db_types::TableSchema;
-
 use crate::{
-  EngineRow,
+  EngineRow, TableSchema,
   query::ResultColumn,
   row_deserialize_error::RowDeserializeError,
   row_deserializer::{deserialize_named_row, deserialize_row},

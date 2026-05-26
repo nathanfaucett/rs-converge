@@ -5,7 +5,7 @@ use alloc::string::{String, ToString};
 #[cfg(feature = "std")]
 use std::string::String;
 
-use db_types::EngineValue;
+use crate::EngineValue;
 
 /// Validates that a string is valid JSON.
 pub fn json_valid(json_str: &str) -> bool {

@@ -2,12 +2,12 @@ use alloc::{string::String, vec::Vec};
 use core::cmp::Ordering;
 use hashbrown::HashMap;
 
+use crate::key_encoding::{DefaultEncoding, KeyEncoding};
 use crate::{
   EngineError, EngineKey, EngineRow, EngineValue,
   predicate::{GroupRowContext, eval_having_predicate},
   query::{Aggregate, HavingPredicate, OrderBy, QualifiedColumn, SortDirection},
 };
-use db_types::key_encoding::{DefaultEncoding, KeyEncoding};
 
 pub type PartialRow = HashMap<String, Option<EngineRow>>;
 

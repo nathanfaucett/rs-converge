@@ -1,14 +1,13 @@
 use super::EngineNamedTreeTransaction;
+use crate::key_encoding::{DefaultEncoding, KeyEncoding, RowEncoding};
+use crate::{EngineError, EngineKey, EngineRow, EngineValue, PrimaryKey};
 use async_stream::stream;
-use db_types::key_encoding::{DefaultEncoding, KeyEncoding, RowEncoding};
 use futures::{Stream, StreamExt, pin_mut};
 
 #[cfg(not(feature = "std"))]
 use alloc::string::{String, ToString};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-
-use crate::{EngineError, EngineKey, EngineRow, PrimaryKey};
 
 /// Raw named-tree storage access for engine-backed stores.
 ///
@@ -84,15 +83,11 @@ pub(super) fn primary_key_from_engine_key(key: &EngineKey) -> Result<PrimaryKey,
   }
 
   match &values[0] {
-    db_types::EngineValue::Uuid(bytes) => Ok(PrimaryKey::new(*bytes)),
+    EngineValue::Uuid(bytes) => Ok(PrimaryKey::new(*bytes)),
     _ => Err(EngineError::SchemaMismatch(
       "row primary key must be UUID".into(),
     )),
   }
-}
-
-pub(super) fn schema_decode_error(error: db_core::DecodeError) -> EngineError {
-  EngineError::SchemaMismatch(error.to_string())
 }
 
 pub(super) async fn collect_tree_rows<T>(
@@ -116,7 +111,7 @@ where
 #[cfg(test)]
 mod tests {
   use super::*;
-  use db_types::EngineValue;
+  use crate::EngineValue;
 
   fn uuid_bytes() -> [u8; 16] {
     [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]

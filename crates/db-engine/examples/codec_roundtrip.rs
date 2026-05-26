@@ -1,6 +1,5 @@
 // Codec roundtrip example: encode an engine row and decode it back.
-use db_engine::EngineValue;
-use db_types::EngineRowCodec;
+use db_engine::{EngineRowCodec, EngineValue};
 
 fn main() {
   let value = vec![EngineValue::Integer(1), EngineValue::Text("Alice".into())];

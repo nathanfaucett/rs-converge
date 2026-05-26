@@ -1,8 +1,7 @@
 //! Integration tests for JSON type codec and operations roundtrip.
 
-use db_engine::{json_extract, json_merge, json_valid};
-use db_types::EngineValue;
-use db_types::key_encoding::KeyEncoding;
+use db_engine::key_encoding::KeyEncoding;
+use db_engine::{EngineValue, json_extract, json_merge, json_valid};
 
 #[test]
 fn test_json_type_codec_roundtrip() {
@@ -10,7 +9,7 @@ fn test_json_type_codec_roundtrip() {
   let value = EngineValue::Json(json_str.to_string());
 
   // Encode
-  use db_types::key_encoding::DefaultEncoding;
+  use db_engine::key_encoding::DefaultEncoding;
   let encoded = DefaultEncoding::encode_values(std::slice::from_ref(&value));
 
   // Decode
@@ -22,7 +21,7 @@ fn test_json_type_codec_roundtrip() {
 
 #[test]
 fn test_json_null_value_codec_roundtrip() {
-  use db_types::key_encoding::DefaultEncoding;
+  use db_engine::key_encoding::DefaultEncoding;
 
   let values = vec![
     EngineValue::Json(r#"{"x": null}"#.to_string()),
@@ -37,7 +36,7 @@ fn test_json_null_value_codec_roundtrip() {
 
 #[test]
 fn test_json_mixed_types_codec_roundtrip() {
-  use db_types::key_encoding::DefaultEncoding;
+  use db_engine::key_encoding::DefaultEncoding;
 
   let values = vec![
     EngineValue::Integer(42),
@@ -114,7 +113,7 @@ fn test_json_extract_array_elements() {
 
 #[test]
 fn test_json_roundtrip_preserves_structure() {
-  use db_types::key_encoding::DefaultEncoding;
+  use db_engine::key_encoding::DefaultEncoding;
 
   let complex_json = r#"{
     "users": [

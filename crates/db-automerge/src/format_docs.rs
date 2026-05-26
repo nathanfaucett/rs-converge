@@ -6,10 +6,9 @@
 use automerge::transaction::Transactable;
 use automerge::{AutoCommit, ObjType, ReadDoc, ScalarValue, Value};
 use db_core::{BTreeError, decode_with_version};
-use db_engine::EngineKey;
-use db_types::codec::{decode_store_key, encode_store_key};
-use db_types::key_encoding::{DefaultEncoding, RowEncoding};
-use db_types::{EngineValue, StoreKey};
+use db_engine::key_encoding::{DefaultEncoding, RowEncoding};
+use db_engine::{EngineKey, EngineValue, StoreKey};
+use db_engine::{decode_store_key, encode_store_key};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 

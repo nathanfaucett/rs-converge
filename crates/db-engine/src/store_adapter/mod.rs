@@ -26,8 +26,8 @@ mod tests {
   };
   #[cfg(not(feature = "std"))]
   use alloc::vec::Vec;
-  use db_core::block_on;
   use db_in_memory::InMemoryNamedBTree;
+  use futures::executor::block_on;
 
   fn sample_table_schema() -> TableSchema {
     TableSchema {

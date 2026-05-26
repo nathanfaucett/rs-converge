@@ -1,7 +1,7 @@
 use db_core::block_on;
+use db_engine::ColumnSchema;
 use db_engine::{EngineQuery, EngineType, EngineValue, TableSchema};
 use db_facade::{Database, InMemoryEngineStore, ReadTransaction};
-use db_types::schema::ColumnSchema;
 
 #[test]
 fn facade_read_transaction_supports_select_only() {
