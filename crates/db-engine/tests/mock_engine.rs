@@ -4,12 +4,12 @@ use futures::executor::block_on;
 
 use db_engine::{
   Aggregate, ColumnSchema, EngineDatabase, EngineKey, EngineQuery, EngineResult, EngineType,
-  EngineValue, HavingPredicate, NamedTreeEngineStore, OrderBy, QualifiedColumn, QualifiedOperand,
-  QualifiedPredicate, RefOrAgg, SelectOptions, SortDirection, TableSchema,
+  EngineValue, HavingPredicate, OrderBy, QualifiedColumn, QualifiedOperand, QualifiedPredicate,
+  RefOrAgg, SelectOptions, SortDirection, TableSchema,
 };
 use db_in_memory::InMemoryNamedBTree;
 
-type TestDb = EngineDatabase<NamedTreeEngineStore<InMemoryNamedBTree<EngineKey, Vec<u8>>>>;
+type TestDb = EngineDatabase<InMemoryNamedBTree<EngineKey, Vec<u8>>>;
 
 fn uuid_value(id: u128) -> EngineValue {
   EngineValue::Uuid(id.to_be_bytes())
@@ -17,7 +17,7 @@ fn uuid_value(id: u128) -> EngineValue {
 
 fn make_db_with_items() -> TestDb {
   let store: InMemoryNamedBTree<EngineKey, Vec<u8>> = InMemoryNamedBTree::new();
-  let mut db = EngineDatabase::new(NamedTreeEngineStore::new(store));
+  let mut db = EngineDatabase::new(store);
   block_on(async {
     db.register_table(
       TableSchema {
@@ -106,7 +106,7 @@ macro_rules! select_items_test {
 fn engine_works_with_mock_btree() {
   block_on(async {
     let store: InMemoryNamedBTree<_, _> = InMemoryNamedBTree::new();
-    let mut db = EngineDatabase::new(NamedTreeEngineStore::new(store));
+    let mut db = EngineDatabase::new(store);
 
     let schema = TableSchema {
       name: "items".into(),

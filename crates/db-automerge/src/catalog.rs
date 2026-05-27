@@ -1,6 +1,6 @@
 use crate::automerge_btree::{AutomergeEntry, DocumentChangeKey, DocumentType};
 use db_core::{BTreeError, NamedBTreeMap};
-use db_engine::{EngineNamedTreeBackend, EngineNamedTreeTransaction};
+use db_engine::{EngineStoreBackend, EngineStoreTransaction};
 use futures::{StreamExt, pin_mut};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -37,7 +37,7 @@ pub fn tree_catalog_key(tree: &str) -> DocumentChangeKey {
 pub async fn ensure_tree_initialized<L>(layout: &L, tree: &str) -> Result<(), BTreeError>
 where
   L: NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
-    + EngineNamedTreeBackend<DocumentChangeKey, AutomergeEntry>
+    + EngineStoreBackend<DocumentChangeKey, AutomergeEntry>
     + Clone
     + Send
     + Sync
@@ -51,7 +51,7 @@ where
 pub async fn register_tree_name<L>(layout: &L, tree: &str) -> Result<(), BTreeError>
 where
   L: NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
-    + EngineNamedTreeBackend<DocumentChangeKey, AutomergeEntry>
+    + EngineStoreBackend<DocumentChangeKey, AutomergeEntry>
     + Clone
     + Send
     + Sync
@@ -70,7 +70,7 @@ where
 pub async fn known_tree_names<L>(layout: &L) -> Vec<String>
 where
   L: NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
-    + EngineNamedTreeBackend<DocumentChangeKey, AutomergeEntry>
+    + EngineStoreBackend<DocumentChangeKey, AutomergeEntry>
     + Clone
     + Send
     + Sync

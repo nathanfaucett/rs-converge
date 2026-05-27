@@ -1,4 +1,4 @@
-use crate::store_adapter::EngineStore;
+use crate::store_backend::EngineStoreBackend;
 use alloc::{
   string::{String, ToString},
   sync::Arc,
@@ -24,7 +24,7 @@ pub(crate) struct EngineKernel<S> {
 
 impl<S> EngineKernel<S>
 where
-  S: EngineStore,
+  S: EngineStoreBackend,
 {
   pub(super) fn dedupe_result_column_names(columns: &mut [ResultColumn]) {
     use hashbrown::HashMap;

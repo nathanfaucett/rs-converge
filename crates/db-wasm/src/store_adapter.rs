@@ -2,7 +2,7 @@ use async_stream::stream;
 use core::fmt;
 use core::ops::{Bound, RangeBounds};
 use db_core::{BTree, BTreeError, BTreeResult, MaybeSend, NamedBTreeMap};
-use db_engine::{EngineKey, EngineNamedTreeBackend, EngineNamedTreeTransaction};
+use db_engine::{EngineKey, EngineStoreBackend, EngineStoreTransaction};
 use futures::Stream;
 use futures::StreamExt;
 use js_sys::{Function, JSON, Promise, Reflect};
@@ -529,7 +529,7 @@ impl NamedBTreeMap<EngineKey, Vec<u8>> for StoreAdapterCallbacks {
   ) -> impl core::future::Future<Output = BTreeResult<()>> + '_ {
     let name = name.to_string();
     async move {
-      let mut tx = EngineNamedTreeBackend::begin_transaction(&tree.adapter).await?;
+      let mut tx = EngineStoreBackend::begin_transaction(&tree.adapter).await?;
       let source = tree.tree;
       let range_stream = tx.range(&source, ..);
       pin_mut!(range_stream);
@@ -561,7 +561,7 @@ impl NamedBTreeMap<EngineKey, Vec<u8>> for StoreAdapterCallbacks {
   }
 }
 
-impl EngineNamedTreeBackend<EngineKey, Vec<u8>> for StoreAdapterCallbacks {
+impl EngineStoreBackend<EngineKey, Vec<u8>> for StoreAdapterCallbacks {
   type Transaction = StoreAdapterTransaction;
 
   async fn begin_transaction(&self) -> BTreeResult<Self::Transaction> {
@@ -573,7 +573,7 @@ impl EngineNamedTreeBackend<EngineKey, Vec<u8>> for StoreAdapterCallbacks {
   }
 }
 
-impl EngineNamedTreeTransaction<EngineKey, Vec<u8>> for StoreAdapterTransaction {
+impl EngineStoreTransaction<EngineKey, Vec<u8>> for StoreAdapterTransaction {
   fn get<'a>(
     &'a mut self,
     tree: &'a str,
@@ -753,14 +753,14 @@ impl db_core::BTreeTransaction<EngineKey, Vec<u8>> for StoreAdapterTransaction {
   where
     Self: Sized,
   {
-    <Self as EngineNamedTreeTransaction<EngineKey, Vec<u8>>>::commit(self)
+    <Self as EngineStoreTransaction<EngineKey, Vec<u8>>>::commit(self)
   }
 
   fn rollback(self) -> impl core::future::Future<Output = BTreeResult<()>>
   where
     Self: Sized,
   {
-    <Self as EngineNamedTreeTransaction<EngineKey, Vec<u8>>>::rollback(self)
+    <Self as EngineStoreTransaction<EngineKey, Vec<u8>>>::rollback(self)
   }
 }
 

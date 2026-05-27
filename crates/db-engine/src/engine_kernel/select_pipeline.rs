@@ -4,7 +4,7 @@ use core::future::Future;
 use hashbrown::{HashMap, HashSet};
 
 use crate::predicate::PredicateEvaluator;
-use crate::store_adapter::EngineStore;
+use crate::store_backend::EngineStoreBackend;
 use crate::{
   EngineError, EngineRow, EngineValue,
   query::{EngineQuery, EngineResult, QualifiedColumn, QualifiedPredicate, SelectOptions},
@@ -16,12 +16,12 @@ use super::join_builder::{
 };
 
 pub(crate) async fn materialize_joined_rows<S>(
-  tx: &mut S::Transaction,
+  tx: &mut super::NamedTreeEngineTransaction<S>,
   base_table: &str,
   options: &SelectOptions,
 ) -> Result<JoinedRowStates, EngineError>
 where
-  S: EngineStore,
+  S: EngineStoreBackend,
 {
   let tables = collect_tables(base_table, &[], &options.joins);
   let table_rows_map = collect_table_rows_map::<S>(tx, &tables).await?;

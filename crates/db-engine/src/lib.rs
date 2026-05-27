@@ -15,14 +15,11 @@ mod row_deserialize_error;
 mod row_deserializer;
 mod schema;
 mod schema_resolver;
-mod store_adapter;
+mod store_backend;
 mod subscriptions;
 mod types;
 
-pub use store_adapter::{
-  BackendCapability, EngineNamedTreeBackend, EngineNamedTreeTransaction, EngineStore,
-  EngineStoreTransaction, NamedTreeEngineStore, TransactionContract,
-};
+pub use store_backend::{EngineStoreBackend, EngineStoreTransaction};
 
 pub use change_event::{ChangeEvent, ChangeListener};
 pub use engine::{EngineDatabase, EngineReadTransaction, EngineTransaction};

@@ -1,7 +1,7 @@
 use alloc::vec::Vec;
 use core::future::Future;
 
-use crate::store_adapter::EngineStore;
+use crate::store_backend::EngineStoreBackend;
 use crate::{
   EngineError, EngineResult,
   query::{EngineQuery, QualifiedColumn, QualifiedPredicate, ResultColumn, SelectOptions},
@@ -19,7 +19,7 @@ pub(crate) enum SelectStageOutput {
 }
 
 pub(crate) async fn execute_select_pipeline<S, F, Fut>(
-  tx: &mut S::Transaction,
+  tx: &mut super::NamedTreeEngineTransaction<S>,
   base_table: &str,
   projection: &[QualifiedColumn],
   predicate: Option<QualifiedPredicate>,
@@ -28,7 +28,7 @@ pub(crate) async fn execute_select_pipeline<S, F, Fut>(
   run_subquery: F,
 ) -> Result<SelectStageOutput, EngineError>
 where
-  S: EngineStore,
+  S: EngineStoreBackend,
   F: Fn(EngineQuery) -> Fut,
   Fut: Future<Output = Result<EngineResult, EngineError>>,
 {

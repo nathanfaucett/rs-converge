@@ -18,7 +18,7 @@ fn uuid_value(id: u128) -> EngineValue {
 
 fn make_test_db() -> TestDb {
   let store: InMemoryNamedBTree<db_engine::EngineKey, Vec<u8>> = InMemoryNamedBTree::new();
-  EngineDatabase::new(NamedTreeEngineStore::new(store))
+  EngineDatabase::new(store)
 }
 
 #[derive(Clone)]
@@ -58,7 +58,7 @@ fn transaction_contract_defaults_to_multi_tree_atomicity() {
 fn invalid_store_contract_fails_checked_new() {
   block_on(async {
     let store = InvalidContractStore {
-      inner: NamedTreeEngineStore::new(InMemoryNamedBTree::new()),
+      inner: InMemoryNamedBTree::new(),
     };
 
     let result = EngineDatabase::new_checked(store);
@@ -70,7 +70,7 @@ fn invalid_store_contract_fails_checked_new() {
 fn invalid_store_contract_fails_open() {
   block_on(async {
     let store = InvalidContractStore {
-      inner: NamedTreeEngineStore::new(InMemoryNamedBTree::new()),
+      inner: InMemoryNamedBTree::new(),
     };
 
     let result = EngineDatabase::open(store).await;

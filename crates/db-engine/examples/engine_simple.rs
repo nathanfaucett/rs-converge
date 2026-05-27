@@ -4,15 +4,15 @@
 use futures::executor::block_on;
 
 use db_engine::{
-  ColumnSchema, EngineDatabase, EngineQuery, EngineType, EngineValue, NamedTreeEngineStore,
-  QualifiedColumn, QualifiedOperand, QualifiedPredicate, TableSchema,
+  ColumnSchema, EngineDatabase, EngineQuery, EngineType, EngineValue, QualifiedColumn,
+  QualifiedOperand, QualifiedPredicate, TableSchema,
 };
 use db_in_memory::InMemoryNamedBTree;
 
 fn main() {
   block_on(async {
     let store: InMemoryNamedBTree<_, _> = InMemoryNamedBTree::new();
-    let mut db = EngineDatabase::new(NamedTreeEngineStore::new(store));
+    let mut db = EngineDatabase::new(store);
 
     let schema = TableSchema {
       name: "items".into(),

@@ -16,7 +16,7 @@ use db_core::BufferSink;
 use db_core::{MaybeSend, MaybeSync, NamedBTreeMap};
 #[cfg(feature = "redb")]
 use db_engine::EngineKeyCodec;
-use db_engine::{EngineDatabase, EngineKey, EngineValue, NamedTreeEngineStore};
+use db_engine::{EngineDatabase, EngineKey, EngineStoreBackend, EngineValue};
 use db_in_memory::InMemoryNamedBTree;
 #[cfg(feature = "redb")]
 use db_redb::REDBNamedBTree;
@@ -72,7 +72,7 @@ pub type RedbAutomergeStore = AutomergeFormatAdapter<RedbAutomergeLayoutBackend>
 pub type InMemoryAutomergeStore = AutomergeFormatAdapter<InMemoryAutomergeLayoutBackend>;
 
 pub trait FacadeStore: Clone + MaybeSend + MaybeSync + 'static {
-  type EngineStore: db_engine::EngineStore;
+  type EngineStore: db_engine::EngineStoreBackend;
 
   fn into_engine_store(self) -> Self::EngineStore;
 }
@@ -81,10 +81,10 @@ impl<T> FacadeStore for T
 where
   T: Clone + NamedBTreeMap<EngineKey, Vec<u8>> + MaybeSend + MaybeSync + 'static,
 {
-  type EngineStore = NamedTreeEngineStore<Self>;
+  type EngineStore = Self;
 
   fn into_engine_store(self) -> Self::EngineStore {
-    NamedTreeEngineStore::new(self)
+    self
   }
 }
 

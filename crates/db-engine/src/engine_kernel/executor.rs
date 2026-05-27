@@ -5,7 +5,7 @@ use super::join_builder::{
 };
 use super::transaction_lifecycle::TransactionLifecycle;
 use crate::predicate::{EvalContext, PredicateEvaluator};
-use crate::store_adapter::{EngineStore, EngineStoreTransaction, collect_table_rows};
+use crate::store_backend::{EngineStoreBackend, collect_table_rows};
 use crate::{
   ChangeEvent, ChangeListenerRegistry, EngineError, EngineKey, EngineRow, EngineValue, IndexSchema,
   PrimaryKey, QualifiedColumn, TableSchema, query::JoinClause, query::QualifiedPredicate,
@@ -37,14 +37,14 @@ fn engine_value_to_f64(value: &EngineValue, op: &str) -> Result<f64, EngineError
   }
 }
 
-async fn ensure_indexes_unique<TX>(
-  tx: &mut TX,
+async fn ensure_indexes_unique<S>(
+  tx: &mut super::NamedTreeEngineTransaction<S>,
   indexes: &[IndexSchema],
   row: &EngineRow,
   row_pk: &PrimaryKey,
 ) -> Result<(), EngineError>
 where
-  TX: crate::store_adapter::EngineStoreTransaction,
+  S: EngineStoreBackend,
 {
   for index in indexes.iter().filter(|index| index.unique) {
     let index_key = index.key_for(row)?;
@@ -58,14 +58,14 @@ where
   Ok(())
 }
 
-async fn insert_all_index_entries<TX>(
-  tx: &mut TX,
+async fn insert_all_index_entries<S>(
+  tx: &mut super::NamedTreeEngineTransaction<S>,
   indexes: &[IndexSchema],
   row: &EngineRow,
   primary_key: &PrimaryKey,
 ) -> Result<(), EngineError>
 where
-  TX: crate::store_adapter::EngineStoreTransaction,
+  S: EngineStoreBackend,
 {
   for index in indexes {
     let index_key = index.key_for(row)?;
@@ -75,14 +75,14 @@ where
   Ok(())
 }
 
-async fn find_conflicting_index_entry<TX>(
-  tx: &mut TX,
+async fn find_conflicting_index_entry<S>(
+  tx: &mut super::NamedTreeEngineTransaction<S>,
   index: &IndexSchema,
   index_key: &EngineKey,
   row_pk: &PrimaryKey,
 ) -> Result<Option<PrimaryKey>, EngineError>
 where
-  TX: crate::store_adapter::EngineStoreTransaction,
+  S: EngineStoreBackend,
 {
   let stream = tx.scan_index_entries(&index.name);
   pin_mut!(stream);
@@ -100,15 +100,15 @@ where
   Ok(None)
 }
 
-async fn delete_row<TX>(
-  tx: &mut TX,
+async fn delete_row<S>(
+  tx: &mut super::NamedTreeEngineTransaction<S>,
   table_name: &str,
   primary_key: &PrimaryKey,
   row: &EngineRow,
   indexes: &[IndexSchema],
 ) -> Result<(), EngineError>
 where
-  TX: crate::store_adapter::EngineStoreTransaction,
+  S: EngineStoreBackend,
 {
   for index in indexes {
     let index_key = index.key_for(row)?;
@@ -120,28 +120,27 @@ where
   Ok(())
 }
 
-#[derive(Debug)]
 pub(crate) struct EngineWriteTxn<'db, S>
 where
-  S: EngineStore,
-  S::Transaction: EngineStoreTransaction,
+  S: EngineStoreBackend,
 {
   pub(crate) store: &'db S,
   pub(crate) catalog: &'db EngineCatalog,
-  pub(crate) lifecycle: TransactionLifecycle<S::Transaction>,
+  pub(crate) lifecycle: TransactionLifecycle<super::NamedTreeEngineTransaction<S>>,
   pub(crate) change_listener_registry: Arc<ChangeListenerRegistry>,
   pub(crate) pending_events: Vec<ChangeEvent>,
 }
 
 impl<'db, S> EngineWriteTxn<'db, S>
 where
-  S: EngineStore,
-  S::Transaction: EngineStoreTransaction,
+  S: EngineStoreBackend,
 {
-  pub(crate) async fn transaction(&mut self) -> Result<&mut S::Transaction, EngineError> {
+  pub(crate) async fn transaction(
+    &mut self,
+  ) -> Result<&mut super::NamedTreeEngineTransaction<S>, EngineError> {
     self
       .lifecycle
-      .transaction(|| self.store.engine_transaction())
+      .transaction(|| async { Ok(super::NamedTreeEngineTransaction::new(self.store.clone())) })
       .await
   }
 
@@ -266,9 +265,16 @@ where
   async fn prepare_update_context(
     &mut self,
     table_name: &str,
-  ) -> Result<(TableSchema, Vec<IndexSchema>, &mut S::Transaction), EngineError>
+  ) -> Result<
+    (
+      TableSchema,
+      Vec<IndexSchema>,
+      &mut super::NamedTreeEngineTransaction<S>,
+    ),
+    EngineError,
+  >
   where
-    S::Transaction: EngineStoreTransaction,
+    S: EngineStoreBackend,
   {
     let table = self.catalog.table(table_name)?.clone();
     let indexes = self.catalog.indexes_for_table(table_name);
@@ -277,7 +283,7 @@ where
   }
 
   async fn collect_update_rows(
-    tx: &mut S::Transaction,
+    tx: &mut super::NamedTreeEngineTransaction<S>,
     table_name: &str,
     predicate: Option<QualifiedPredicate>,
     joins: &[JoinClause],
@@ -285,7 +291,7 @@ where
     table: &TableSchema,
   ) -> Result<Vec<(PrimaryKey, EngineRow, Option<JoinedRowState>)>, EngineError>
   where
-    S::Transaction: EngineStoreTransaction,
+    S: EngineStoreBackend,
   {
     if joins.is_empty() && from_tables.is_empty() {
       Ok(
@@ -309,7 +315,7 @@ where
   }
 
   async fn process_update_rows(
-    tx: &mut S::Transaction,
+    tx: &mut super::NamedTreeEngineTransaction<S>,
     table_name: &str,
     table: &TableSchema,
     indexes: &[IndexSchema],
@@ -365,13 +371,13 @@ where
   }
 
   async fn ensure_update_primary_key_available(
-    tx: &mut S::Transaction,
+    tx: &mut super::NamedTreeEngineTransaction<S>,
     table_name: &str,
     new_pk: &PrimaryKey,
     old_pk: &PrimaryKey,
   ) -> Result<(), EngineError>
   where
-    S::Transaction: EngineStoreTransaction,
+    S: EngineStoreBackend,
   {
     if new_pk != old_pk && tx.get_table_row(table_name, new_pk).await?.is_some() {
       return Err(EngineError::DuplicatePrimaryKey(new_pk.clone()));
@@ -586,11 +592,10 @@ impl UpdateValueExpr {
 
 impl<'db, S> EngineWriteTxn<'db, S>
 where
-  S: EngineStore,
-  S::Transaction: EngineStoreTransaction,
+  S: EngineStoreBackend,
 {
   async fn collect_join_update_rows(
-    tx: &mut S::Transaction,
+    tx: &mut super::NamedTreeEngineTransaction<S>,
     table: &crate::TableSchema,
     table_name: &str,
     joins: &[JoinClause],

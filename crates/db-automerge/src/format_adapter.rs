@@ -4,7 +4,7 @@ use async_stream::stream;
 use db_core::{
   BTree, BTreeError, BTreeReadExecutor, BTreeTransaction, BTreeWriteExecutor, NamedBTreeMap,
 };
-use db_engine::{EngineKey, EngineNamedTreeBackend, EngineNamedTreeTransaction};
+use db_engine::{EngineKey, EngineStoreBackend, EngineStoreTransaction};
 use futures::{StreamExt, pin_mut};
 use std::collections::BTreeMap;
 use uuid::Uuid;
@@ -22,7 +22,7 @@ use crate::store_adapter::AutomergeEngineStore;
 pub struct AutomergeFormatAdapter<P>
 where
   P: NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
-    + EngineNamedTreeBackend<DocumentChangeKey, AutomergeEntry>
+    + EngineStoreBackend<DocumentChangeKey, AutomergeEntry>
     + Clone
     + Send
     + Sync
@@ -35,7 +35,7 @@ where
 impl<P> AutomergeFormatAdapter<P>
 where
   P: NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
-    + EngineNamedTreeBackend<DocumentChangeKey, AutomergeEntry>
+    + EngineStoreBackend<DocumentChangeKey, AutomergeEntry>
     + Clone
     + Send
     + Sync
@@ -85,7 +85,7 @@ where
 pub struct AutomergeFormatTree<P>
 where
   P: NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
-    + EngineNamedTreeBackend<DocumentChangeKey, AutomergeEntry>
+    + EngineStoreBackend<DocumentChangeKey, AutomergeEntry>
     + Clone
     + Send
     + Sync
@@ -99,7 +99,7 @@ where
 pub struct AutomergeFormatTreeTransaction<P>
 where
   P: NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
-    + EngineNamedTreeBackend<DocumentChangeKey, AutomergeEntry>
+    + EngineStoreBackend<DocumentChangeKey, AutomergeEntry>
     + Clone
     + Send
     + Sync
@@ -113,7 +113,7 @@ where
 pub struct AutomergeFormatTransaction<P>
 where
   P: NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
-    + EngineNamedTreeBackend<DocumentChangeKey, AutomergeEntry>
+    + EngineStoreBackend<DocumentChangeKey, AutomergeEntry>
     + Clone
     + Send
     + Sync
@@ -127,7 +127,7 @@ where
 impl<P> Clone for AutomergeFormatTransaction<P>
 where
   P: NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
-    + EngineNamedTreeBackend<DocumentChangeKey, AutomergeEntry>
+    + EngineStoreBackend<DocumentChangeKey, AutomergeEntry>
     + Clone
     + Send
     + Sync
@@ -145,7 +145,7 @@ where
 impl<P> AutomergeFormatTransaction<P>
 where
   P: NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
-    + EngineNamedTreeBackend<DocumentChangeKey, AutomergeEntry>
+    + EngineStoreBackend<DocumentChangeKey, AutomergeEntry>
     + Clone
     + Send
     + Sync
@@ -225,10 +225,10 @@ where
   }
 }
 
-impl<P> EngineNamedTreeTransaction<EngineKey, Vec<u8>> for AutomergeFormatTransaction<P>
+impl<P> EngineStoreTransaction<EngineKey, Vec<u8>> for AutomergeFormatTransaction<P>
 where
   P: NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
-    + EngineNamedTreeBackend<DocumentChangeKey, AutomergeEntry>
+    + EngineStoreBackend<DocumentChangeKey, AutomergeEntry>
     + Clone
     + Send
     + Sync
@@ -371,7 +371,7 @@ where
 impl<P> BTreeReadExecutor<EngineKey, Vec<u8>> for AutomergeFormatTree<P>
 where
   P: NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
-    + EngineNamedTreeBackend<DocumentChangeKey, AutomergeEntry>
+    + EngineStoreBackend<DocumentChangeKey, AutomergeEntry>
     + Clone
     + Send
     + Sync
@@ -412,7 +412,7 @@ where
 impl<P> BTreeWriteExecutor<EngineKey, Vec<u8>> for AutomergeFormatTree<P>
 where
   P: NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
-    + EngineNamedTreeBackend<DocumentChangeKey, AutomergeEntry>
+    + EngineStoreBackend<DocumentChangeKey, AutomergeEntry>
     + Clone
     + Send
     + Sync
@@ -443,7 +443,7 @@ where
 impl<P> BTreeTransaction<EngineKey, Vec<u8>> for AutomergeFormatTreeTransaction<P>
 where
   P: NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
-    + EngineNamedTreeBackend<DocumentChangeKey, AutomergeEntry>
+    + EngineStoreBackend<DocumentChangeKey, AutomergeEntry>
     + Clone
     + Send
     + Sync
@@ -462,7 +462,7 @@ where
 impl<P> BTreeReadExecutor<EngineKey, Vec<u8>> for AutomergeFormatTreeTransaction<P>
 where
   P: NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
-    + EngineNamedTreeBackend<DocumentChangeKey, AutomergeEntry>
+    + EngineStoreBackend<DocumentChangeKey, AutomergeEntry>
     + Clone
     + Send
     + Sync
@@ -493,7 +493,7 @@ where
 impl<P> BTreeWriteExecutor<EngineKey, Vec<u8>> for AutomergeFormatTreeTransaction<P>
 where
   P: NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
-    + EngineNamedTreeBackend<DocumentChangeKey, AutomergeEntry>
+    + EngineStoreBackend<DocumentChangeKey, AutomergeEntry>
     + Clone
     + Send
     + Sync
@@ -519,7 +519,7 @@ where
 impl<P> BTree<EngineKey, Vec<u8>> for AutomergeFormatTree<P>
 where
   P: NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
-    + EngineNamedTreeBackend<DocumentChangeKey, AutomergeEntry>
+    + EngineStoreBackend<DocumentChangeKey, AutomergeEntry>
     + Clone
     + Send
     + Sync
@@ -539,7 +539,7 @@ where
 impl<P> NamedBTreeMap<EngineKey, Vec<u8>> for AutomergeFormatAdapter<P>
 where
   P: NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
-    + EngineNamedTreeBackend<DocumentChangeKey, AutomergeEntry>
+    + EngineStoreBackend<DocumentChangeKey, AutomergeEntry>
     + Clone
     + Send
     + Sync
@@ -633,10 +633,10 @@ where
   }
 }
 
-impl<P> EngineNamedTreeBackend<EngineKey, Vec<u8>> for AutomergeFormatAdapter<P>
+impl<P> EngineStoreBackend<EngineKey, Vec<u8>> for AutomergeFormatAdapter<P>
 where
   P: NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
-    + EngineNamedTreeBackend<DocumentChangeKey, AutomergeEntry>
+    + EngineStoreBackend<DocumentChangeKey, AutomergeEntry>
     + Clone
     + Send
     + Sync
@@ -666,7 +666,7 @@ pub struct AutomergeSyncMetrics {
 pub async fn sync_automerge_layouts<L>(left: &L, right: &L) -> Result<(), BTreeError>
 where
   L: NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
-    + EngineNamedTreeBackend<DocumentChangeKey, AutomergeEntry>
+    + EngineStoreBackend<DocumentChangeKey, AutomergeEntry>
     + Clone
     + Send
     + Sync
@@ -693,7 +693,7 @@ where
 pub async fn automerge_layout_metrics<L>(layout: &L) -> Result<AutomergeSyncMetrics, BTreeError>
 where
   L: NamedBTreeMap<DocumentChangeKey, AutomergeEntry>
-    + EngineNamedTreeBackend<DocumentChangeKey, AutomergeEntry>
+    + EngineStoreBackend<DocumentChangeKey, AutomergeEntry>
     + Clone
     + Send
     + Sync

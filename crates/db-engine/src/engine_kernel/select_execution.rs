@@ -1,6 +1,6 @@
 use futures::future::FutureExt;
 
-use crate::store_adapter::EngineStore;
+use crate::store_backend::EngineStoreBackend;
 use crate::{
   EngineError, query::EngineResult, query::QualifiedColumn, query::QualifiedPredicate,
   query::SelectOptions,
@@ -13,7 +13,7 @@ use super::select_orchestrator::{
 
 impl<S> EngineKernel<S>
 where
-  S: EngineStore,
+  S: EngineStoreBackend,
 {
   pub(crate) async fn read_extended(
     &self,
@@ -23,7 +23,7 @@ where
     options: &SelectOptions,
   ) -> Result<EngineResult, EngineError> {
     let output_columns = self.output_columns_for_select(projection, options)?;
-    let mut tx = self.store().engine_read_transaction().await?;
+    let mut tx = super::NamedTreeEngineTransaction::new(self.store().clone());
     match execute_select_pipeline::<S, _, _>(
       &mut tx,
       base_table,

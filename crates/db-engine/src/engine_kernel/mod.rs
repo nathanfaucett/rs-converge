@@ -10,5 +10,6 @@ mod select_orchestrator;
 mod select_pipeline;
 mod transaction_lifecycle;
 
+pub(crate) use crate::store_backend::NamedTreeEngineTransaction;
 pub(crate) use executor::EngineWriteTxn;
 pub(crate) use planner::EngineKernel;

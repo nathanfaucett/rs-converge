@@ -3,7 +3,7 @@ use std::{fmt::Debug, marker::PhantomData, path::Path, sync::Arc};
 use async_stream::stream;
 use dashmap::DashMap;
 use db_core::{BTreeError, BTreeResult, KeyCodec, MaybeSend, NamedBTreeMap, ValueCodec};
-use db_engine::{EngineNamedTreeBackend, EngineNamedTreeTransaction};
+use db_engine::{EngineStoreBackend, EngineStoreTransaction};
 use futures::Stream;
 use redb::{
   Database, ReadTransaction, ReadableDatabase, ReadableTable, TableDefinition, WriteTransaction,
@@ -96,7 +96,7 @@ where
   }
 }
 
-impl<K, V, KC, VC> EngineNamedTreeTransaction<K, V> for REDBNamedTransaction<K, V, KC, VC>
+impl<K, V, KC, VC> EngineStoreTransaction<K, V> for REDBNamedTransaction<K, V, KC, VC>
 where
   K: Debug + Clone + Ord + Send + Sync + 'static,
   V: Debug + Clone + Send + Sync + 'static,
@@ -350,7 +350,7 @@ where
   }
 }
 
-impl<K, V, KC, VC> EngineNamedTreeBackend<K, V> for REDBNamedBTree<K, V, KC, VC>
+impl<K, V, KC, VC> EngineStoreBackend<K, V> for REDBNamedBTree<K, V, KC, VC>
 where
   K: Debug + Clone + Ord + Send + Sync + 'static,
   V: Debug + Clone + Send + Sync + 'static,

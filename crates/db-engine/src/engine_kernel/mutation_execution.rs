@@ -1,4 +1,4 @@
-use crate::store_adapter::EngineStore;
+use crate::store_backend::EngineStoreBackend;
 use crate::{EngineError, query::EngineQuery, query::EngineResult, query::UpdateValueExpr};
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -7,7 +7,7 @@ use super::{EngineWriteTxn, planner::EngineKernel};
 
 impl<S> EngineKernel<S>
 where
-  S: EngineStore,
+  S: EngineStoreBackend,
 {
   fn output_columns_for_returning(
     &self,

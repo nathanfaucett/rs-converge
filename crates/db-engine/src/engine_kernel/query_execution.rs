@@ -1,4 +1,4 @@
-use crate::store_adapter::EngineStore;
+use crate::store_backend::EngineStoreBackend;
 use crate::{EngineError, query::EngineQuery, query::EngineResult};
 use alloc::vec::Vec;
 
@@ -6,7 +6,7 @@ use super::planner::EngineKernel;
 
 impl<S> EngineKernel<S>
 where
-  S: EngineStore,
+  S: EngineStoreBackend,
 {
   pub(crate) async fn run(&self, query: EngineQuery) -> Result<EngineResult, EngineError> {
     let (result, _events) = self.run_with_events(query).await?;

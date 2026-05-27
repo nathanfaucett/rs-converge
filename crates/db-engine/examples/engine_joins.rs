@@ -13,7 +13,7 @@ use db_in_memory::InMemoryNamedBTree;
 fn main() {
   block_on(async {
     let store: InMemoryNamedBTree<_, _> = InMemoryNamedBTree::new();
-    let mut db = EngineDatabase::new(NamedTreeEngineStore::new(store));
+    let mut db = EngineDatabase::new(store);
 
     let users = TableSchema {
       name: "users".into(),

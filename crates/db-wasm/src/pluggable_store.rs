@@ -2,7 +2,7 @@ use async_stream::stream;
 use core::borrow::Borrow;
 use core::ops::RangeBounds;
 use db_core::{BTree, BTreeError, BTreeResult, MaybeSend, NamedBTreeMap};
-use db_engine::{EngineKey, EngineNamedTreeBackend, EngineNamedTreeTransaction};
+use db_engine::{EngineKey, EngineStoreBackend, EngineStoreTransaction};
 use db_in_memory::InMemoryNamedBTree;
 use futures::{Stream, StreamExt, pin_mut};
 
@@ -28,7 +28,7 @@ where
   store: InMemoryNamedBTree<K, V>,
 }
 
-impl<K, V> EngineNamedTreeTransaction<K, V> for InMemoryNamedTreeBackendTransaction<K, V>
+impl<K, V> EngineStoreTransaction<K, V> for InMemoryNamedTreeBackendTransaction<K, V>
 where
   K: Clone + Ord + Send + Sync + 'static,
   V: Clone + Send + Sync + 'static,
@@ -151,7 +151,7 @@ impl NamedBTreeMap<EngineKey, Vec<u8>> for PluggableBackendStore {
   }
 }
 
-impl EngineNamedTreeBackend<EngineKey, Vec<u8>> for PluggableBackendStore {
+impl EngineStoreBackend<EngineKey, Vec<u8>> for PluggableBackendStore {
   type Transaction = PluggableBackendTransaction;
 
   async fn begin_transaction(&self) -> BTreeResult<Self::Transaction> {
@@ -169,7 +169,7 @@ impl EngineNamedTreeBackend<EngineKey, Vec<u8>> for PluggableBackendStore {
   }
 }
 
-impl EngineNamedTreeTransaction<EngineKey, Vec<u8>> for PluggableBackendTransaction {
+impl EngineStoreTransaction<EngineKey, Vec<u8>> for PluggableBackendTransaction {
   async fn get<'a>(&'a mut self, tree: &'a str, key: &'a EngineKey) -> BTreeResult<Option<Vec<u8>>>
   where
     EngineKey: Ord,
@@ -244,7 +244,7 @@ impl EngineNamedTreeTransaction<EngineKey, Vec<u8>> for PluggableBackendTransact
   {
     match self {
       PluggableBackendTransaction::InMemory(tx) => tx.commit().await,
-      PluggableBackendTransaction::External(tx) => EngineNamedTreeTransaction::commit(tx).await,
+      PluggableBackendTransaction::External(tx) => EngineStoreTransaction::commit(tx).await,
     }
   }
 
@@ -254,7 +254,7 @@ impl EngineNamedTreeTransaction<EngineKey, Vec<u8>> for PluggableBackendTransact
   {
     match self {
       PluggableBackendTransaction::InMemory(tx) => tx.rollback().await,
-      PluggableBackendTransaction::External(tx) => EngineNamedTreeTransaction::rollback(tx).await,
+      PluggableBackendTransaction::External(tx) => EngineStoreTransaction::rollback(tx).await,
     }
   }
 }

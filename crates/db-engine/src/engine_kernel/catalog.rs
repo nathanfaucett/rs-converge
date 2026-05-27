@@ -2,7 +2,7 @@ use alloc::{string::String, vec::Vec};
 use futures::{StreamExt, pin_mut};
 use hashbrown::HashMap;
 
-use crate::store_adapter::{EngineStore, EngineStoreTransaction};
+use crate::store_backend::EngineStoreBackend;
 use crate::{EngineError, IndexSchema, TableSchema};
 
 #[derive(Debug, Clone, Default)]
@@ -50,9 +50,9 @@ impl EngineCatalog {
 
   pub(crate) async fn load_from_store<S>(&mut self, store: &S) -> Result<(), EngineError>
   where
-    S: EngineStore,
+    S: EngineStoreBackend,
   {
-    let mut tx = store.engine_transaction().await?;
+    let mut tx = super::NamedTreeEngineTransaction::new(store.clone());
     let (tables, indexes) = tx.load_catalog().await?;
 
     self.tables.clear();
@@ -75,7 +75,7 @@ impl EngineCatalog {
     if_not_exists: bool,
   ) -> Result<(), EngineError>
   where
-    S: EngineStore,
+    S: EngineStoreBackend,
   {
     self.load_from_store(store).await?;
 
@@ -89,7 +89,7 @@ impl EngineCatalog {
       };
     }
 
-    let mut tx = store.engine_transaction().await?;
+    let mut tx = super::NamedTreeEngineTransaction::new(store.clone());
     tx.insert_table_schema(schema.clone()).await?;
     tx.commit().await?;
 
@@ -103,7 +103,7 @@ impl EngineCatalog {
     schema: IndexSchema,
   ) -> Result<(), EngineError>
   where
-    S: EngineStore,
+    S: EngineStoreBackend,
   {
     self.load_from_store(store).await?;
 
@@ -114,7 +114,7 @@ impl EngineCatalog {
     let table = self.table(&schema.table_name)?;
     schema.validate_for_table(table)?;
 
-    let mut tx = store.engine_transaction().await?;
+    let mut tx = super::NamedTreeEngineTransaction::new(store.clone());
     tx.insert_index_schema(schema.clone()).await?;
     tx.commit().await?;
 
@@ -129,7 +129,7 @@ impl EngineCatalog {
     if_exists: bool,
   ) -> Result<(), EngineError>
   where
-    S: EngineStore,
+    S: EngineStoreBackend,
   {
     self.load_from_store(store).await?;
 
@@ -142,7 +142,7 @@ impl EngineCatalog {
     }
 
     let indexes = self.indexes_for_table(table_name);
-    let mut tx = store.engine_transaction().await?;
+    let mut tx = super::NamedTreeEngineTransaction::new(store.clone());
 
     for index in &indexes {
       remove_index_entries(&mut tx, index).await?;
@@ -167,7 +167,7 @@ impl EngineCatalog {
     index_name: &str,
   ) -> Result<(), EngineError>
   where
-    S: EngineStore,
+    S: EngineStoreBackend,
   {
     self.load_from_store(store).await?;
 
@@ -176,7 +176,7 @@ impl EngineCatalog {
     }
 
     let index = self.indexes.get(index_name).cloned().unwrap();
-    let mut tx = store.engine_transaction().await?;
+    let mut tx = super::NamedTreeEngineTransaction::new(store.clone());
     remove_index_entries(&mut tx, &index).await?;
     tx.remove_index_schema(index_name).await?;
     tx.commit().await?;
@@ -186,9 +186,12 @@ impl EngineCatalog {
   }
 }
 
-async fn remove_index_entries<TX>(tx: &mut TX, index: &IndexSchema) -> Result<(), EngineError>
+async fn remove_index_entries<S>(
+  tx: &mut super::NamedTreeEngineTransaction<S>,
+  index: &IndexSchema,
+) -> Result<(), EngineError>
 where
-  TX: EngineStoreTransaction,
+  S: EngineStoreBackend,
 {
   let mut entries = Vec::new();
   {
@@ -210,9 +213,12 @@ where
   Ok(())
 }
 
-async fn remove_table_rows<TX>(tx: &mut TX, table_name: &str) -> Result<(), EngineError>
+async fn remove_table_rows<S>(
+  tx: &mut super::NamedTreeEngineTransaction<S>,
+  table_name: &str,
+) -> Result<(), EngineError>
 where
-  TX: EngineStoreTransaction,
+  S: EngineStoreBackend,
 {
   let mut pks = Vec::new();
   {

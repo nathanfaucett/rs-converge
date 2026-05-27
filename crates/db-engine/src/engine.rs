@@ -33,7 +33,7 @@ use std::string::ToString;
 #[cfg(feature = "std")]
 use std::sync::{Arc, RwLock};
 
-use crate::store_adapter::EngineStore;
+use crate::store_backend::EngineStoreBackend;
 pub struct EngineDatabase<S> {
   kernel: EngineKernel<S>,
   subscription_registry: Arc<SubscriptionRegistry>,
@@ -41,7 +41,7 @@ pub struct EngineDatabase<S> {
 
 impl<S> EngineDatabase<S>
 where
-  S: EngineStore,
+  S: EngineStoreBackend,
 {
   fn returning_columns(
     &self,
@@ -86,8 +86,6 @@ where
   }
 
   pub fn new(store: S) -> Self {
-    debug_assert!(store.transaction_contract().validate().is_ok());
-
     let change_listener_registry = Arc::new(ChangeListenerRegistry::new());
     Self {
       kernel: EngineKernel::new(store, change_listener_registry.clone()),
@@ -96,12 +94,10 @@ where
   }
 
   pub fn new_checked(store: S) -> Result<Self, EngineError> {
-    store.transaction_contract().validate()?;
     Ok(Self::new(store))
   }
 
   pub async fn open(store: S) -> Result<Self, EngineError> {
-    store.transaction_contract().validate()?;
     let change_listener_registry = Arc::new(ChangeListenerRegistry::new());
     Ok(Self {
       kernel: EngineKernel::open(store, change_listener_registry.clone()).await?,
@@ -307,14 +303,14 @@ fn update_subscription_results(sub: &QuerySubscription, new_results: EngineResul
 
 pub struct EngineReadTransaction<'db, S>
 where
-  S: EngineStore,
+  S: EngineStoreBackend,
 {
   db: &'db EngineDatabase<S>,
 }
 
 impl<'db, S> EngineReadTransaction<'db, S>
 where
-  S: EngineStore,
+  S: EngineStoreBackend,
 {
   pub async fn execute(&self, query: EngineQuery) -> Result<EngineResult, EngineError> {
     match query {
@@ -337,7 +333,7 @@ where
 
 pub struct EngineTransaction<'db, S>
 where
-  S: EngineStore,
+  S: EngineStoreBackend,
 {
   db: &'db EngineDatabase<S>,
   inner: EngineWriteTxn<'db, S>,
@@ -345,7 +341,7 @@ where
 
 impl<'db, S> EngineTransaction<'db, S>
 where
-  S: EngineStore,
+  S: EngineStoreBackend,
 {
   pub async fn insert_row(&mut self, table_name: &str, row: EngineRow) -> Result<(), EngineError> {
     self.inner.insert(table_name, row).await
@@ -506,7 +502,7 @@ mod tests {
   fn engine_read_transaction_supports_select_only() {
     block_on(async {
       let store: InMemoryNamedBTree<EngineKey, Vec<u8>> = InMemoryNamedBTree::new();
-      let mut db = EngineDatabase::new(NamedTreeEngineStore::new(store));
+      let mut db = EngineDatabase::new(store);
 
       db.register_table(
         TableSchema {
@@ -579,7 +575,7 @@ mod tests {
   fn insert_and_select_from_table() {
     block_on(async {
       let store: InMemoryNamedBTree<EngineKey, Vec<u8>> = InMemoryNamedBTree::new();
-      let mut database = EngineDatabase::new(NamedTreeEngineStore::new(store));
+      let mut database = EngineDatabase::new(store);
       let schema = TableSchema {
         name: "users".into(),
         columns: vec![
@@ -627,7 +623,7 @@ mod tests {
   fn insert_and_select_float_value() {
     block_on(async {
       let store: InMemoryNamedBTree<EngineKey, Vec<u8>> = InMemoryNamedBTree::new();
-      let mut database = EngineDatabase::new(NamedTreeEngineStore::new(store));
+      let mut database = EngineDatabase::new(store);
       let schema = TableSchema {
         name: "measurements".into(),
         columns: vec![
@@ -674,7 +670,7 @@ mod tests {
   fn insert_and_select_blob_value() {
     block_on(async {
       let store: InMemoryNamedBTree<EngineKey, Vec<u8>> = InMemoryNamedBTree::new();
-      let mut database = EngineDatabase::new(NamedTreeEngineStore::new(store));
+      let mut database = EngineDatabase::new(store);
       let schema = TableSchema {
         name: "files".into(),
         columns: vec![
@@ -723,7 +719,7 @@ mod tests {
   fn transaction_returning_methods_include_columns_and_rows() {
     block_on(async {
       let store: InMemoryNamedBTree<EngineKey, Vec<u8>> = InMemoryNamedBTree::new();
-      let mut database = EngineDatabase::new(NamedTreeEngineStore::new(store));
+      let mut database = EngineDatabase::new(store);
       let users = TableSchema {
         name: "users".into(),
         columns: vec![
@@ -809,7 +805,7 @@ mod tests {
   fn select_uses_index_when_available() {
     block_on(async {
       let store: InMemoryNamedBTree<EngineKey, Vec<u8>> = InMemoryNamedBTree::new();
-      let mut database = EngineDatabase::new(NamedTreeEngineStore::new(store));
+      let mut database = EngineDatabase::new(store);
       let users = TableSchema {
         name: "users".into(),
         columns: vec![
@@ -878,7 +874,7 @@ mod tests {
   fn inner_join_simple() {
     block_on(async {
       let store: InMemoryNamedBTree<EngineKey, Vec<u8>> = InMemoryNamedBTree::new();
-      let mut db = EngineDatabase::new(NamedTreeEngineStore::new(store));
+      let mut db = EngineDatabase::new(store);
 
       let users = TableSchema {
         name: "users".into(),
@@ -1023,7 +1019,7 @@ mod tests {
   fn group_by_count_and_sum() {
     block_on(async {
       let store: InMemoryNamedBTree<EngineKey, Vec<u8>> = InMemoryNamedBTree::new();
-      let mut db = EngineDatabase::new(NamedTreeEngineStore::new(store));
+      let mut db = EngineDatabase::new(store);
 
       let users = TableSchema {
         name: "users".into(),
@@ -1197,7 +1193,7 @@ mod tests {
   fn order_by_and_limit() {
     block_on(async {
       let store: InMemoryNamedBTree<EngineKey, Vec<u8>> = InMemoryNamedBTree::new();
-      let mut db = EngineDatabase::new(NamedTreeEngineStore::new(store));
+      let mut db = EngineDatabase::new(store);
 
       let users = TableSchema {
         name: "users".into(),
@@ -1353,7 +1349,7 @@ mod tests {
   fn left_join_simple() {
     block_on(async {
       let store: InMemoryNamedBTree<EngineKey, Vec<u8>> = InMemoryNamedBTree::new();
-      let mut db = EngineDatabase::new(NamedTreeEngineStore::new(store));
+      let mut db = EngineDatabase::new(store);
 
       let users = TableSchema {
         name: "users".into(),
@@ -1503,7 +1499,7 @@ mod tests {
   fn right_join_simple() {
     block_on(async {
       let store: InMemoryNamedBTree<EngineKey, Vec<u8>> = InMemoryNamedBTree::new();
-      let mut db = EngineDatabase::new(NamedTreeEngineStore::new(store));
+      let mut db = EngineDatabase::new(store);
 
       let users = TableSchema {
         name: "users".into(),
@@ -1626,7 +1622,7 @@ mod tests {
   fn full_join_simple() {
     block_on(async {
       let store: InMemoryNamedBTree<EngineKey, Vec<u8>> = InMemoryNamedBTree::new();
-      let mut db = EngineDatabase::new(NamedTreeEngineStore::new(store));
+      let mut db = EngineDatabase::new(store);
 
       let users = TableSchema {
         name: "users".into(),
@@ -1759,7 +1755,7 @@ mod tests {
   fn multiple_joins_chain() {
     block_on(async {
       let store: InMemoryNamedBTree<EngineKey, Vec<u8>> = InMemoryNamedBTree::new();
-      let mut db = EngineDatabase::new(NamedTreeEngineStore::new(store));
+      let mut db = EngineDatabase::new(store);
 
       let users = TableSchema {
         name: "users".into(),
@@ -1925,7 +1921,7 @@ mod tests {
   fn reopen_database_recovers_schema_from_store() {
     block_on(async {
       let store: InMemoryNamedBTree<EngineKey, Vec<u8>> = InMemoryNamedBTree::new();
-      let mut database = EngineDatabase::new(NamedTreeEngineStore::new(store.clone()));
+      let mut database = EngineDatabase::new(store.clone());
       let users = TableSchema {
         name: "users".into(),
         columns: vec![
@@ -1964,7 +1960,7 @@ mod tests {
         .await
         .expect("execute insert query");
 
-      let reopened = EngineDatabase::open(NamedTreeEngineStore::new(store))
+      let reopened = EngineDatabase::open(store)
         .await
         .expect("open database from store");
       let result = reopened
@@ -1987,7 +1983,7 @@ mod tests {
   fn update_row_and_maintain_indexes() {
     block_on(async {
       let store: InMemoryNamedBTree<EngineKey, Vec<u8>> = InMemoryNamedBTree::new();
-      let mut database = EngineDatabase::new(NamedTreeEngineStore::new(store));
+      let mut database = EngineDatabase::new(store);
       let users = TableSchema {
         name: "users".into(),
         columns: vec![
@@ -2080,7 +2076,7 @@ mod tests {
   fn unique_index_violates_on_update() {
     block_on(async {
       let store: InMemoryNamedBTree<EngineKey, Vec<u8>> = InMemoryNamedBTree::new();
-      let mut database = EngineDatabase::new(NamedTreeEngineStore::new(store));
+      let mut database = EngineDatabase::new(store);
       let users = TableSchema {
         name: "users".into(),
         columns: vec![
@@ -2163,7 +2159,7 @@ mod tests {
   fn delete_rows_with_predicate() {
     block_on(async {
       let store: InMemoryNamedBTree<EngineKey, Vec<u8>> = InMemoryNamedBTree::new();
-      let mut database = EngineDatabase::new(NamedTreeEngineStore::new(store));
+      let mut database = EngineDatabase::new(store);
       let users = TableSchema {
         name: "users".into(),
         columns: vec![
@@ -2226,7 +2222,7 @@ mod tests {
   fn update_row_with_expression_assignment() {
     block_on(async {
       let store: InMemoryNamedBTree<EngineKey, Vec<u8>> = InMemoryNamedBTree::new();
-      let mut database = EngineDatabase::new(NamedTreeEngineStore::new(store));
+      let mut database = EngineDatabase::new(store);
       let users = TableSchema {
         name: "users".into(),
         columns: vec![
@@ -2290,7 +2286,7 @@ mod tests {
   fn update_division_by_zero_rolls_back_changes() {
     block_on(async {
       let store: InMemoryNamedBTree<EngineKey, Vec<u8>> = InMemoryNamedBTree::new();
-      let mut database = EngineDatabase::new(NamedTreeEngineStore::new(store));
+      let mut database = EngineDatabase::new(store);
       let users = TableSchema {
         name: "users".into(),
         columns: vec![
@@ -2361,7 +2357,7 @@ mod tests {
   fn multi_row_update_failure_rolls_back_partial_changes() {
     block_on(async {
       let store: InMemoryNamedBTree<EngineKey, Vec<u8>> = InMemoryNamedBTree::new();
-      let mut database = EngineDatabase::new(NamedTreeEngineStore::new(store));
+      let mut database = EngineDatabase::new(store);
       let users = TableSchema {
         name: "users".into(),
         columns: vec![
@@ -2455,7 +2451,7 @@ mod tests {
   fn update_row_with_join_assignment_expression() {
     block_on(async {
       let store: InMemoryNamedBTree<EngineKey, Vec<u8>> = InMemoryNamedBTree::new();
-      let mut database = EngineDatabase::new(NamedTreeEngineStore::new(store));
+      let mut database = EngineDatabase::new(store);
 
       database
         .register_table(
@@ -2571,7 +2567,7 @@ mod tests {
   fn update_join_rejects_multiple_matches_for_target_row() {
     block_on(async {
       let store: InMemoryNamedBTree<EngineKey, Vec<u8>> = InMemoryNamedBTree::new();
-      let mut database = EngineDatabase::new(NamedTreeEngineStore::new(store));
+      let mut database = EngineDatabase::new(store);
 
       database
         .register_table(
@@ -2707,7 +2703,7 @@ mod tests {
   fn empty_table_select_returns_no_rows() {
     block_on(async {
       let store: InMemoryNamedBTree<EngineKey, Vec<u8>> = InMemoryNamedBTree::new();
-      let mut database = EngineDatabase::new(NamedTreeEngineStore::new(store));
+      let mut database = EngineDatabase::new(store);
 
       database
         .register_table(
@@ -2743,7 +2739,7 @@ mod tests {
   fn unique_index_violates_on_insert() {
     block_on(async {
       let store: InMemoryNamedBTree<EngineKey, Vec<u8>> = InMemoryNamedBTree::new();
-      let mut database = EngineDatabase::new(NamedTreeEngineStore::new(store));
+      let mut database = EngineDatabase::new(store);
       let users = TableSchema {
         name: "users".into(),
         columns: vec![

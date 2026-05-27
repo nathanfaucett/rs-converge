@@ -5,7 +5,7 @@ use alloc::{
 use hashbrown::{HashMap, HashSet};
 
 use crate::query::{JoinClause, JoinKind, JoinOn, QualifiedColumn};
-use crate::store_adapter::{EngineStore, collect_table_rows};
+use crate::store_backend::{EngineStoreBackend, collect_table_rows};
 use crate::{EngineError, EngineRow};
 
 use super::operators::{
@@ -52,11 +52,11 @@ pub(crate) fn build_join_template(tables: &HashSet<String>) -> JoinedRowState {
 }
 
 pub(crate) async fn collect_table_rows_map<S>(
-  tx: &mut S::Transaction,
+  tx: &mut super::NamedTreeEngineTransaction<S>,
   tables: &HashSet<String>,
 ) -> Result<HashMap<String, Vec<EngineRow>>, EngineError>
 where
-  S: EngineStore,
+  S: EngineStoreBackend,
 {
   let mut table_rows_map: HashMap<String, Vec<EngineRow>> = HashMap::new();
   for table in tables {

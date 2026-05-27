@@ -2,7 +2,7 @@
 mod tests {
   use db::{Database, automerge_layout_metrics, sync_automerge_layouts};
   use db_core::NamedBTreeMap;
-  use db_engine::EngineNamedTreeBackend;
+  use db_engine::EngineStoreBackend;
   use db_engine::{
     EngineKey, EngineQuery, EngineValue, QualifiedColumn, QualifiedOperand, QualifiedPredicate,
     UpdateAssignment,
@@ -61,7 +61,7 @@ mod tests {
   trait SyncStore:
     Clone
     + NamedBTreeMap<EngineKey, Vec<u8>>
-    + EngineNamedTreeBackend<EngineKey, Vec<u8>>
+    + EngineStoreBackend<EngineKey, Vec<u8>>
     + Send
     + Sync
     + 'static
@@ -71,7 +71,7 @@ mod tests {
   impl<T> SyncStore for T where
     T: Clone
       + NamedBTreeMap<EngineKey, Vec<u8>>
-      + EngineNamedTreeBackend<EngineKey, Vec<u8>>
+      + EngineStoreBackend<EngineKey, Vec<u8>>
       + Send
       + Sync
       + 'static
