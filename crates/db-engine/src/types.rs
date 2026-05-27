@@ -1,10 +1,11 @@
-#![cfg_attr(not(feature = "std"), no_std)]
-
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
 #[cfg(not(feature = "std"))]
-use alloc::{string::String, vec::Vec};
+use alloc::{
+  string::{String, ToString},
+  vec::Vec,
+};
 #[cfg(feature = "std")]
 use std::{string::String, vec::Vec};
 
@@ -14,7 +15,7 @@ use core::hash::{Hash, Hasher};
 use db_core::BTreeError;
 use thiserror::Error;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum EngineValue {
   Null,
   Integer(i64),
@@ -180,7 +181,7 @@ impl Ord for EngineValue {
 pub type EngineKey = Vec<u8>;
 pub type EngineRow = Vec<EngineValue>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[repr(u8)]
 pub enum EngineType {
   Null = 0,
@@ -224,7 +225,7 @@ impl EngineType {
   }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct PrimaryKey {
   bytes: [u8; 16],
 }

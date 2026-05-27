@@ -1,7 +1,7 @@
 #[cfg(feature = "std")]
 mod tests {
   use db::Database;
-  use db_engine::{EngineError, EngineQuery, EngineResult, Subscriber, SyncScope};
+  use db_engine::{EngineError, EngineQuery, EngineResult, Subscriber};
   use futures::executor::block_on;
   use std::sync::{Arc, Mutex};
 
@@ -57,11 +57,11 @@ mod tests {
 
       // Subscribe both
       let id1 = db
-        .subscribe_query(query.clone(), sub1_arc.clone(), None)
+        .subscribe_query(query.clone(), sub1_arc.clone())
         .await
         .expect("subscribe sub1");
       let id2 = db
-        .subscribe_query(query.clone(), sub2_arc.clone(), None)
+        .subscribe_query(query.clone(), sub2_arc.clone())
         .await
         .expect("subscribe sub2");
 
@@ -80,58 +80,6 @@ mod tests {
   }
 
   #[test]
-  fn test_subscription_with_restricted_scope() {
-    block_on(async {
-      let mut db = Database::open_in_memory().await.expect("open in-memory db");
-
-      db.execute_sql("CREATE TABLE products (id UUID PRIMARY KEY, name TEXT);")
-        .await
-        .expect("create table");
-
-      // Create a subscriber
-      let subscriber = TestSubscriber::new();
-      let subscriber_arc = Arc::new(subscriber.clone());
-
-      // Create query with restricted scope
-      let query = EngineQuery::select_simple("products".to_string(), vec![0, 1], None);
-      let scope = SyncScope::new(vec!["products".to_string()].into_iter().collect());
-
-      // Subscribe should work
-      let _id = db
-        .subscribe_query(query.clone(), subscriber_arc.clone(), Some(scope))
-        .await
-        .expect("subscribe with scope");
-
-      // Should have initial results
-      assert_eq!(subscriber.get_call_count(), 1);
-
-      println!("✓ Subscriptions with scope work");
-    });
-  }
-
-  #[test]
-  fn test_scope_can_access() {
-    // Test unrestricted scope
-    let unrestricted_scope = SyncScope::default();
-    assert!(unrestricted_scope.can_access("users"));
-    assert!(unrestricted_scope.can_access("orders"));
-    assert!(unrestricted_scope.can_access("any_table"));
-
-    // Test restricted scope
-    let restricted_scope = SyncScope::new(
-      vec!["users".to_string(), "products".to_string()]
-        .into_iter()
-        .collect(),
-    );
-
-    assert!(restricted_scope.can_access("users"));
-    assert!(restricted_scope.can_access("products"));
-    assert!(!restricted_scope.can_access("orders"));
-
-    println!("✓ SyncScope access control works");
-  }
-
-  #[test]
   fn test_subscription_initial_empty_results() {
     block_on(async {
       let mut db = Database::open_in_memory().await.expect("open in-memory db");
@@ -147,7 +95,7 @@ mod tests {
 
       // Subscribe to empty table
       let _id = db
-        .subscribe_query(query, subscriber_arc.clone(), None)
+        .subscribe_query(query, subscriber_arc.clone())
         .await
         .expect("subscribe");
 
@@ -159,19 +107,5 @@ mod tests {
 
       println!("✓ Subscription gets initial empty results");
     });
-  }
-
-  #[test]
-  fn test_scope_table_filtering() {
-    let scope = SyncScope::new(vec!["users".to_string()].into_iter().collect());
-
-    // Allowed table
-    assert!(scope.can_access("users"));
-
-    // Not allowed
-    assert!(!scope.can_access("admin_logs"));
-    assert!(!scope.can_access("orders"));
-
-    println!("✓ Scope table filtering works");
   }
 }

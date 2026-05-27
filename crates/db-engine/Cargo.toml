@@ -1,9 +1,12 @@
 [package]
 name = "db-engine"
-version = "0.1.0"
 description = "Engine layer of the database"
-rust-version = "1.95"
-edition = "2024"
+version = "0.1.0"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
 
 [lib]
 path = "src/lib.rs"

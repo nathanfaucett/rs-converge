@@ -1,10 +1,8 @@
 use alloc::{string::String, vec::Vec};
+use futures::{StreamExt, pin_mut};
 use hashbrown::HashMap;
 
-use crate::store_adapter::{
-  EngineStore, EngineStoreReadTransaction, EngineStoreTransaction, remove_index_entries,
-  remove_table_rows,
-};
+use crate::store_adapter::{EngineStore, EngineStoreTransaction};
 use crate::{EngineError, IndexSchema, TableSchema};
 
 #[derive(Debug, Clone, Default)]
@@ -186,4 +184,49 @@ impl EngineCatalog {
     self.indexes.remove(index_name);
     Ok(())
   }
+}
+
+async fn remove_index_entries<TX>(tx: &mut TX, index: &IndexSchema) -> Result<(), EngineError>
+where
+  TX: EngineStoreTransaction,
+{
+  let mut entries = Vec::new();
+  {
+    let stream = tx.scan_index_entries(&index.name);
+    pin_mut!(stream);
+    while let Some(item) = stream.next().await {
+      let (entry_key, pk) = item?;
+      entries.push((entry_key, pk));
+    }
+  }
+
+  for (entry_key, pk) in entries {
+    let (index_key, _) = index
+      .split_entry_key(&entry_key)
+      .map_err(|err| EngineError::SchemaMismatch(format!("invalid index entry key: {err:?}")))?;
+    tx.remove_index_entry(index, &index_key, &pk).await?;
+  }
+
+  Ok(())
+}
+
+async fn remove_table_rows<TX>(tx: &mut TX, table_name: &str) -> Result<(), EngineError>
+where
+  TX: EngineStoreTransaction,
+{
+  let mut pks = Vec::new();
+  {
+    let stream = tx.scan_table_rows(table_name);
+    pin_mut!(stream);
+    while let Some(item) = stream.next().await {
+      let (pk, _) = item?;
+      pks.push(pk);
+    }
+  }
+
+  for pk in pks {
+    tx.remove_table_row(table_name, &pk).await?;
+  }
+
+  Ok(())
 }

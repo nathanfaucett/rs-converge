@@ -19,4 +19,4 @@ pub use types::{InMemoryAutomergeLayoutBackend, InMemoryAutomergeStore};
 pub use types::{RedbAutomergeLayoutBackend, RedbAutomergeStore};
 
 // Re-export subscription types from db_engine for convenience
-pub use db_engine::{Subscriber, SubscriptionId, SyncScope};
+pub use db_engine::{Subscriber, SubscriptionId};

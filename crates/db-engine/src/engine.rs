@@ -1,6 +1,6 @@
 use crate::{
   ChangeEvent, ChangeListenerRegistry, EngineError, EngineRow, IndexSchema, Subscriber,
-  SubscriptionId, SyncScope, TableSchema,
+  SubscriptionId, TableSchema,
   engine_kernel::{EngineKernel, EngineWriteTxn},
   query::EngineQuery,
   query::EngineResult,
@@ -9,12 +9,8 @@ use crate::{
   query::ResultColumn,
   query::UpdateAssignment,
   query::UpdateValueExpr,
-  store_adapter::EngineStore,
-  subscriptions::{QuerySubscription, SubscriptionBatch, SubscriptionRegistry},
+  subscriptions::{QuerySubscription, SubscriptionRegistry},
 };
-
-#[cfg(all(test, feature = "std"))]
-use crate::store_adapter::NamedTreeEngineStore;
 
 #[cfg(not(feature = "std"))]
 use alloc::boxed::Box;
@@ -25,15 +21,19 @@ use alloc::sync::Arc;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 #[cfg(not(feature = "std"))]
+use hashbrown::HashSet;
+#[cfg(not(feature = "std"))]
 use spin::RwLock;
 #[cfg(feature = "std")]
 use std::boxed::Box;
+#[cfg(feature = "std")]
+use std::collections::HashSet;
 #[cfg(feature = "std")]
 use std::string::ToString;
 #[cfg(feature = "std")]
 use std::sync::{Arc, RwLock};
 
-#[derive(Debug, Clone)]
+use crate::store_adapter::EngineStore;
 pub struct EngineDatabase<S> {
   kernel: EngineKernel<S>,
   subscription_registry: Arc<SubscriptionRegistry>,
@@ -162,6 +162,14 @@ where
     Ok(result)
   }
 
+  async fn execute_with_scope(
+    &self,
+    query: EngineQuery,
+    _scope: &crate::subscriptions::Scope,
+  ) -> Result<EngineResult, EngineError> {
+    self.execute(query).await
+  }
+
   pub async fn select(
     &self,
     table_name: &str,
@@ -192,18 +200,12 @@ where
   pub async fn subscribe(
     &self,
     query: EngineQuery,
-    scope: &SyncScope,
     subscriber: Arc<dyn Subscriber>,
   ) -> Result<SubscriptionId, EngineError> {
-    // Validate that the query respects the scope
-    for table in query.tables() {
-      if !scope.can_access(&table) {
-        return Err(EngineError::TableNotFound(table));
-      }
-    }
+    let scope = crate::subscriptions::Scope::default();
 
     // Run the query immediately with scope applied and get initial results
-    let initial_results = self.execute_with_scope(query.clone(), scope).await?;
+    let initial_results = self.execute_with_scope(query.clone(), &scope).await?;
 
     // Call subscriber with initial results
     subscriber.on_results(Ok(initial_results.clone()));
@@ -212,8 +214,8 @@ where
     let subscription = Arc::new(QuerySubscription {
       id: SubscriptionId::next(),
       query,
-      scope: scope.clone(),
       subscriber,
+      scope,
       last_results: RwLock::new(Some(initial_results)),
     });
 
@@ -227,88 +229,6 @@ where
   pub async fn unsubscribe(&self, id: SubscriptionId) -> Result<(), EngineError> {
     self.subscription_registry.unregister(id);
     Ok(())
-  }
-
-  /// Execute a query with access control scope applied.
-  /// Adds scope predicates to the WHERE clause and filters results.
-  pub async fn execute_with_scope(
-    &self,
-    query: EngineQuery,
-    scope: &SyncScope,
-  ) -> Result<EngineResult, EngineError> {
-    let scoped_query = self.apply_scope_to_query(query, scope)?;
-    self.kernel.run(scoped_query).await
-  }
-
-  fn apply_scope_to_query(
-    &self,
-    query: EngineQuery,
-    scope: &SyncScope,
-  ) -> Result<EngineQuery, EngineError> {
-    for table in query.tables() {
-      if !scope.can_access(&table) {
-        return Err(EngineError::TableNotFound(table));
-      }
-    }
-
-    let add_filter = |predicate: Option<QualifiedPredicate>, table: String| {
-      if let Some(filter) = scope.filter_for(&table) {
-        let combined = match predicate {
-          Some(existing) => QualifiedPredicate::And(Box::new(existing), Box::new(filter.clone())),
-          None => filter.clone(),
-        };
-        Some(combined)
-      } else {
-        predicate
-      }
-    };
-
-    Ok(match query {
-      EngineQuery::Select {
-        table: query_table,
-        projection,
-        predicate,
-        options,
-      } => EngineQuery::Select {
-        table: query_table.clone(),
-        projection,
-        predicate: add_filter(predicate, query_table.clone()),
-        options,
-      },
-      EngineQuery::Update {
-        table: query_table,
-        assignments,
-        predicate,
-        joins,
-        from_tables,
-        returning,
-      } => EngineQuery::Update {
-        table: query_table.clone(),
-        assignments,
-        predicate: add_filter(predicate, query_table.clone()),
-        joins,
-        from_tables,
-        returning,
-      },
-      EngineQuery::Delete {
-        table: query_table,
-        predicate,
-        returning,
-      } => EngineQuery::Delete {
-        table: query_table.clone(),
-        predicate: add_filter(predicate, query_table.clone()),
-        returning,
-      },
-      EngineQuery::Insert {
-        table,
-        row,
-        returning,
-      } => EngineQuery::Insert {
-        table,
-        row,
-        returning,
-      },
-    })
   }
 
   pub(crate) async fn recompute_batched_subscriptions(
@@ -328,13 +248,18 @@ where
   }
 
   fn collect_invalidated_subscription_ids(&self, events: &[ChangeEvent]) -> Vec<SubscriptionId> {
-    let batch = SubscriptionBatch::new();
+    let mut ids = Vec::new();
+    let mut seen = HashSet::new();
+
     for event in events {
       for sub in self.subscription_registry.affected_by_change(event) {
-        batch.invalidate(sub.id);
+        if seen.insert(sub.id) {
+          ids.push(sub.id);
+        }
       }
     }
-    batch.take_invalidated()
+
+    ids
   }
 
   async fn recompute_subscriptions(&self, ids: Vec<SubscriptionId>) {

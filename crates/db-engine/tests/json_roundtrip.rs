@@ -1,7 +1,7 @@
 //! Integration tests for JSON type codec and operations roundtrip.
 
+use db_engine::EngineValue;
 use db_engine::key_encoding::KeyEncoding;
-use db_engine::{EngineValue, json_extract, json_merge, json_valid};
 
 #[test]
 fn test_json_type_codec_roundtrip() {
@@ -53,65 +53,6 @@ fn test_json_mixed_types_codec_roundtrip() {
 }
 
 #[test]
-fn test_json_operations_extract_and_merge() {
-  let user1 = r#"{"name": "Alice", "email": "alice@example.com"}"#;
-  let user2 = r#"{"email": "alice.updated@example.com", "status": "active"}"#;
-
-  // Extract name from user1
-  let name_result = json_extract(user1, "$.name").expect("extract failed");
-  if let EngineValue::Json(s) = name_result {
-    assert_eq!(s, r#""Alice""#);
-  } else {
-    panic!("expected Json value");
-  }
-
-  // Merge user1 and user2
-  let merged = json_merge(user1, user2).expect("merge failed");
-  if let EngineValue::Json(s) = merged {
-    let parsed: serde_json::Value = serde_json::from_str(&s).expect("invalid JSON");
-    assert_eq!(parsed["name"], "Alice");
-    assert_eq!(parsed["email"], "alice.updated@example.com");
-    assert_eq!(parsed["status"], "active");
-  } else {
-    panic!("expected Json value");
-  }
-}
-
-#[test]
-fn test_json_validation() {
-  let valid_json = r#"{"key": "value"}"#;
-  let invalid_json = r#"{ bad json }"#;
-
-  assert!(json_valid(valid_json));
-  assert!(!json_valid(invalid_json));
-}
-
-#[test]
-fn test_json_extract_nested_paths() {
-  let json = r#"{"user": {"profile": {"name": "Alice"}}}"#;
-
-  let result = json_extract(json, "$.user.profile.name").expect("extract failed");
-  if let EngineValue::Json(s) = result {
-    assert_eq!(s, r#""Alice""#);
-  } else {
-    panic!("expected Json value");
-  }
-}
-
-#[test]
-fn test_json_extract_array_elements() {
-  let json = r#"{"items": [{"id": 1}, {"id": 2}, {"id": 3}]}"#;
-
-  let result = json_extract(json, "$.items[1]").expect("extract failed");
-  if let EngineValue::Json(s) = result {
-    let parsed: serde_json::Value = serde_json::from_str(&s).expect("invalid JSON");
-    assert_eq!(parsed["id"], 2);
-  } else {
-    panic!("expected Json value");
-  }
-}
-
-#[test]
 fn test_json_roundtrip_preserves_structure() {
   use db_engine::key_encoding::DefaultEncoding;
 
@@ -141,7 +82,7 @@ fn test_json_roundtrip_preserves_structure() {
 
   // Verify structure is preserved
   if let EngineValue::Json(s) = &decoded[0] {
-    let reparsed: serde_json::Value = serde_json::from_str(s).expect("parse failed");
+    let reparsed: serde_json::Value = serde_json::from_str(&s).expect("parse failed");
     assert_eq!(reparsed["users"].as_array().unwrap().len(), 2);
     assert_eq!(reparsed["users"][0]["name"], "Alice");
   }

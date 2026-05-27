@@ -16,9 +16,7 @@ use db_core::BufferSink;
 use db_core::{MaybeSend, MaybeSync, NamedBTreeMap};
 #[cfg(feature = "redb")]
 use db_engine::EngineKeyCodec;
-use db_engine::{
-  EngineDatabase, EngineKey, EngineNamedTreeBackend, EngineValue, NamedTreeEngineStore,
-};
+use db_engine::{EngineDatabase, EngineKey, EngineValue, NamedTreeEngineStore};
 use db_in_memory::InMemoryNamedBTree;
 #[cfg(feature = "redb")]
 use db_redb::REDBNamedBTree;
@@ -81,12 +79,7 @@ pub trait FacadeStore: Clone + MaybeSend + MaybeSync + 'static {
 
 impl<T> FacadeStore for T
 where
-  T: Clone
-    + NamedBTreeMap<EngineKey, Vec<u8>>
-    + EngineNamedTreeBackend<EngineKey, Vec<u8>>
-    + MaybeSend
-    + MaybeSync
-    + 'static,
+  T: Clone + NamedBTreeMap<EngineKey, Vec<u8>> + MaybeSend + MaybeSync + 'static,
 {
   type EngineStore = NamedTreeEngineStore<Self>;
 

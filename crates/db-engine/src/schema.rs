@@ -1,5 +1,3 @@
-#![cfg_attr(not(feature = "std"), no_std)]
-
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
@@ -11,13 +9,13 @@ use std::{string::String, vec::Vec};
 use crate::key_encoding::{DefaultEncoding, KeyEncoding};
 use crate::{EngineKey, EngineType, EngineValue, PrimaryKey};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ColumnSchema {
   pub name: String,
   pub data_type: EngineType,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct IndexSchema {
   pub name: String,
   pub table_name: String,
@@ -89,7 +87,7 @@ impl IndexSchema {
   }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TableSchema {
   pub name: String,
   pub columns: Vec<ColumnSchema>,

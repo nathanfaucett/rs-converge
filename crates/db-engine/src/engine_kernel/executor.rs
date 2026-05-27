@@ -5,12 +5,9 @@ use super::join_builder::{
 };
 use super::transaction_lifecycle::TransactionLifecycle;
 use crate::predicate::{EvalContext, PredicateEvaluator};
-use crate::store_adapter::{
-  EngineStore, EngineStoreReadTransaction, EngineStoreTransaction, collect_table_rows, delete_row,
-  find_conflicting_index_entry,
-};
+use crate::store_adapter::{EngineStore, EngineStoreTransaction, collect_table_rows};
 use crate::{
-  ChangeEvent, ChangeListenerRegistry, EngineError, EngineRow, EngineValue, IndexSchema,
+  ChangeEvent, ChangeListenerRegistry, EngineError, EngineKey, EngineRow, EngineValue, IndexSchema,
   PrimaryKey, QualifiedColumn, TableSchema, query::JoinClause, query::QualifiedPredicate,
   query::UpdateAssignment, query::UpdateValueExpr,
 };
@@ -20,6 +17,7 @@ use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
+use futures::{StreamExt, pin_mut};
 #[cfg(not(feature = "std"))]
 use hashbrown::{HashMap, HashSet};
 #[cfg(feature = "std")]
@@ -74,6 +72,51 @@ where
     tx.insert_index_entry(index, &index_key, primary_key)
       .await?;
   }
+  Ok(())
+}
+
+async fn find_conflicting_index_entry<TX>(
+  tx: &mut TX,
+  index: &IndexSchema,
+  index_key: &EngineKey,
+  row_pk: &PrimaryKey,
+) -> Result<Option<PrimaryKey>, EngineError>
+where
+  TX: crate::store_adapter::EngineStoreTransaction,
+{
+  let stream = tx.scan_index_entries(&index.name);
+  pin_mut!(stream);
+
+  while let Some(item) = stream.next().await {
+    let (entry_key, existing_pk) = item?;
+    let (existing_index_key, _) = index
+      .split_entry_key(&entry_key)
+      .map_err(|err| EngineError::SchemaMismatch(format!("invalid index entry key: {err:?}")))?;
+    if &existing_index_key == index_key && existing_pk != *row_pk {
+      return Ok(Some(existing_pk));
+    }
+  }
+
+  Ok(None)
+}
+
+async fn delete_row<TX>(
+  tx: &mut TX,
+  table_name: &str,
+  primary_key: &PrimaryKey,
+  row: &EngineRow,
+  indexes: &[IndexSchema],
+) -> Result<(), EngineError>
+where
+  TX: crate::store_adapter::EngineStoreTransaction,
+{
+  for index in indexes {
+    let index_key = index.key_for(row)?;
+    tx.remove_index_entry(index, &index_key, primary_key)
+      .await?;
+  }
+
+  tx.remove_table_row(table_name, primary_key).await?;
   Ok(())
 }
 
@@ -276,6 +319,13 @@ where
   ) -> Result<(Vec<ChangeEvent>, Vec<EngineRow>), EngineError> {
     let mut pending_events = Vec::new();
     let mut returning_rows = Vec::new();
+    let mut update_batch: Vec<(
+      PrimaryKey,
+      EngineRow,
+      PrimaryKey,
+      EngineRow,
+      Option<JoinedRowState>,
+    )> = Vec::new();
 
     for (old_pk, old_row, joined_state) in rows {
       let updated_row =
@@ -284,9 +334,13 @@ where
       let new_pk = table.primary_key(&updated_row)?;
 
       Self::ensure_update_primary_key_available(tx, table_name, &new_pk, &old_pk).await?;
-      delete_row(tx, table_name, &old_pk, &old_row, indexes).await?;
       ensure_indexes_unique(tx, indexes, &updated_row, &new_pk).await?;
 
+      update_batch.push((old_pk, old_row, new_pk, updated_row, joined_state));
+    }
+
+    for (old_pk, old_row, new_pk, updated_row, _joined_state) in update_batch {
+      delete_row(tx, table_name, &old_pk, &old_row, indexes).await?;
       tx.insert_table_row(table_name, new_pk.clone(), updated_row.clone())
         .await?;
       insert_all_index_entries(tx, indexes, &updated_row, &new_pk).await?;

@@ -20,7 +20,7 @@ use db_engine::EngineKey;
 use db_engine::EngineKeyCodec;
 use db_engine::{
   EngineDatabase, EngineQuery, EngineResult, FromRow, IndexSchema, Subscriber, SubscriptionId,
-  SyncScope, TableSchema,
+  TableSchema,
 };
 use db_in_memory::InMemoryNamedBTree;
 #[cfg(feature = "redb")]
@@ -322,12 +322,10 @@ where
     &self,
     query: EngineQuery,
     subscriber: Arc<dyn Subscriber>,
-    scope: Option<SyncScope>,
   ) -> Result<SubscriptionId, DatabaseError> {
-    let scope = scope.unwrap_or_default();
     self
       .engine
-      .subscribe(query, &scope, subscriber)
+      .subscribe(query, subscriber)
       .await
       .map_err(Into::into)
   }
@@ -338,7 +336,6 @@ where
     &self,
     sql: &str,
     subscriber: Arc<dyn Subscriber>,
-    scope: Option<SyncScope>,
   ) -> Result<SubscriptionId, DatabaseError> {
     let query = match parse_and_translate_statement(sql, self) {
       Ok(CanonicalStatement::Query(q)) => q,
@@ -349,7 +346,7 @@ where
       }
       Err(e) => return Err(DatabaseError::Other(format!("{e}"))),
     };
-    self.subscribe_query(query, subscriber, scope).await
+    self.subscribe_query(query, subscriber).await
   }
 
   /// Subscribe to a SQL SELECT string with optional scope and bound parameters.
@@ -359,7 +356,6 @@ where
     sql: &str,
     params: &SqlParams,
     subscriber: Arc<dyn Subscriber>,
-    scope: Option<SyncScope>,
   ) -> Result<SubscriptionId, DatabaseError> {
     let query = match parse_and_translate_statement_with_params(sql, self, params) {
       Ok(CanonicalStatement::Query(q)) => q,
@@ -370,34 +366,12 @@ where
       }
       Err(e) => return Err(DatabaseError::Other(format!("{e}"))),
     };
-    self.subscribe_query(query, subscriber, scope).await
-  }
-
-  /// Subscribe to a query (unrestricted).
-  pub async fn subscribe_unrestricted(
-    &self,
-    query: EngineQuery,
-    subscriber: Arc<dyn Subscriber>,
-  ) -> Result<SubscriptionId, DatabaseError> {
-    self.subscribe_query(query, subscriber, None).await
+    self.subscribe_query(query, subscriber).await
   }
 
   /// Unsubscribe from a subscription.
   pub async fn unsubscribe(&self, id: SubscriptionId) -> Result<(), DatabaseError> {
     self.engine.unsubscribe(id).await.map_err(Into::into)
-  }
-
-  /// Execute a query with scope.
-  pub async fn execute_with_scope(
-    &self,
-    query: EngineQuery,
-    scope: &SyncScope,
-  ) -> Result<EngineResult, DatabaseError> {
-    self
-      .engine
-      .execute_with_scope(query, scope)
-      .await
-      .map_err(Into::into)
   }
 }
 

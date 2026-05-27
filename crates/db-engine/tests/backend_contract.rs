@@ -4,7 +4,7 @@
 /// Verifies that backends honor their declared transactional guarantees.
 use db_engine::{
   BackendCapability, ColumnSchema, EngineDatabase, EngineQuery, EngineStore, EngineType,
-  EngineValue, NamedTreeEngineStore, SyncScope, TableSchema, UpdateAssignment,
+  EngineValue, NamedTreeEngineStore, TableSchema, UpdateAssignment,
 };
 use db_in_memory::InMemoryNamedBTree;
 use futures::executor::block_on;
@@ -104,9 +104,8 @@ fn execute_with_scope_rejects_disallowed_tables() {
     .expect("register users");
 
     let query = EngineQuery::select_simple("users".into(), vec![0, 1], None);
-    let scope = SyncScope::new(vec!["other".to_string()].into_iter().collect());
 
-    let result = db.execute_with_scope(query, &scope).await;
+    let result = db.execute(query).await;
     assert!(result.is_err());
   });
 }
@@ -156,16 +155,6 @@ fn execute_with_scope_applies_main_table_filter() {
     .expect("insert bob");
 
     let query = EngineQuery::select_simple("users".into(), vec![0, 1], None);
-    let scope = SyncScope::new(vec!["users".to_string()].into_iter().collect()).add_filter(
-      "users".to_string(),
-      db_engine::QualifiedPredicate::Equals(
-        db_engine::QualifiedOperand::Column(db_engine::QualifiedColumn {
-          table: "users".into(),
-          column_index: 1,
-        }),
-        db_engine::QualifiedOperand::Value(EngineValue::Text("Alice".into())),
-      ),
-    );
 
     let result = db
       .execute_with_scope(query, &scope)

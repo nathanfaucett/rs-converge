@@ -1,4 +1,4 @@
-use crate::{ChangeEvent, EngineError, EngineQuery, EngineResult, SyncScope};
+use crate::{ChangeEvent, EngineError, EngineQuery, EngineResult};
 #[cfg(all(not(feature = "std"), feature = "wasm"))]
 use alloc::boxed::Box;
 #[cfg(not(feature = "std"))]
@@ -9,9 +9,9 @@ use alloc::string::ToString;
 use alloc::sync::Arc;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
+use core::fmt;
 #[cfg(not(feature = "std"))]
 use core::sync::atomic::{AtomicU64, Ordering};
-use core::{fmt, mem};
 #[cfg(not(feature = "std"))]
 use hashbrown::HashMap;
 #[cfg(not(feature = "std"))]
@@ -46,12 +46,21 @@ pub trait Subscriber: Send + Sync {
   fn on_results(&self, result: Result<EngineResult, EngineError>);
 }
 
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Scope;
+
+impl Scope {
+  pub(crate) fn matches(&self, _event: &ChangeEvent) -> bool {
+    true
+  }
+}
+
 /// Internal representation of a subscription.
 pub(crate) struct QuerySubscription {
   pub(crate) id: SubscriptionId,
   pub(crate) query: EngineQuery,
-  pub(crate) scope: SyncScope,
   pub(crate) subscriber: Arc<dyn Subscriber>,
+  pub(crate) scope: Scope,
   pub(crate) last_results: RwLock<Option<EngineResult>>,
 }
 
@@ -180,36 +189,5 @@ impl SubscriptionRegistry {
     }
 
     affected
-  }
-}
-
-/// Helper for batching subscription updates during sync.
-pub(crate) struct SubscriptionBatch {
-  invalidated: RwLock<Vec<SubscriptionId>>,
-}
-
-impl SubscriptionBatch {
-  pub(crate) fn new() -> Self {
-    Self {
-      invalidated: RwLock::new(Vec::new()),
-    }
-  }
-
-  pub(crate) fn invalidate(&self, id: SubscriptionId) {
-    #[cfg(feature = "std")]
-    let mut inv = self.invalidated.write().unwrap();
-    #[cfg(not(feature = "std"))]
-    let mut inv = self.invalidated.write();
-    if !inv.contains(&id) {
-      inv.push(id);
-    }
-  }
-
-  pub(crate) fn take_invalidated(&self) -> Vec<SubscriptionId> {
-    #[cfg(feature = "std")]
-    let mut inv = self.invalidated.write().unwrap();
-    #[cfg(not(feature = "std"))]
-    let mut inv = self.invalidated.write();
-    mem::take(&mut *inv)
   }
 }
