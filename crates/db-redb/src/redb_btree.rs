@@ -38,30 +38,6 @@ macro_rules! impl_encoded_debug {
 impl_encoded_debug!(EncodedKey<K>, "EncodedKey");
 impl_encoded_debug!(EncodedValue<V>, "EncodedValue");
 
-impl<T> ValueCodec<T> for RedbKeyCodec
-where
-  T: Debug + Key + 'static,
-  for<'a> T: Value<SelfType<'a> = T>,
-{
-  type Bytes<'a>
-    = <T as Value>::AsBytes<'a>
-  where
-    Self: 'a,
-    T: 'a;
-
-  fn fixed_width() -> Option<usize> {
-    T::fixed_width()
-  }
-
-  fn encode<'a>(value: &'a T) -> Self::Bytes<'a> {
-    T::as_bytes(value)
-  }
-
-  fn decode(data: &[u8]) -> T {
-    T::from_bytes(data)
-  }
-}
-
 impl<T> KeyCodec<T> for RedbKeyCodec
 where
   T: Debug + Key + 'static,
@@ -78,19 +54,49 @@ where
   for<'a> T: Value<SelfType<'a> = T>,
 {
   fn encode_into(&self, value: &T, scratch: &mut KeyScratch) {
-    let bytes = <RedbKeyCodec as ValueCodec<T>>::encode(value);
+    let bytes = <T as Value>::as_bytes(value);
     scratch.buf.extend_from_slice(bytes.as_ref());
   }
 
-  fn compare_encoded(&self, left: &[u8], right: &[u8]) -> std::cmp::Ordering {
+  fn compare_encoded(left: &[u8], right: &[u8]) -> std::cmp::Ordering {
     <RedbKeyCodec as KeyCodec<T>>::compare(left, right)
+  }
+}
+
+impl<T> ValueCodec<T> for RedbKeyCodec
+where
+  T: Debug + Key + 'static,
+  for<'a> T: Value<SelfType<'a> = T>,
+  for<'a> <T as Value>::AsBytes<'a>: AsRef<[u8]>,
+{
+  type Bytes<'a>
+    = <T as Value>::AsBytes<'a>
+  where
+    Self: 'a,
+    T: 'a;
+
+  fn fixed_width() -> Option<usize> {
+    T::fixed_width()
+  }
+
+  fn encode<'a>(value: &'a T) -> Self::Bytes<'a> {
+    <T as Value>::as_bytes(value)
+  }
+
+  fn decode(data: &[u8]) -> T {
+    T::from_bytes(data)
+  }
+
+  fn decode_checked(data: &[u8]) -> Result<T, db_core::DecodeError> {
+    Ok(T::from_bytes(data))
   }
 }
 
 impl<T> ValueCodec<T> for RedbValueCodec
 where
-  T: Debug + Value + 'static,
+  T: Debug + 'static,
   for<'a> T: Value<SelfType<'a> = T>,
+  for<'a> <T as Value>::AsBytes<'a>: AsRef<[u8]>,
 {
   type Bytes<'a>
     = <T as Value>::AsBytes<'a>
@@ -109,6 +115,10 @@ where
   fn decode(data: &[u8]) -> T {
     T::from_bytes(data)
   }
+
+  fn decode_checked(data: &[u8]) -> Result<T, db_core::DecodeError> {
+    Ok(T::from_bytes(data))
+  }
 }
 
 macro_rules! impl_encoded_value {
@@ -117,6 +127,7 @@ macro_rules! impl_encoded_value {
     where
       $value: Debug + 'static,
       C: $codec<$value>,
+      for<'a> C::Bytes<'a>: AsRef<[u8]>,
     {
       type SelfType<'a>
         = $value
@@ -152,13 +163,14 @@ macro_rules! impl_encoded_value {
   };
 }
 
-impl_encoded_value!(EncodedKey<K>, KeyCodec);
+impl_encoded_value!(EncodedKey<K>, ValueCodec);
 impl_encoded_value!(EncodedValue<V>, ValueCodec);
 
 impl<K, C> Key for EncodedKey<K, C>
 where
   K: Debug + 'static,
-  C: KeyCodec<K>,
+  C: KeyCodec<K> + ValueCodec<K>,
+  for<'a> C::Bytes<'a>: AsRef<[u8]>,
 {
   fn compare(data1: &[u8], data2: &[u8]) -> std::cmp::Ordering {
     C::compare(data1, data2)
@@ -173,9 +185,11 @@ fn arc_str_to_static(name: &Arc<str>) -> &'static str {
 pub struct REDBBTree<K, V, KC = RedbKeyCodec, VC = RedbValueCodec>
 where
   K: Debug + 'static,
-  V: Debug + 'static,
-  KC: KeyCodec<K>,
-  VC: ValueCodec<V>,
+  V: Debug + Value + 'static,
+  KC: KeyCodec<K> + ValueCodec<K> + Send + Sync + 'static,
+  for<'a> KC::Bytes<'a>: AsRef<[u8]>,
+  VC: ValueCodec<V> + Send + Sync + 'static,
+  for<'a> VC::Bytes<'a>: AsRef<[u8]>,
 {
   db: Arc<Database>,
   _name: Arc<str>,
@@ -185,9 +199,11 @@ where
 pub struct REDBBTreeTransaction<K, V, KC = RedbKeyCodec, VC = RedbValueCodec>
 where
   K: Debug + 'static,
-  V: Debug + 'static,
-  KC: KeyCodec<K>,
-  VC: ValueCodec<V>,
+  V: Debug + Value + 'static,
+  KC: KeyCodec<K> + ValueCodec<K> + Send + Sync + 'static,
+  for<'a> KC::Bytes<'a>: AsRef<[u8]>,
+  VC: ValueCodec<V> + Send + Sync + 'static,
+  for<'a> VC::Bytes<'a>: AsRef<[u8]>,
 {
   write_tx: WriteTransaction,
   table_definition: TableDefinition<'static, EncodedKey<K, KC>, EncodedValue<V, VC>>,
@@ -195,10 +211,12 @@ where
 
 impl<K, V> REDBBTree<K, V>
 where
-  K: Debug + Clone + Ord + Send + Sync + 'static,
-  V: Debug + Clone + Send + Sync + 'static,
-  RedbKeyCodec: KeyCodec<K>,
+  K: Debug + Clone + Ord + Send + Sync + 'static + Key,
+  V: Debug + Clone + Send + Sync + 'static + Value,
+  RedbKeyCodec: KeyCodec<K> + ValueCodec<K>,
   RedbValueCodec: ValueCodec<V>,
+  for<'a> <RedbKeyCodec as ValueCodec<K>>::Bytes<'a>: AsRef<[u8]>,
+  for<'a> <RedbValueCodec as ValueCodec<V>>::Bytes<'a>: AsRef<[u8]>,
 {
   pub fn open(path: impl AsRef<Path>, table_name: &'static str) -> Result<Self, BTreeError> {
     let db = Database::create(path).map_err(BTreeError::other)?;
@@ -224,10 +242,12 @@ where
 
 impl<K, V, KC, VC> REDBBTree<K, V, KC, VC>
 where
-  K: Debug + Clone + Ord + Send + Sync + 'static,
-  V: Debug + Clone + Send + Sync + 'static,
-  KC: KeyCodec<K>,
-  VC: ValueCodec<V>,
+  K: Debug + Clone + Ord + Send + Sync + 'static + Key,
+  V: Debug + Clone + Send + Sync + 'static + Value,
+  KC: KeyCodec<K> + ValueCodec<K> + Send + Sync + 'static,
+  for<'a> KC::Bytes<'a>: AsRef<[u8]>,
+  VC: ValueCodec<V> + Send + Sync + 'static,
+  for<'a> VC::Bytes<'a>: AsRef<[u8]>,
 {
   pub fn open_with_codecs(
     path: impl AsRef<Path>,
@@ -271,10 +291,12 @@ where
 
 impl<K, V, KC, VC> BTreeReadExecutor<K, V> for REDBBTree<K, V, KC, VC>
 where
-  K: Debug + Clone + Ord + Send + Sync + 'static,
-  V: Debug + Clone + Send + Sync + 'static,
-  KC: KeyCodec<K>,
-  VC: ValueCodec<V>,
+  K: Debug + Clone + Ord + Send + Sync + 'static + Key,
+  V: Debug + Clone + Send + Sync + 'static + Value,
+  KC: KeyCodec<K> + ValueCodec<K> + Send + Sync + 'static,
+  for<'a> KC::Bytes<'a>: AsRef<[u8]>,
+  VC: ValueCodec<V> + Send + Sync + 'static,
+  for<'a> VC::Bytes<'a>: AsRef<[u8]>,
 {
   async fn get<'a, Q>(&'a self, key: Q) -> Result<Option<V>, BTreeError>
   where
@@ -325,10 +347,12 @@ where
 
 impl<K, V, KC, VC> BTreeWriteExecutor<K, V> for REDBBTree<K, V, KC, VC>
 where
-  K: Debug + Clone + Ord + Send + Sync + 'static,
-  V: Debug + Clone + Send + Sync + 'static,
-  KC: KeyCodec<K>,
-  VC: ValueCodec<V>,
+  K: Debug + Clone + Ord + Send + Sync + 'static + Key,
+  V: Debug + Clone + Send + Sync + 'static + Value,
+  KC: KeyCodec<K> + ValueCodec<K> + Send + Sync + 'static,
+  for<'a> KC::Bytes<'a>: AsRef<[u8]>,
+  VC: ValueCodec<V> + Send + Sync + 'static,
+  for<'a> VC::Bytes<'a>: AsRef<[u8]>,
 {
   async fn insert(&mut self, key: K, value: V) -> Result<(), BTreeError>
   where
@@ -372,10 +396,12 @@ where
 
 impl<K, V, KC, VC> BTree<K, V> for REDBBTree<K, V, KC, VC>
 where
-  K: Debug + Clone + Ord + Send + Sync + 'static,
-  V: Debug + Clone + Send + Sync + 'static,
-  KC: KeyCodec<K>,
-  VC: ValueCodec<V>,
+  K: Debug + Clone + Ord + Send + Sync + 'static + Key,
+  V: Debug + Clone + Send + Sync + 'static + Value,
+  KC: KeyCodec<K> + ValueCodec<K> + Send + Sync + 'static,
+  for<'a> KC::Bytes<'a>: AsRef<[u8]>,
+  VC: ValueCodec<V> + Send + Sync + 'static,
+  for<'a> VC::Bytes<'a>: AsRef<[u8]>,
 {
   type Transaction = REDBBTreeTransaction<K, V, KC, VC>;
 
@@ -396,10 +422,12 @@ pub type RedbTable<'a, K, V, KC, VC> = redb::Table<'a, EncodedKey<K, KC>, Encode
 
 impl<K, V, KC, VC> REDBBTreeTransaction<K, V, KC, VC>
 where
-  K: Debug + Clone + Ord + Send + Sync + 'static,
-  V: Debug + Clone + Send + Sync + 'static,
-  KC: KeyCodec<K>,
-  VC: ValueCodec<V>,
+  K: Debug + Clone + Ord + Send + Sync + 'static + Key,
+  V: Debug + Clone + Send + Sync + 'static + Value,
+  KC: KeyCodec<K> + ValueCodec<K> + Send + Sync + 'static,
+  for<'a> KC::Bytes<'a>: AsRef<[u8]>,
+  VC: ValueCodec<V> + Send + Sync + 'static,
+  for<'a> VC::Bytes<'a>: AsRef<[u8]>,
 {
   fn open_table(&self) -> Result<RedbTable<'_, K, V, KC, VC>, BTreeError> {
     self
@@ -411,10 +439,12 @@ where
 
 impl<K, V, KC, VC> BTreeReadExecutor<K, V> for REDBBTreeTransaction<K, V, KC, VC>
 where
-  K: Debug + Clone + Ord + Send + Sync + 'static,
-  V: Debug + Clone + Send + Sync + 'static,
-  KC: KeyCodec<K>,
-  VC: ValueCodec<V>,
+  K: Debug + Clone + Ord + Send + Sync + 'static + Key,
+  V: Debug + Clone + Send + Sync + 'static + Value,
+  KC: KeyCodec<K> + ValueCodec<K> + Send + Sync + 'static,
+  for<'a> KC::Bytes<'a>: AsRef<[u8]>,
+  VC: ValueCodec<V> + Send + Sync + 'static,
+  for<'a> VC::Bytes<'a>: AsRef<[u8]>,
 {
   async fn get<'a, Q>(&'a self, key: Q) -> Result<Option<V>, BTreeError>
   where
@@ -454,10 +484,12 @@ where
 
 impl<K, V, KC, VC> BTreeWriteExecutor<K, V> for REDBBTreeTransaction<K, V, KC, VC>
 where
-  K: Debug + Clone + Ord + Send + Sync + 'static,
-  V: Debug + Clone + Send + Sync + 'static,
-  KC: KeyCodec<K>,
-  VC: ValueCodec<V>,
+  K: Debug + Clone + Ord + Send + Sync + 'static + Key,
+  V: Debug + Clone + Send + Sync + 'static + Value,
+  KC: KeyCodec<K> + ValueCodec<K> + Send + Sync + 'static,
+  for<'a> KC::Bytes<'a>: AsRef<[u8]>,
+  VC: ValueCodec<V> + Send + Sync + 'static,
+  for<'a> VC::Bytes<'a>: AsRef<[u8]>,
 {
   async fn insert(&mut self, key: K, value: V) -> Result<(), BTreeError>
   where
@@ -481,10 +513,12 @@ where
 
 impl<K, V, KC, VC> BTreeTransaction<K, V> for REDBBTreeTransaction<K, V, KC, VC>
 where
-  K: Debug + Clone + Ord + Send + Sync + 'static,
-  V: Debug + Clone + Send + Sync + 'static,
-  KC: KeyCodec<K>,
-  VC: ValueCodec<V>,
+  K: Debug + Clone + Ord + Send + Sync + 'static + Key,
+  V: Debug + Clone + Send + Sync + 'static + Value,
+  KC: KeyCodec<K> + ValueCodec<K> + Send + Sync + 'static,
+  for<'a> KC::Bytes<'a>: AsRef<[u8]>,
+  VC: ValueCodec<V> + Send + Sync + 'static,
+  for<'a> VC::Bytes<'a>: AsRef<[u8]>,
 {
   async fn commit(self) -> Result<(), BTreeError> {
     self.write_tx.commit().map_err(BTreeError::other)

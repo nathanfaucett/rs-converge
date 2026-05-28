@@ -295,7 +295,6 @@ dependencies = [
  "base64",
  "db-core",
  "db-engine",
- "db-in-memory",
  "futures",
  "sha2 0.10.9",
  "uuid",
@@ -307,8 +306,6 @@ version = "0.1.0"
 dependencies = [
  "async-lock",
  "async-stream",
- "db-in-memory",
- "db-redb",
  "futures",
  "serde",
  "serde-wasm-bindgen",
@@ -323,7 +320,6 @@ version = "0.1.0"
 dependencies = [
  "async-stream",
  "db-core",
- "db-in-memory",
  "futures",
  "hashbrown 0.17.0",
  "proptest",
@@ -344,23 +340,11 @@ dependencies = [
  "db-automerge",
  "db-core",
  "db-engine",
- "db-in-memory",
  "db-redb",
  "db-sql-to-engine",
  "futures",
  "redb",
  "uuid",
-]
-
-[[package]]
-name = "db-in-memory"
-version = "0.1.0"
-dependencies = [
- "async-lock",
- "async-stream",
- "db-core",
- "db-engine",
- "futures",
 ]
 
 [[package]]
@@ -401,7 +385,6 @@ dependencies = [
  "db-core",
  "db-engine",
  "db-facade",
- "db-in-memory",
  "db-sql-to-engine",
  "futures",
  "js-sys",

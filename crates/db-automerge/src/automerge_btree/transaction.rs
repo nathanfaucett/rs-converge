@@ -541,7 +541,12 @@ where
 impl<T, KC, VC> BTreeReadExecutor<Uuid, AutoCommit> for AutomergeEncodedTransaction<T, KC, VC>
 where
   T: BTreeTransaction<Vec<u8>, Vec<u8>> + Send,
-  KC: db_core::FastKeyCodec<DocumentChangeKey> + Clone + Send + Sync + 'static,
+  KC: db_core::ValueCodec<DocumentChangeKey>
+    + db_core::FastKeyCodec<DocumentChangeKey>
+    + Clone
+    + Send
+    + Sync
+    + 'static,
   VC: db_core::ValueCodec<AutomergeEntry> + Clone + Send + Sync + 'static,
 {
   async fn get<'a, Q>(&'a self, key: Q) -> Result<Option<AutoCommit>, BTreeError>

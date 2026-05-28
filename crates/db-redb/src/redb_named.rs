@@ -6,7 +6,8 @@ use db_core::{BTreeError, BTreeResult, KeyCodec, MaybeSend, NamedBTreeMap, Value
 use db_engine::{EngineStoreBackend, EngineStoreTransaction};
 use futures::Stream;
 use redb::{
-  Database, ReadTransaction, ReadableDatabase, ReadableTable, TableDefinition, WriteTransaction,
+  Database, Key, ReadTransaction, ReadableDatabase, ReadableTable, TableDefinition, Value,
+  WriteTransaction,
 };
 
 use crate::redb_btree::{EncodedKey, EncodedValue, REDBBTree, RedbKeyCodec, RedbValueCodec};
@@ -66,8 +67,10 @@ pub struct REDBNamedTransaction<K, V, KC = RedbKeyCodec, VC = RedbValueCodec>
 where
   K: Debug + 'static,
   V: Debug + 'static,
-  KC: KeyCodec<K>,
+  KC: KeyCodec<K> + ValueCodec<K>,
+  for<'a> KC::Bytes<'a>: AsRef<[u8]>,
   VC: ValueCodec<V>,
+  for<'a> VC::Bytes<'a>: AsRef<[u8]>,
 {
   txn: REDBNamedTransactionKind,
   names: Arc<NameStore>,
@@ -76,10 +79,12 @@ where
 
 impl<K, V, KC, VC> REDBNamedTransaction<K, V, KC, VC>
 where
-  K: Debug + Clone + Ord + Send + Sync + 'static,
+  K: Debug + Clone + Ord + Send + Sync + 'static + Key,
   V: Debug + Clone + Send + Sync + 'static,
-  KC: KeyCodec<K> + Default + Send + Sync + 'static,
+  KC: KeyCodec<K> + ValueCodec<K> + Default + Send + Sync + 'static,
+  for<'a> KC::Bytes<'a>: AsRef<[u8]>,
   VC: ValueCodec<V> + Default + Send + Sync + 'static,
+  for<'a> VC::Bytes<'a>: AsRef<[u8]>,
 {
   pub fn named_commit(self) -> BTreeResult<()> {
     match self.txn {
@@ -98,10 +103,12 @@ where
 
 impl<K, V, KC, VC> EngineStoreTransaction<K, V> for REDBNamedTransaction<K, V, KC, VC>
 where
-  K: Debug + Clone + Ord + Send + Sync + 'static,
+  K: Debug + Clone + Ord + Send + Sync + 'static + Key,
   V: Debug + Clone + Send + Sync + 'static,
-  KC: KeyCodec<K> + Default + Send + Sync + 'static,
+  KC: KeyCodec<K> + ValueCodec<K> + Default + Send + Sync + 'static,
+  for<'a> KC::Bytes<'a>: AsRef<[u8]>,
   VC: ValueCodec<V> + Default + Send + Sync + 'static,
+  for<'a> VC::Bytes<'a>: AsRef<[u8]>,
 {
   async fn get<'a>(&'a mut self, tree: &'a str, key: &'a K) -> BTreeResult<Option<V>>
   where
@@ -220,9 +227,9 @@ where
 #[derive(Clone)]
 pub struct REDBNamedBTree<K, V, KC = RedbKeyCodec, VC = RedbValueCodec>
 where
-  K: Debug + 'static,
-  V: Debug + 'static,
-  KC: KeyCodec<K>,
+  K: Debug + Key + 'static,
+  V: Debug + Value + 'static,
+  KC: KeyCodec<K> + ValueCodec<K>,
   VC: ValueCodec<V>,
 {
   db: Arc<Database>,
@@ -232,10 +239,12 @@ where
 
 impl<K, V> REDBNamedBTree<K, V>
 where
-  K: Debug + Clone + Ord + Send + Sync + 'static,
-  V: Debug + Clone + Send + Sync + 'static,
-  RedbKeyCodec: KeyCodec<K>,
+  K: Debug + Clone + Ord + Send + Sync + 'static + Key,
+  V: Debug + Clone + Send + Sync + 'static + redb::Value,
+  RedbKeyCodec: KeyCodec<K> + ValueCodec<K>,
+  for<'a> <RedbKeyCodec as ValueCodec<K>>::Bytes<'a>: AsRef<[u8]>,
   RedbValueCodec: ValueCodec<V>,
+  for<'a> <RedbValueCodec as ValueCodec<V>>::Bytes<'a>: AsRef<[u8]>,
 {
   pub fn open(path: impl AsRef<Path>) -> Result<Self, BTreeError> {
     let db = Database::create(path).map_err(BTreeError::other)?;
@@ -257,10 +266,12 @@ where
 
 impl<K, V, KC, VC> REDBNamedBTree<K, V, KC, VC>
 where
-  K: Debug + Clone + Ord + Send + Sync + 'static,
-  V: Debug + Clone + Send + Sync + 'static,
-  KC: KeyCodec<K>,
+  K: Debug + Clone + Ord + Send + Sync + 'static + Key,
+  V: Debug + Clone + Send + Sync + 'static + redb::Value,
+  KC: KeyCodec<K> + ValueCodec<K>,
+  for<'a> KC::Bytes<'a>: AsRef<[u8]>,
   VC: ValueCodec<V>,
+  for<'a> VC::Bytes<'a>: AsRef<[u8]>,
 {
   pub fn open_with_codecs(path: impl AsRef<Path>) -> Result<Self, BTreeError> {
     let db = Database::create(path).map_err(BTreeError::other)?;
@@ -282,10 +293,12 @@ where
 
 impl<K, V, KC, VC> NamedBTreeMap<K, V> for REDBNamedBTree<K, V, KC, VC>
 where
-  K: Debug + Clone + Ord + Send + Sync + 'static,
-  V: Debug + Clone + Send + Sync + 'static,
-  KC: KeyCodec<K> + Default + Clone + Send + Sync + 'static,
+  K: Debug + Clone + Ord + Send + Sync + 'static + Key,
+  V: Debug + Clone + Send + Sync + 'static + redb::Value,
+  KC: KeyCodec<K> + ValueCodec<K> + Default + Clone + Send + Sync + 'static,
+  for<'a> KC::Bytes<'a>: AsRef<[u8]>,
   VC: ValueCodec<V> + Default + Clone + Send + Sync + 'static,
+  for<'a> VC::Bytes<'a>: AsRef<[u8]>,
 {
   type Tree = REDBBTree<K, V, KC, VC>;
 
@@ -352,16 +365,19 @@ where
 
 impl<K, V, KC, VC> EngineStoreBackend<K, V> for REDBNamedBTree<K, V, KC, VC>
 where
-  K: Debug + Clone + Ord + Send + Sync + 'static,
+  K: Debug + Clone + Ord + Send + Sync + 'static + Key,
   V: Debug + Clone + Send + Sync + 'static,
-  KC: KeyCodec<K> + Default + Clone + Send + Sync + 'static,
+  KC: KeyCodec<K> + ValueCodec<K> + Default + Clone + Send + Sync + 'static,
+  for<'a> KC::Bytes<'a>: AsRef<[u8]>,
   VC: ValueCodec<V> + Default + Clone + Send + Sync + 'static,
+  for<'a> VC::Bytes<'a>: AsRef<[u8]>,
 {
   type Transaction = REDBNamedTransaction<K, V, KC, VC>;
 
-  fn begin_transaction(
-    &self,
-  ) -> impl core::future::Future<Output = BTreeResult<Self::Transaction>> + '_ {
+  fn begin_transaction<'a>(
+    &'a self,
+    _tree_name: &'a str,
+  ) -> impl core::future::Future<Output = BTreeResult<Self::Transaction>> + 'a {
     let db = Arc::clone(&self.db);
     let names = Arc::clone(&self.names);
     async move {
@@ -374,9 +390,10 @@ where
     }
   }
 
-  fn begin_read_transaction(
-    &self,
-  ) -> impl core::future::Future<Output = BTreeResult<Self::Transaction>> + '_ {
+  fn begin_read_transaction<'a>(
+    &'a self,
+    _tree_name: &'a str,
+  ) -> impl core::future::Future<Output = BTreeResult<Self::Transaction>> + 'a {
     let db = Arc::clone(&self.db);
     let names = Arc::clone(&self.names);
     async move {
@@ -393,8 +410,8 @@ where
 #[cfg(test)]
 mod tests {
   use super::*;
-  use db_core::{BTreeError, block_on};
-  use futures::StreamExt;
+  use db_core::BTreeError;
+  use futures::{StreamExt, executor::block_on};
   use std::path::PathBuf;
   use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -412,14 +429,14 @@ mod tests {
     let backend = REDBNamedBTree::<u64, u64>::open(&path).expect("open redb");
 
     block_on(async {
-      let mut tx = backend.begin_transaction().await.expect("begin tx");
+      let mut tx = backend.begin_transaction("tree").await.expect("begin tx");
       tx.insert("tree", 1, 100).await.expect("insert");
       tx.commit().await.expect("commit");
     });
 
     block_on(async {
       let mut tx = backend
-        .begin_read_transaction()
+        .begin_read_transaction("tree")
         .await
         .expect("begin read tx");
       assert_eq!(tx.get("tree", &1).await.expect("get"), Some(100));

@@ -17,9 +17,11 @@ use std::{
 use async_stream::stream;
 use core::ops::RangeBounds;
 use db_core::{
-  BTree, BTreeError, BTreeReadExecutor, BTreeTransaction, BTreeWriteExecutor, MaybeSend,
-  MaybeSendFuture, MaybeSendStream, MaybeSync, NamedBTreeMap, ValueCodec,
+  BTree, BTreeError, BTreeReadExecutor, BTreeResult, BTreeTransaction, BTreeWriteExecutor,
+  MaybeSend, MaybeSendFuture, MaybeSendStream, MaybeSync, NamedBTreeMap, ValueCodec,
 };
+#[cfg(feature = "in-memory")]
+use db_in_memory::{InMemoryNamedBTree, InMemoryNamedTreeTransaction};
 use futures::{StreamExt, pin_mut};
 use hashbrown::HashMap;
 
@@ -82,15 +84,85 @@ pub trait EngineStoreBackend<K = EngineKey, V = Vec<u8>>:
 where
   Self::Tree: BTree<K, V> + MaybeSend + MaybeSync + 'static,
 {
-  type Transaction: BTreeTransaction<K, V> + MaybeSend + MaybeSync;
+  type Transaction: EngineStoreTransaction<K, V> + MaybeSend + MaybeSync;
 
   fn begin_transaction<'a>(
     &'a self,
     tree_name: &'a str,
-  ) -> impl MaybeSendFuture<Output = Result<Self::Transaction, BTreeError>> + 'a
+  ) -> impl MaybeSendFuture<Output = Result<Self::Transaction, BTreeError>> + 'a;
+
+  fn begin_read_transaction<'a>(
+    &'a self,
+    tree_name: &'a str,
+  ) -> impl MaybeSendFuture<Output = Result<Self::Transaction, BTreeError>> + 'a;
+}
+
+#[cfg(feature = "in-memory")]
+impl<K, V> EngineStoreTransaction<K, V> for InMemoryNamedTreeTransaction<K, V>
+where
+  K: Clone + Ord + Send + Sync + 'static,
+  V: Clone + Send + Sync + 'static,
+{
+  async fn get<'a>(&'a mut self, _tree: &'a str, key: &'a K) -> BTreeResult<Option<V>>
   where
-    Self::Tree: BTree<K, V, Transaction = Self::Transaction>,
+    K: Ord,
   {
+    BTreeReadExecutor::get(self, key).await
+  }
+
+  async fn insert<'a>(&'a mut self, _tree: &'a str, key: K, value: V) -> BTreeResult<()>
+  where
+    K: Ord,
+  {
+    BTreeWriteExecutor::insert(self, key, value).await
+  }
+
+  async fn remove<'a>(&'a mut self, _tree: &'a str, key: &'a K) -> BTreeResult<Option<V>>
+  where
+    K: Ord,
+  {
+    BTreeWriteExecutor::remove(self, key).await
+  }
+
+  fn range<'a, R>(
+    &'a self,
+    _tree: &'a str,
+    range: R,
+  ) -> impl MaybeSendStream<Item = BTreeResult<(K, V)>> + 'a
+  where
+    K: Ord + Clone,
+    R: RangeBounds<K> + MaybeSend + 'a,
+  {
+    BTreeReadExecutor::range(self, range)
+  }
+
+  async fn commit(self) -> BTreeResult<()>
+  where
+    Self: Sized,
+  {
+    BTreeTransaction::commit(self).await
+  }
+
+  async fn rollback(self) -> BTreeResult<()>
+  where
+    Self: Sized,
+  {
+    BTreeTransaction::rollback(self).await
+  }
+}
+
+#[cfg(feature = "in-memory")]
+impl<K, V> EngineStoreBackend<K, V> for InMemoryNamedBTree<K, V>
+where
+  K: Clone + Ord + Send + Sync + 'static,
+  V: Clone + Send + Sync + 'static,
+{
+  type Transaction = InMemoryNamedTreeTransaction<K, V>;
+
+  fn begin_transaction<'a>(
+    &'a self,
+    tree_name: &'a str,
+  ) -> impl MaybeSendFuture<Output = Result<Self::Transaction, BTreeError>> + 'a {
     async move {
       let tree = self.get_tree(tree_name).await?;
       tree.transaction().await
@@ -100,21 +172,9 @@ where
   fn begin_read_transaction<'a>(
     &'a self,
     tree_name: &'a str,
-  ) -> impl MaybeSendFuture<Output = Result<Self::Transaction, BTreeError>> + 'a
-  where
-    Self::Tree: BTree<K, V, Transaction = Self::Transaction>,
-  {
+  ) -> impl MaybeSendFuture<Output = Result<Self::Transaction, BTreeError>> + 'a {
     self.begin_transaction(tree_name)
   }
-}
-
-impl<T, K, V> EngineStoreBackend<K, V> for T
-where
-  T: NamedBTreeMap<K, V> + Clone + MaybeSend + MaybeSync + 'static,
-  T::Tree: BTree<K, V> + MaybeSend + MaybeSync + 'static,
-  <T::Tree as BTree<K, V>>::Transaction: BTreeTransaction<K, V> + MaybeSend + MaybeSync + 'static,
-{
-  type Transaction = <T::Tree as BTree<K, V>>::Transaction;
 }
 
 pub struct NamedTreeEngineTransaction<S>

@@ -79,7 +79,12 @@ pub trait FacadeStore: Clone + MaybeSend + MaybeSync + 'static {
 
 impl<T> FacadeStore for T
 where
-  T: Clone + NamedBTreeMap<EngineKey, Vec<u8>> + MaybeSend + MaybeSync + 'static,
+  T: Clone
+    + NamedBTreeMap<EngineKey, Vec<u8>>
+    + db_engine::EngineStoreBackend<EngineKey, Vec<u8>>
+    + MaybeSend
+    + MaybeSync
+    + 'static,
 {
   type EngineStore = Self;
 

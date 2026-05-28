@@ -43,7 +43,7 @@ where
     + Sync
     + 'static,
 {
-  let mut tx = layout.begin_transaction().await?;
+  let mut tx = layout.begin_transaction(tree).await?;
   let _ = tx.remove(tree, &init_sentinel_key()).await?;
   tx.commit().await
 }
@@ -57,7 +57,7 @@ where
     + Sync
     + 'static,
 {
-  let mut tx = layout.begin_transaction().await?;
+  let mut tx = layout.begin_transaction(TREE_CATALOG_NAME).await?;
   tx.insert(
     TREE_CATALOG_NAME,
     tree_catalog_key(tree),
@@ -83,7 +83,7 @@ where
     return names;
   }
 
-  let Ok(tx) = layout.begin_transaction().await else {
+  let Ok(tx) = layout.begin_transaction(TREE_CATALOG_NAME).await else {
     return names;
   };
 

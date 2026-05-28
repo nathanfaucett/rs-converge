@@ -14,12 +14,7 @@ name = "db_facade"
 
 [features]
 default = ["std"]
-std = [
-  "db-core/std",
-  "db-engine/std",
-  "db-in-memory/std",
-  "db-sql-to-engine/std",
-]
+std = ["db-core/std", "db-engine/std", "db-sql-to-engine/std"]
 redb = ["std", "db-redb", "dep:redb"]
 automerge = ["std", "db-automerge"]
 
@@ -27,10 +22,7 @@ automerge = ["std", "db-automerge"]
 # Workspace crates
 db-automerge = { path = "../db-automerge", default-features = false, optional = true }
 db-core = { path = "../db-core", default-features = false }
-db-engine = { path = "../db-engine", default-features = false, features = [
-  "in-memory",
-] }
-db-in-memory = { path = "../db-in-memory", default-features = false }
+db-engine = { path = "../db-engine", default-features = false, features = [] }
 db-redb = { path = "../db-redb", default-features = false, optional = true }
 db-sql-to-engine = { path = "../db-sql-to-engine", default-features = false }
 

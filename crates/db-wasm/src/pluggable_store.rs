@@ -2,7 +2,7 @@ use async_stream::stream;
 use core::borrow::Borrow;
 use core::ops::RangeBounds;
 use db_core::{BTree, BTreeError, BTreeResult, MaybeSend, NamedBTreeMap};
-use db_engine::{EngineKey, EngineStoreBackend, EngineStoreTransaction};
+use db_engine::{EngineKey, EngineStoreTransaction};
 use db_in_memory::InMemoryNamedBTree;
 use futures::{Stream, StreamExt, pin_mut};
 
@@ -94,7 +94,9 @@ where
   }
 }
 
+#[derive(Clone)]
 pub enum PluggableBackendTree {
+  InMemory(db_in_memory::InMemoryNamedTree<EngineKey, Vec<u8>>),
   External(StoreAdapterTree),
 }
 
@@ -108,7 +110,10 @@ impl NamedBTreeMap<EngineKey, Vec<u8>> for PluggableBackendStore {
     let name = name.to_string();
     async move {
       match self {
-        PluggableBackendStore::InMemory(_) => Err(BTreeError::UnsupportedOperation),
+        PluggableBackendStore::InMemory(store) => {
+          let tree = store.get_tree(&name).await?;
+          Ok(PluggableBackendTree::InMemory(tree))
+        }
         PluggableBackendStore::External(adapter) => {
           let tree = adapter.get_tree(&name).await?;
           Ok(PluggableBackendTree::External(tree))
@@ -124,6 +129,9 @@ impl NamedBTreeMap<EngineKey, Vec<u8>> for PluggableBackendStore {
   ) -> impl core::future::Future<Output = BTreeResult<()>> + '_ {
     async move {
       match (self, tree) {
+        (PluggableBackendStore::InMemory(store), PluggableBackendTree::InMemory(tree)) => {
+          store.insert_tree(name, tree).await
+        }
         (PluggableBackendStore::External(adapter), PluggableBackendTree::External(tree)) => {
           adapter.insert_tree(name, tree).await
         }
@@ -154,16 +162,40 @@ impl NamedBTreeMap<EngineKey, Vec<u8>> for PluggableBackendStore {
 impl EngineStoreBackend<EngineKey, Vec<u8>> for PluggableBackendStore {
   type Transaction = PluggableBackendTransaction;
 
-  async fn begin_transaction(&self) -> BTreeResult<Self::Transaction> {
-    match self {
-      PluggableBackendStore::InMemory(store) => Ok(PluggableBackendTransaction::InMemory(
-        InMemoryNamedTreeBackendTransaction {
-          store: store.clone(),
-        },
-      )),
-      PluggableBackendStore::External(adapter) => {
-        let tx = adapter.begin_transaction().await?;
-        Ok(PluggableBackendTransaction::External(tx))
+  fn begin_transaction<'a>(
+    &'a self,
+    _tree_name: &'a str,
+  ) -> impl core::future::Future<Output = BTreeResult<Self::Transaction>> + 'a {
+    async move {
+      match self {
+        PluggableBackendStore::InMemory(store) => Ok(PluggableBackendTransaction::InMemory(
+          InMemoryNamedTreeBackendTransaction {
+            store: store.clone(),
+          },
+        )),
+        PluggableBackendStore::External(adapter) => {
+          let tx = adapter.begin_transaction().await?;
+          Ok(PluggableBackendTransaction::External(tx))
+        }
+      }
+    }
+  }
+
+  fn begin_read_transaction<'a>(
+    &'a self,
+    _tree_name: &'a str,
+  ) -> impl core::future::Future<Output = BTreeResult<Self::Transaction>> + 'a {
+    async move {
+      match self {
+        PluggableBackendStore::InMemory(store) => Ok(PluggableBackendTransaction::InMemory(
+          InMemoryNamedTreeBackendTransaction {
+            store: store.clone(),
+          },
+        )),
+        PluggableBackendStore::External(adapter) => {
+          let tx = adapter.begin_read_transaction().await?;
+          Ok(PluggableBackendTransaction::External(tx))
+        }
       }
     }
   }
@@ -266,6 +298,7 @@ impl db_core::BTreeWriteExecutor<EngineKey, Vec<u8>> for PluggableBackendTree {
     Q: Borrow<EngineKey> + MaybeSend + 'a,
   {
     match self {
+      PluggableBackendTree::InMemory(tree) => tree.get(key).await,
       PluggableBackendTree::External(tree) => tree.get(key).await,
     }
   }
@@ -275,6 +308,7 @@ impl db_core::BTreeWriteExecutor<EngineKey, Vec<u8>> for PluggableBackendTree {
     EngineKey: Ord,
   {
     match self {
+      PluggableBackendTree::InMemory(tree) => tree.insert(key, value).await,
       PluggableBackendTree::External(tree) => tree.insert(key, value).await,
     }
   }
@@ -285,6 +319,7 @@ impl db_core::BTreeWriteExecutor<EngineKey, Vec<u8>> for PluggableBackendTree {
     Q: Borrow<EngineKey> + MaybeSend + 'a,
   {
     match self {
+      PluggableBackendTree::InMemory(tree) => tree.remove(key).await,
       PluggableBackendTree::External(tree) => tree.remove(key).await,
     }
   }
@@ -296,6 +331,13 @@ impl db_core::BTreeWriteExecutor<EngineKey, Vec<u8>> for PluggableBackendTree {
   {
     stream! {
       match self {
+        PluggableBackendTree::InMemory(tree) => {
+          let rows = tree.range(range);
+          pin_mut!(rows);
+          while let Some(item) = rows.next().await {
+            yield item;
+          }
+        }
         PluggableBackendTree::External(tree) => {
           let rows = tree.range(range);
           pin_mut!(rows);
@@ -309,11 +351,19 @@ impl db_core::BTreeWriteExecutor<EngineKey, Vec<u8>> for PluggableBackendTree {
 }
 
 impl db_core::BTree<EngineKey, Vec<u8>> for PluggableBackendTree {
-  type Transaction = StoreAdapterTransaction;
+  type Transaction = PluggableBackendTransaction;
 
   async fn transaction(&self) -> BTreeResult<Self::Transaction> {
     match self {
-      PluggableBackendTree::External(tree) => tree.transaction().await,
+      PluggableBackendTree::InMemory(tree) => Ok(PluggableBackendTransaction::InMemory(
+        InMemoryNamedTreeBackendTransaction {
+          store: tree.clone(),
+        },
+      )),
+      PluggableBackendTree::External(tree) => {
+        let tx = tree.transaction().await?;
+        Ok(PluggableBackendTransaction::External(tx))
+      }
     }
   }
 }

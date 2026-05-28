@@ -383,7 +383,7 @@ where
     EngineKey: Ord,
     Q: Borrow<EngineKey> + Send + 'a,
   {
-    let mut tx = self.store.begin_transaction().await?;
+    let mut tx = self.store.begin_transaction(&self.name).await?;
     tx.get(&self.name, key.borrow()).await
   }
 
@@ -396,7 +396,7 @@ where
     R: core::ops::RangeBounds<EngineKey> + Send + 'a,
   {
     stream! {
-      let tx = match self.store.begin_transaction().await {
+      let tx = match self.store.begin_transaction(&self.name).await {
         Ok(tx) => tx,
         Err(e) => { yield Err(e); return; }
       };
@@ -423,7 +423,7 @@ where
   where
     EngineKey: Ord,
   {
-    let mut tx = self.store.begin_transaction().await?;
+    let mut tx = self.store.begin_transaction(&self.name).await?;
     tx.insert(&self.name, key, value).await?;
     tx.commit().await
   }
@@ -433,7 +433,7 @@ where
     EngineKey: Ord,
     Q: Borrow<EngineKey> + Send + 'a,
   {
-    let mut tx = self.store.begin_transaction().await?;
+    let mut tx = self.store.begin_transaction(&self.name).await?;
     let removed = tx.remove(&self.name, key.borrow()).await?;
     tx.commit().await?;
     Ok(removed)
@@ -530,7 +530,7 @@ where
 
   async fn transaction(&self) -> Result<Self::Transaction, BTreeError> {
     Ok(AutomergeFormatTreeTransaction {
-      inner: self.store.begin_transaction().await?,
+      inner: self.store.begin_transaction(&self.name).await?,
       name: self.name.clone(),
     })
   }
@@ -564,7 +564,7 @@ where
   ) -> impl core::future::Future<Output = Result<(), BTreeError>> + Send + '_ {
     let name = name.to_string();
     async move {
-      let mut tx = tree.store.begin_transaction().await?;
+      let mut tx = tree.store.begin_transaction(&tree.name).await?;
       let tree_name = tree.name;
       let mut entries = Vec::new();
       {
@@ -588,7 +588,7 @@ where
     let store = self.clone();
     let name = name.to_string();
     async move {
-      let mut tx = store.begin_transaction().await?;
+      let mut tx = store.begin_transaction(&name).await?;
       let mut keys = Vec::new();
       {
         let range_stream = tx.range(&name, ..);
@@ -608,7 +608,7 @@ where
   fn list_names(&self) -> impl core::future::Future<Output = Vec<String>> + Send + '_ {
     let store = self.clone();
     async move {
-      let tx = match store.begin_transaction().await {
+      let tx = match store.begin_transaction(TREE_CATALOG_NAME).await {
         Ok(tx) => tx,
         Err(_) => return Vec::new(),
       };
@@ -647,6 +647,7 @@ where
 
   fn begin_transaction<'a>(
     &'a self,
+    _tree_name: &'a str,
   ) -> impl core::future::Future<Output = Result<Self::Transaction, BTreeError>> + Send + 'a {
     let store = self.clone();
     async move {
@@ -655,6 +656,13 @@ where
         patches: BTreeMap::new(),
       })
     }
+  }
+
+  fn begin_read_transaction<'a>(
+    &'a self,
+    _tree_name: &'a str,
+  ) -> impl core::future::Future<Output = Result<Self::Transaction, BTreeError>> + Send + 'a {
+    self.begin_transaction(_tree_name)
   }
 }
 

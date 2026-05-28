@@ -328,7 +328,12 @@ where
 impl<B, KC, VC> AutomergeBTreeEncoded<B, KC, VC>
 where
   B: BTree<Vec<u8>, Vec<u8>> + Clone + Send + Sync + 'static,
-  KC: db_core::FastKeyCodec<DocumentChangeKey> + Clone + Send + Sync + 'static,
+  KC: db_core::ValueCodec<DocumentChangeKey>
+    + db_core::FastKeyCodec<DocumentChangeKey>
+    + Clone
+    + Send
+    + Sync
+    + 'static,
   VC: db_core::ValueCodec<AutomergeEntry> + Clone + Send + Sync + 'static,
 {
   fn decode_entry_bytes(data: &[u8]) -> Vec<u8> {
@@ -399,7 +404,12 @@ where
 impl<B, KC, VC> BTreeReadExecutor<Uuid, AutoCommit> for AutomergeBTreeEncoded<B, KC, VC>
 where
   B: BTree<Vec<u8>, Vec<u8>> + Clone + Send + Sync + 'static,
-  KC: db_core::FastKeyCodec<DocumentChangeKey> + Clone + Send + Sync + 'static,
+  KC: db_core::ValueCodec<DocumentChangeKey>
+    + db_core::FastKeyCodec<DocumentChangeKey>
+    + Clone
+    + Send
+    + Sync
+    + 'static,
   VC: db_core::ValueCodec<AutomergeEntry> + Clone + Send + Sync + 'static,
 {
   async fn get<'a, Q>(&'a self, key: Q) -> Result<Option<AutoCommit>, BTreeError>
@@ -472,7 +482,12 @@ where
 impl<B, KC, VC> BTreeWriteExecutor<Uuid, AutoCommit> for AutomergeBTreeEncoded<B, KC, VC>
 where
   B: BTree<Vec<u8>, Vec<u8>> + BTreeWriteExecutor<Vec<u8>, Vec<u8>> + Clone + Send + Sync + 'static,
-  KC: db_core::FastKeyCodec<DocumentChangeKey> + Clone + Send + Sync + 'static,
+  KC: db_core::ValueCodec<DocumentChangeKey>
+    + db_core::FastKeyCodec<DocumentChangeKey>
+    + Clone
+    + Send
+    + Sync
+    + 'static,
   VC: db_core::ValueCodec<AutomergeEntry> + Clone + Send + Sync + 'static,
 {
   async fn insert<'a>(&'a mut self, key: Uuid, value: AutoCommit) -> Result<(), BTreeError>

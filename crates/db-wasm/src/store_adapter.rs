@@ -2,7 +2,7 @@ use async_stream::stream;
 use core::fmt;
 use core::ops::{Bound, RangeBounds};
 use db_core::{BTree, BTreeError, BTreeResult, MaybeSend, NamedBTreeMap};
-use db_engine::{EngineKey, EngineStoreBackend, EngineStoreTransaction};
+use db_engine::{EngineKey, EngineStoreTransaction};
 use futures::Stream;
 use futures::StreamExt;
 use js_sys::{Function, JSON, Promise, Reflect};
@@ -529,8 +529,8 @@ impl NamedBTreeMap<EngineKey, Vec<u8>> for StoreAdapterCallbacks {
   ) -> impl core::future::Future<Output = BTreeResult<()>> + '_ {
     let name = name.to_string();
     async move {
-      let mut tx = EngineStoreBackend::begin_transaction(&tree.adapter).await?;
-      let source = tree.tree;
+      let source = tree.tree.clone();
+      let mut tx = self.begin_transaction(&source).await?;
       let range_stream = tx.range(&source, ..);
       pin_mut!(range_stream);
       while let Some(item) = range_stream.next().await {
@@ -545,7 +545,7 @@ impl NamedBTreeMap<EngineKey, Vec<u8>> for StoreAdapterCallbacks {
     let adapter = self.clone();
     let name = name.to_string();
     async move {
-      let mut tx = adapter.begin_transaction().await?;
+      let mut tx = adapter.begin_transaction(&name).await?;
       let range_stream = tx.range(&name, ..);
       pin_mut!(range_stream);
       while let Some(item) = range_stream.next().await {
@@ -564,12 +564,30 @@ impl NamedBTreeMap<EngineKey, Vec<u8>> for StoreAdapterCallbacks {
 impl EngineStoreBackend<EngineKey, Vec<u8>> for StoreAdapterCallbacks {
   type Transaction = StoreAdapterTransaction;
 
-  async fn begin_transaction(&self) -> BTreeResult<Self::Transaction> {
-    let backend_tx = self.begin_backend_transaction(true).await?;
-    Ok(StoreAdapterTransaction {
-      adapter: self.clone(),
-      backend_tx,
-    })
+  fn begin_transaction<'a>(
+    &'a self,
+    _tree_name: &'a str,
+  ) -> impl core::future::Future<Output = BTreeResult<Self::Transaction>> + 'a {
+    async move {
+      let backend_tx = self.begin_backend_transaction(true).await?;
+      Ok(StoreAdapterTransaction {
+        adapter: self.clone(),
+        backend_tx,
+      })
+    }
+  }
+
+  fn begin_read_transaction<'a>(
+    &'a self,
+    _tree_name: &'a str,
+  ) -> impl core::future::Future<Output = BTreeResult<Self::Transaction>> + 'a {
+    async move {
+      let backend_tx = self.begin_backend_transaction(false).await?;
+      Ok(StoreAdapterTransaction {
+        adapter: self.clone(),
+        backend_tx,
+      })
+    }
   }
 }
 

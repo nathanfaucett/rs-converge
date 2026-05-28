@@ -13,9 +13,9 @@ name = "db_core"
 path = "src/lib.rs"
 
 [features]
-default = ["std"]
+default = ["std", "in-memory"]
 std = ["futures/std", "serde/std"]
-test-helpers = ["async-lock", "async-stream"]
+in-memory = ["async-lock", "async-stream"]
 wasm = ["tsify", "serde/derive", "serde-wasm-bindgen", "wasm-bindgen"]
 
 [dependencies]
@@ -38,7 +38,4 @@ wasm-bindgen = { version = "0.2", default-features = false, features = [
 thiserror = { version = "2.0", default-features = false }
 
 [dev-dependencies]
-db-in-memory = { path = "../db-in-memory", default-features = false, features = [
-  "std",
-] }
-db-redb = { path = "../db-redb", default-features = false }
+futures = { version = "0.3", default-features = false, features = ["executor"] }

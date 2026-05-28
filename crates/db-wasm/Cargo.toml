@@ -38,7 +38,6 @@ db-facade = { path = "../db-facade", default-features = false, features = [
 db-engine = { path = "../db-engine", default-features = false, features = [
   "wasm",
 ] }
-db-in-memory = { path = "../db-in-memory", default-features = false }
 db-sql-to-engine = { path = "../db-sql-to-engine", default-features = false, features = [
   "wasm",
 ] }

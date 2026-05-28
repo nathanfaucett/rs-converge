@@ -47,7 +47,6 @@ members = [
   "crates/db-facade",
   "crates/db-core",
   "crates/db-engine",
-  "crates/db-in-memory",
   "crates/db-redb",
   "crates/db-automerge",
   "crates/db-sql-to-engine",
