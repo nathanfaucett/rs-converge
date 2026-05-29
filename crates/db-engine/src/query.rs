@@ -1,54 +1,15 @@
-#[cfg(not(feature = "std"))]
-use alloc::boxed::Box;
-#[cfg(not(feature = "std"))]
-use alloc::string::String;
 #[cfg(all(not(feature = "std"), feature = "wasm"))]
 use alloc::string::ToString;
 #[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
-#[cfg(feature = "std")]
-use std::vec::Vec;
+use alloc::{boxed::Box, string::String, vec, vec::Vec};
 
-#[cfg(not(feature = "std"))]
-use alloc::collections::BTreeMap;
-#[cfg(feature = "std")]
-use std::collections::BTreeMap;
+use crate::{
+  ColumnIndex, FromRow, Row, Value,
+  from_row::{FromRowResult, RowDeserializeError},
+};
 
-use crate::{EngineRow, EngineValue, FromRow, RowDeserializeError, TableSchema};
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(
-  feature = "wasm",
-  derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
-)]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
-pub enum UpdateValueExpr {
-  Value(EngineValue),
-  Column(QualifiedColumn),
-  Add(Box<UpdateValueExpr>, Box<UpdateValueExpr>),
-  Subtract(Box<UpdateValueExpr>, Box<UpdateValueExpr>),
-  Multiply(Box<UpdateValueExpr>, Box<UpdateValueExpr>),
-  Divide(Box<UpdateValueExpr>, Box<UpdateValueExpr>),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(
-  feature = "wasm",
-  derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
-)]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
-pub struct UpdateAssignment {
-  pub column_index: usize,
-  pub value: UpdateValueExpr,
-}
-
-impl UpdateAssignment {
-  pub fn value(column_index: usize, value: EngineValue) -> Self {
-    Self {
-      column_index,
-      value: UpdateValueExpr::Value(value),
-    }
-  }
+pub trait ExtractTables {
+  fn extract_tables(&self) -> Vec<String>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -57,9 +18,15 @@ impl UpdateAssignment {
   derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
 )]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
-pub struct QualifiedColumn {
+pub struct Column {
   pub table: String,
-  pub column_index: usize,
+  pub column_index: ColumnIndex,
+}
+
+impl ExtractTables for Column {
+  fn extract_tables(&self) -> Vec<String> {
+    vec![self.table.clone()]
+  }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,41 +48,18 @@ pub enum JoinKind {
   derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
 )]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
-pub enum JoinOn {
-  ColumnEq {
-    left: QualifiedColumn,
-    right: QualifiedColumn,
-  },
-  ColumnEqList {
-    pairs: Vec<(QualifiedColumn, QualifiedColumn)>,
-  },
-}
-
-#[derive(Debug, Clone)]
-#[cfg_attr(
-  feature = "wasm",
-  derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
-)]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
-pub struct JoinClause {
+pub struct Join {
   pub kind: JoinKind,
-  pub left_table: String,
-  pub right_table: String,
-  pub on: JoinOn,
+  pub table: String,
+  pub on: Expr,
 }
 
-#[derive(Debug, Clone)]
-#[cfg_attr(
-  feature = "wasm",
-  derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
-)]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
-pub enum Aggregate {
-  Count(Option<QualifiedColumn>),
-  Sum(QualifiedColumn),
-  Min(QualifiedColumn),
-  Max(QualifiedColumn),
-  Avg(QualifiedColumn),
+impl ExtractTables for Join {
+  fn extract_tables(&self) -> Vec<String> {
+    let mut tables = vec![self.table.clone()];
+    tables.extend(self.on.extract_tables());
+    tables
+  }
 }
 
 #[derive(Debug, Clone)]
@@ -136,114 +80,13 @@ pub enum SortDirection {
 )]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 pub struct OrderBy {
-  pub expr: QualifiedColumn,
+  pub expr: Column,
   pub direction: SortDirection,
 }
-#[derive(Debug, Clone)]
-#[cfg_attr(
-  feature = "wasm",
-  derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
-)]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
-pub enum QualifiedOperand {
-  Column(QualifiedColumn),
-  Value(crate::EngineValue),
-  Lower(Box<QualifiedOperand>),
-}
 
-#[derive(Debug, Clone)]
-#[cfg_attr(
-  feature = "wasm",
-  derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
-)]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
-pub enum QualifiedPredicate {
-  Equals(QualifiedOperand, QualifiedOperand),
-  NotEquals(QualifiedOperand, QualifiedOperand),
-  LessThan(QualifiedOperand, QualifiedOperand),
-  LessThanOrEquals(QualifiedOperand, QualifiedOperand),
-  GreaterThan(QualifiedOperand, QualifiedOperand),
-  GreaterThanOrEquals(QualifiedOperand, QualifiedOperand),
-  IsNull(QualifiedColumn),
-  IsNotNull(QualifiedColumn),
-  InList {
-    expr: QualifiedColumn,
-    list: Vec<crate::EngineValue>,
-    negated: bool,
-  },
-  InSubquery {
-    expr: QualifiedColumn,
-    subquery: Box<crate::EngineQuery>,
-    negated: bool,
-  },
-  Like {
-    expr: QualifiedOperand,
-    pattern: QualifiedOperand,
-    negated: bool,
-  },
-  And(Box<QualifiedPredicate>, Box<QualifiedPredicate>),
-  Or(Box<QualifiedPredicate>, Box<QualifiedPredicate>),
-  Not(Box<QualifiedPredicate>),
-}
-
-#[derive(Debug, Clone)]
-#[cfg_attr(
-  feature = "wasm",
-  derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
-)]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
-pub enum RefOrAgg {
-  Column(QualifiedColumn),
-  AggregateIndex(usize),
-}
-
-#[derive(Debug, Clone)]
-#[cfg_attr(
-  feature = "wasm",
-  derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
-)]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
-pub enum HavingPredicate {
-  Equals(RefOrAgg, crate::EngineValue),
-  NotEquals(RefOrAgg, crate::EngineValue),
-  LessThan(RefOrAgg, crate::EngineValue),
-  LessThanOrEquals(RefOrAgg, crate::EngineValue),
-  GreaterThan(RefOrAgg, crate::EngineValue),
-  GreaterThanOrEquals(RefOrAgg, crate::EngineValue),
-  IsNull(RefOrAgg),
-  IsNotNull(RefOrAgg),
-  And(Box<HavingPredicate>, Box<HavingPredicate>),
-  Or(Box<HavingPredicate>, Box<HavingPredicate>),
-  Not(Box<HavingPredicate>),
-}
-
-#[derive(Debug, Clone, Default)]
-#[cfg_attr(
-  feature = "wasm",
-  derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
-)]
-#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
-pub struct SelectOptions {
-  pub joins: Vec<JoinClause>,
-  pub aggregates: Vec<Aggregate>,
-  pub group_by: Vec<QualifiedColumn>,
-  pub order_by: Vec<OrderBy>,
-  pub limit: Option<usize>,
-  pub offset: Option<usize>,
-  pub distinct: bool,
-  pub having: Option<HavingPredicate>,
-}
-
-impl SelectOptions {
-  pub fn is_simple(&self) -> bool {
-    self.joins.is_empty()
-      && self.aggregates.is_empty()
-      && self.group_by.is_empty()
-      && self.order_by.is_empty()
-      && self.limit.is_none()
-      && self.offset.is_none()
-      && !self.distinct
-      && self.having.is_none()
+impl ExtractTables for OrderBy {
+  fn extract_tables(&self) -> Vec<String> {
+    vec![self.expr.table.clone()]
   }
 }
 
@@ -253,31 +96,165 @@ impl SelectOptions {
   derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
 )]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
-pub enum EngineQuery {
-  Select {
-    table: String,
-    projection: Vec<QualifiedColumn>,
-    predicate: Option<QualifiedPredicate>,
-    options: Box<SelectOptions>,
+pub enum ExprValue {
+  Column(Column),
+  Value(Value),
+}
+
+impl ExtractTables for ExprValue {
+  fn extract_tables(&self) -> Vec<String> {
+    match self {
+      ExprValue::Column(col) => vec![col.table.clone()],
+      ExprValue::Value(_) => vec![],
+    }
+  }
+}
+
+#[derive(Debug, Clone)]
+#[cfg_attr(
+  feature = "wasm",
+  derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
+)]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+pub enum Expr {
+  Equals(ExprValue, ExprValue),
+  NotEquals(ExprValue, ExprValue),
+  LessThan(ExprValue, ExprValue),
+  LessThanOrEquals(ExprValue, ExprValue),
+  GreaterThan(ExprValue, ExprValue),
+  GreaterThanOrEquals(ExprValue, ExprValue),
+  IsNull(ExprValue),
+  IsNotNull(ExprValue),
+  InList {
+    expr: ExprValue,
+    list: Vec<Value>,
+    negated: bool,
   },
-  Insert {
-    table: String,
-    row: EngineRow,
-    returning: Option<Vec<UpdateValueExpr>>,
+  InSubquery {
+    expr: ExprValue,
+    subquery: Box<Query>,
+    negated: bool,
   },
-  Update {
-    table: String,
-    assignments: Vec<UpdateAssignment>,
-    predicate: Option<QualifiedPredicate>,
-    joins: Vec<JoinClause>,
-    from_tables: Vec<String>,
-    returning: Option<Vec<UpdateValueExpr>>,
+  Like {
+    expr: ExprValue,
+    pattern: ExprValue,
+    negated: bool,
   },
-  Delete {
-    table: String,
-    predicate: Option<QualifiedPredicate>,
-    returning: Option<Vec<UpdateValueExpr>>,
-  },
+  And(Box<Expr>, Box<Expr>),
+  Or(Box<Expr>, Box<Expr>),
+  Not(Box<Expr>),
+}
+
+impl ExtractTables for Expr {
+  fn extract_tables(&self) -> Vec<String> {
+    match self {
+      Expr::Equals(left, right)
+      | Expr::NotEquals(left, right)
+      | Expr::LessThan(left, right)
+      | Expr::LessThanOrEquals(left, right)
+      | Expr::GreaterThan(left, right)
+      | Expr::GreaterThanOrEquals(left, right) => {
+        let mut tables = left.extract_tables();
+        tables.extend(right.extract_tables());
+        tables
+      }
+      Expr::IsNull(expr) | Expr::IsNotNull(expr) => expr.extract_tables(),
+      Expr::InList { expr, .. } => expr.extract_tables(),
+      Expr::InSubquery { expr, subquery, .. } => {
+        let mut tables = expr.extract_tables();
+        tables.extend(subquery.extract_tables());
+        tables
+      }
+      Expr::Like { expr, pattern, .. } => {
+        let mut tables = expr.extract_tables();
+        tables.extend(pattern.extract_tables());
+        tables
+      }
+      Expr::And(left, right) | Expr::Or(left, right) => {
+        let mut tables = left.extract_tables();
+        tables.extend(right.extract_tables());
+        tables
+      }
+      Expr::Not(inner) => inner.extract_tables(),
+    }
+  }
+}
+
+#[derive(Debug, Clone)]
+#[cfg_attr(
+  feature = "wasm",
+  derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
+)]
+pub enum CountTarget {
+  AllRows,                    // COUNT(*)
+  Single(String),             // COUNT(col)
+  Distinct(String),           // COUNT(DISTINCT col)
+  DistinctMulti(Vec<String>), // COUNT(DISTINCT col1, col2)
+}
+
+#[derive(Debug, Clone)]
+#[cfg_attr(
+  feature = "wasm",
+  derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
+)]
+pub enum Aggregate {
+  Count(CountTarget),
+  Sum(Column),
+  Avg(Column),
+  Min(Column),
+  Max(Column),
+}
+
+#[derive(Debug, Clone, Default)]
+#[cfg_attr(
+  feature = "wasm",
+  derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
+)]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+pub struct SelectOptions {
+  pub joins: Vec<Join>,
+  pub aggregates: Vec<Aggregate>,
+  pub group_by: Vec<Column>,
+  pub order_by: Vec<OrderBy>,
+  pub limit: Option<usize>,
+  pub offset: Option<usize>,
+  pub distinct: bool,
+  pub having: Option<Expr>,
+}
+
+impl ExtractTables for SelectOptions {
+  fn extract_tables(&self) -> Vec<String> {
+    let mut tables = Vec::new();
+    for join in &self.joins {
+      tables.extend(join.extract_tables());
+    }
+    for order in &self.order_by {
+      tables.extend(order.extract_tables());
+    }
+    if let Some(having) = &self.having {
+      tables.extend(having.extract_tables());
+    }
+    tables
+  }
+}
+
+#[derive(Debug, Clone)]
+#[cfg_attr(
+  feature = "wasm",
+  derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
+)]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+pub struct UpdateAssignment {
+  pub column: Column,
+  pub value: ExprValue,
+}
+
+impl ExtractTables for UpdateAssignment {
+  fn extract_tables(&self) -> Vec<String> {
+    let mut tables = self.column.extract_tables();
+    tables.extend(self.value.extract_tables());
+    tables
+  }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -289,21 +266,7 @@ pub enum EngineQuery {
 pub struct ResultColumn {
   pub name: String,
   pub source_table: Option<String>,
-  pub source_column_index: Option<usize>,
-}
-
-impl ResultColumn {
-  pub fn new(
-    name: impl Into<String>,
-    source_table: Option<String>,
-    source_column_index: Option<usize>,
-  ) -> Self {
-    Self {
-      name: name.into(),
-      source_table,
-      source_column_index,
-    }
-  }
+  pub source_column_index: Option<ColumnIndex>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -312,69 +275,27 @@ impl ResultColumn {
   derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
 )]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
-pub struct EngineResult {
-  pub rows: Vec<EngineRow>,
+pub struct Result {
+  pub rows: Vec<Row>,
   pub columns: Vec<ResultColumn>,
 }
 
-impl EngineResult {
-  pub fn new(rows: Vec<EngineRow>) -> Self {
+impl Result {
+  pub fn new(rows: Vec<Row>) -> Self {
     Self {
       rows,
       columns: Vec::new(),
     }
   }
 
-  pub fn new_with_columns(rows: Vec<EngineRow>, columns: Vec<ResultColumn>) -> Self {
+  pub fn new_with_columns(rows: Vec<Row>, columns: Vec<ResultColumn>) -> Self {
     Self { rows, columns }
   }
 
-  pub fn named_rows(&self) -> Result<Vec<BTreeMap<String, EngineValue>>, RowDeserializeError> {
+  pub fn typed<T: FromRow>(&self) -> FromRowResult<Vec<T>> {
     if self.columns.is_empty() {
-      return Err(RowDeserializeError::schema_error(
-        "result has no column metadata",
-      ));
-    }
-
-    self
-      .rows
-      .iter()
-      .map(|row| {
-        if row.len() != self.columns.len() {
-          return Err(RowDeserializeError::schema_error(format!(
-            "row has {} values but result has {} columns",
-            row.len(),
-            self.columns.len()
-          )));
-        }
-
-        let mut map = BTreeMap::new();
-        for (column, value) in self.columns.iter().zip(row.iter()) {
-          map.insert(column.name.clone(), value.clone());
-        }
-        Ok(map)
-      })
-      .collect()
-  }
-
-  pub fn into_typed_named<T: FromRow>(self) -> Result<Vec<T>, RowDeserializeError> {
-    if self.columns.is_empty() {
-      return Err(RowDeserializeError::schema_error(
-        "result has no column metadata",
-      ));
-    }
-
-    self
-      .rows
-      .into_iter()
-      .map(|row| T::from_named_row(&self.columns, &row))
-      .collect()
-  }
-
-  pub fn typed_rows_named<T: FromRow>(&self) -> Result<Vec<T>, RowDeserializeError> {
-    if self.columns.is_empty() {
-      return Err(RowDeserializeError::schema_error(
-        "result has no column metadata",
+      return Err(RowDeserializeError::SchemaError(
+        "result has no column metadata".to_owned(),
       ));
     }
 
@@ -384,96 +305,83 @@ impl EngineResult {
       .map(|row| T::from_named_row(&self.columns, row))
       .collect()
   }
-
-  /// Deserialize all rows into typed structs using a table schema.
-  ///
-  /// # Arguments
-  ///
-  /// * `schema` - The table schema that describes the row structure
-  ///
-  /// # Returns
-  ///
-  /// A vector of typed structs, one per row, or an error if deserialization fails
-  ///
-  /// # Example
-  ///
-  /// ```ignore
-  /// use serde::Deserialize;
-  /// use db_engine::FromRow;
-  ///
-  /// #[derive(Deserialize)]
-  /// struct User {
-  ///   id: i64,
-  ///   name: String,
-  /// }
-  ///
-  /// let schema = engine.describe_table("users")?;
-  /// let result = engine.execute_query(query)?;
-  /// let users: Vec<User> = result.into_typed::<User>(&schema)?;
-  /// ```
-  pub fn into_typed<T: FromRow>(self, schema: &TableSchema) -> Result<Vec<T>, RowDeserializeError> {
-    self
-      .rows
-      .into_iter()
-      .map(|row| T::from_row(schema, &row))
-      .collect()
-  }
-
-  /// Deserialize row references into typed structs using a table schema.
-  ///
-  /// Similar to `into_typed` but borrows self instead of consuming it.
-  pub fn typed_rows<T: FromRow>(
-    &self,
-    schema: &TableSchema,
-  ) -> Result<Vec<T>, RowDeserializeError> {
-    self
-      .rows
-      .iter()
-      .map(|row| T::from_row(schema, row))
-      .collect()
-  }
 }
 
-impl EngineQuery {
-  pub fn select_simple(
+#[derive(Debug, Clone)]
+#[cfg_attr(
+  feature = "wasm",
+  derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
+)]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+pub enum Query {
+  Select {
     table: String,
-    projection: Vec<usize>,
-    predicate: Option<QualifiedPredicate>,
-  ) -> Self {
+    projection: Vec<Column>,
+    predicate: Option<Expr>,
+    options: Box<SelectOptions>,
+  },
+  Insert {
+    table: String,
+    row: Row,
+    returning: Option<Vec<Column>>,
+  },
+  Update {
+    table: String,
+    assignments: Vec<UpdateAssignment>,
+    predicate: Option<Expr>,
+    joins: Vec<Join>,
+    from_tables: Vec<String>,
+    returning: Option<Vec<Column>>,
+  },
+  Delete {
+    table: String,
+    predicate: Option<Expr>,
+    returning: Option<Vec<Column>>,
+  },
+}
+
+impl Query {
+  pub fn select_simple(table: String, projection: Vec<usize>, predicate: Option<Expr>) -> Self {
     let proj = projection
       .into_iter()
-      .map(|i| QualifiedColumn {
+      .map(|i| Column {
         table: table.clone(),
-        column_index: i,
+        column_index: i as ColumnIndex,
       })
       .collect();
 
-    EngineQuery::Select {
+    Query::Select {
       table,
       projection: proj,
       predicate,
       options: Box::new(SelectOptions::default()),
     }
   }
+}
 
-  /// Get all tables referenced by this query.
-  pub fn tables(&self) -> Vec<String> {
+impl ExtractTables for Query {
+  fn extract_tables(&self) -> Vec<String> {
     match self {
-      EngineQuery::Select { table, options, .. } => {
+      Query::Select { table, options, .. } => {
         let mut tables = vec![table.clone()];
-        for join in &options.joins {
-          if !tables.contains(&join.left_table) {
-            tables.push(join.left_table.clone());
-          }
-          if !tables.contains(&join.right_table) {
-            tables.push(join.right_table.clone());
-          }
-        }
+        tables.extend(options.extract_tables());
         tables
       }
-      EngineQuery::Insert { table, .. }
-      | EngineQuery::Update { table, .. }
-      | EngineQuery::Delete { table, .. } => vec![table.clone()],
+      Query::Insert { table, .. } => vec![table.clone()],
+      Query::Update {
+        table,
+        joins,
+        from_tables,
+        ..
+      } => {
+        let mut tables = vec![table.clone()];
+        for join in joins {
+          tables.extend(join.extract_tables());
+        }
+        tables.extend(from_tables.clone());
+        tables
+      }
+      Query::Delete { table, .. } => vec![table.clone()],
     }
   }
 }
@@ -484,16 +392,16 @@ mod tests {
 
   #[test]
   fn build_select_ex_shape() {
-    let left_col = QualifiedColumn {
+    let left_col = Column {
       table: "users".into(),
       column_index: 0,
     };
-    let right_col = QualifiedColumn {
+    let right_col = Column {
       table: "orders".into(),
       column_index: 0,
     };
 
-    let join = JoinClause {
+    let join = Join {
       kind: JoinKind::Inner,
       left_table: "users".into(),
       right_table: "orders".into(),
@@ -517,7 +425,7 @@ mod tests {
       having: None,
     };
 
-    let q = EngineQuery::Select {
+    let q = Query::Select {
       table: "users".into(),
       projection: vec![left_col],
       predicate: None,
@@ -525,7 +433,7 @@ mod tests {
     };
 
     match q {
-      EngineQuery::Select { .. } => {}
+      Query::Select { .. } => {}
       _ => panic!("expected Select variant"),
     }
   }
@@ -536,7 +444,7 @@ mod tests {
     assert!(options.is_simple());
 
     options.order_by.push(OrderBy {
-      expr: QualifiedColumn {
+      expr: Column {
         table: "users".into(),
         column_index: 0,
       },

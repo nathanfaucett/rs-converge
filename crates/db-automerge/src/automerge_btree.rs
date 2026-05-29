@@ -277,7 +277,6 @@ where
   }
 }
 
-#[allow(dead_code)]
 pub struct AutomergeBTreeEncoded<B, KC = DocumentChangeKeyCodec, VC = VecBytesCodec>
 where
   B: BTree<Vec<u8>, Vec<u8>> + Clone + Send + Sync + 'static,
@@ -317,7 +316,6 @@ where
     }
   }
 
-  #[allow(dead_code)]
   fn decode_key<KC2: db_core::ValueCodec<DocumentChangeKey>>(
     data: &[u8],
   ) -> Result<DocumentChangeKey, db_core::DecodeError> {

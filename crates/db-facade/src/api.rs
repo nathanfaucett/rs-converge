@@ -22,7 +22,7 @@ use db_engine::{
   EngineDatabase, EngineQuery, EngineResult, FromRow, IndexSchema, Subscriber, SubscriptionId,
   TableSchema,
 };
-use db_in_memory::InMemoryNamedBTree;
+
 #[cfg(feature = "redb")]
 use db_redb::REDBNamedBTree;
 #[cfg(feature = "redb")]

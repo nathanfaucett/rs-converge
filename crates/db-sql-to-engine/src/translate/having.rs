@@ -12,7 +12,6 @@ use sqlparser::ast::{
 
 use super::TranslateError;
 
-#[allow(dead_code)]
 pub struct HavingContext<'a> {
   pub group_by: &'a Vec<db_engine::QualifiedColumn>,
   pub aggregates: &'a Vec<db_engine::Aggregate>,

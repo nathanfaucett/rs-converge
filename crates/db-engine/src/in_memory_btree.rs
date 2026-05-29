@@ -5,11 +5,12 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use async_lock::RwLock;
 use async_stream::stream;
-use core::{borrow::Borrow, mem::take, ops::RangeBounds};
+use core::{any::Any, borrow::Borrow, mem::take, ops::RangeBounds};
 use futures::Stream;
 
 use crate::{
-  BTree, BTreeReadExecutor, BTreeResult, BTreeTransaction, BTreeWriteExecutor, MaybeSend,
+  BTree, BTreeDefinition, BTreeManager, BTreeReadExecutor, BTreeResult, BTreeTransaction,
+  BTreeWriteExecutor, MaybeSend, MaybeSync, btree,
 };
 
 #[derive(Debug, Clone)]
@@ -353,12 +354,73 @@ where
 {
   type Transaction = InMemoryBTreeTransaction<K, V>;
 
+  async fn create<D>(_: &D) -> BTreeResult<Self>
+  where
+    Self: Sized,
+    D: BTreeDefinition,
+  {
+    Ok(Self::new())
+  }
+
   async fn transaction(&self) -> BTreeResult<Self::Transaction> {
     let inner = self.inner.clone();
     Ok(InMemoryBTreeTransaction {
       inner,
       patch: Arc::new(RwLock::new(InMemoryTransactionPatch::default())),
     })
+  }
+}
+
+trait InMemoryBTreeManagerValue: Any + MaybeSend + MaybeSync + 'static {}
+
+impl<T> InMemoryBTreeManagerValue for T where T: Any + MaybeSend + MaybeSync + 'static {}
+
+pub struct InMemoryBTreeManager {
+  inner: Arc<RwLock<BTreeMap<String, Box<dyn InMemoryBTreeManagerValue>>>>,
+}
+
+impl BTreeManager for InMemoryBTreeManager {
+  async fn get<D, T>(&self, definition: &D) -> BTreeResult<T>
+  where
+    D: BTreeDefinition,
+    T: BTree<D::Key, D::Value>,
+  {
+    if let Some(btree) = self.inner.read().await.get(definition.id()) {
+      let btree_any = btree.as_ref() as &dyn Any;
+
+      if let Some(typed) = btree_any.downcast_ref::<T>() {
+        Ok(typed.clone())
+      } else {
+        Err(btree::BTreeError::TypeMismatch)
+      }
+    } else {
+      let btree = T::create::<D>(definition).await?;
+      let btree_any: Box<dyn InMemoryBTreeManagerValue> = Box::new(btree.clone());
+
+      self
+        .inner
+        .write()
+        .await
+        .insert(definition.id().to_string(), btree_any);
+
+      Ok(btree)
+    }
+  }
+
+  async fn insert<D, T>(&self, definition: &D) -> BTreeResult<T>
+  where
+    D: BTreeDefinition,
+    T: BTree<D::Key, D::Value>,
+  {
+    self.get(definition).await
+  }
+
+  async fn remove<D>(&self, definition: &D) -> BTreeResult<()>
+  where
+    D: BTreeDefinition,
+  {
+    self.inner.write().await.remove(definition.id());
+    Ok(())
   }
 }
 

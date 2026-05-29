@@ -12,7 +12,6 @@ path = "src/lib.rs"
 name = "db_redb"
 
 [dependencies]
-db-core = { path = "../db-core", default-features = false, features = ["std"] }
 db-engine = { path = "../db-engine", default-features = true }
 async-stream = { version = "0.3", default-features = false, features = [] }
 futures = { version = "0.3", default-features = false, features = ["std"] }
@@ -21,7 +20,6 @@ redb = { version = "4.0", default-features = false, features = [] }
 dashmap = { version = "6.2", default-features = false, features = [] }
 
 [dev-dependencies]
-db-core = { path = "../db-core", default-features = false, features = ["std"] }
 
 [features]
 default = []

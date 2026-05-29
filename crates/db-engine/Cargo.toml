@@ -13,21 +13,30 @@ path = "src/lib.rs"
 name = "db_engine"
 
 [features]
-default = ["std"]
-std = ["futures/std", "db-core/std"]
+default = ["std", "in-memory"]
+std = [
+  "futures/std",
+  "uuid/std",
+  "async-lock/std",
+  "serde/std",
+  "serde_json/std",
+]
+in-memory = ["async-lock", "async-stream"]
 wasm = ["tsify", "serde-wasm-bindgen", "wasm-bindgen"]
 
 [dependencies]
-db-core = { path = "../db-core", default-features = false }
-async-stream = { version = "0.3", default-features = false, features = [] }
+async-stream = { version = "0.3", default-features = false, features = [
+], optional = true }
+async-lock = { version = "3.4", default-features = false, features = [
+], optional = true }
 futures = { version = "0.3", default-features = false, features = [] }
 serde = { version = "1.0", default-features = false, features = ["derive"] }
 serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
 hashbrown = { version = "0.17", default-features = false, features = [
   "default-hasher",
 ] }
-spin = { version = "0.11", default-features = false, features = ["rwlock"] }
 thiserror = { version = "2.0", default-features = false }
+uuid = { version = "1.23", default-features = false, features = ["serde"] }
 
 # Optional TS generation + serde for tsify
 tsify = { version = "0.5", default-features = false, features = [
@@ -40,5 +49,3 @@ wasm-bindgen = { version = "0.2", default-features = false, features = [
 
 [dev-dependencies]
 futures = { version = "0.3", default-features = false, features = ["executor"] }
-proptest = { version = "1.0", default-features = false, features = ["std"] }
-uuid = { version = "1.23", default-features = false, features = ["std"] }

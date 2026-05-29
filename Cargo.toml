@@ -29,9 +29,6 @@ db-facade = { path = "crates/db-facade", default-features = false, features = [
 ] }
 
 [dev-dependencies]
-db-core = { path = "crates/db-core", default-features = false, features = [
-  "std",
-] }
 db-facade = { path = "crates/db-facade", default-features = false, features = [
   "std",
   "automerge",
@@ -45,7 +42,6 @@ uuid = { version = "1.0", default-features = false, features = ["v4"] }
 [workspace]
 members = [
   "crates/db-facade",
-  "crates/db-core",
   "crates/db-engine",
   "crates/db-redb",
   "crates/db-automerge",

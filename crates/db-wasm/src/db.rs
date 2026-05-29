@@ -1,6 +1,6 @@
 use db_engine::{EngineQuery, EngineResult, IndexSchema, Subscriber, SubscriptionId, TableSchema};
 use db_facade::Database;
-use db_in_memory::InMemoryNamedBTree;
+
 use futures::lock::Mutex;
 use js_sys::Promise;
 use serde::Serialize;

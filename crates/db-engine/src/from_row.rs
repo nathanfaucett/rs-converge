@@ -1,9 +1,14 @@
-use crate::{
-  EngineRow, TableSchema,
-  query::ResultColumn,
-  row_deserialize_error::RowDeserializeError,
-  row_deserializer::{deserialize_named_row, deserialize_row},
-};
+use thiserror::Error;
+
+use crate::{ResultColumn, Row, TableSchema};
+
+#[derive(Error, Debug)]
+pub enum RowDeserializeError {
+  #[error("Invalid schema: {0}")]
+  SchemaError(String),
+}
+
+pub type FromRowResult<T> = Result<T, RowDeserializeError>;
 
 /// Trait for types that can be deserialized from a row using a table schema.
 ///
@@ -31,15 +36,12 @@ use crate::{
 /// let users: Vec<User> = result.into_typed::<User>(&schema)?;
 /// ```
 pub trait FromRow: serde::de::DeserializeOwned {
-  fn from_row(schema: &TableSchema, row: &EngineRow) -> Result<Self, RowDeserializeError> {
-    deserialize_row(schema, row)
+  fn from_row(schema: &TableSchema, row: &Row) -> Result<Self, RowDeserializeError> {
+    unimplemented!()
   }
 
-  fn from_named_row(
-    columns: &[ResultColumn],
-    row: &EngineRow,
-  ) -> Result<Self, RowDeserializeError> {
-    deserialize_named_row(columns, row)
+  fn from_named_row(columns: &[ResultColumn], row: &Row) -> Result<Self, RowDeserializeError> {
+    unimplemented!()
   }
 }
 

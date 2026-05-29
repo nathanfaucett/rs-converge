@@ -31,7 +31,6 @@ wasm-bindgen = { version = "0.2", default-features = false, features = ["std"] }
 wasm-bindgen-futures = { version = "0.4", default-features = false }
 
 # workspace dependencies
-db-core = { path = "../db-core", default-features = false, features = ["wasm"] }
 db-facade = { path = "../db-facade", default-features = false, features = [
   "std",
 ] }

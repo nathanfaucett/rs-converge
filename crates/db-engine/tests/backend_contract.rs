@@ -6,7 +6,7 @@ use db_engine::{
   BackendCapability, ColumnSchema, EngineDatabase, EngineQuery, EngineStore, EngineType,
   EngineValue, NamedTreeEngineStore, TableSchema, UpdateAssignment,
 };
-use db_in_memory::InMemoryNamedBTree;
+
 use futures::executor::block_on;
 
 type TestDb =

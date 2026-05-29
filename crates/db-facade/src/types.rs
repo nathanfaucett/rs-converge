@@ -17,7 +17,7 @@ use db_core::{MaybeSend, MaybeSync, NamedBTreeMap};
 #[cfg(feature = "redb")]
 use db_engine::EngineKeyCodec;
 use db_engine::{EngineDatabase, EngineKey, EngineStoreBackend, EngineValue};
-use db_in_memory::InMemoryNamedBTree;
+
 #[cfg(feature = "redb")]
 use db_redb::REDBNamedBTree;
 

@@ -1,11 +1,6 @@
 #[cfg(not(feature = "std"))]
 use alloc::{boxed::Box, string::String};
-#[cfg(not(feature = "std"))]
 use core::{borrow::Borrow, error::Error, ops::RangeBounds};
-#[cfg(feature = "std")]
-use std::boxed::Box;
-#[cfg(feature = "std")]
-use std::{borrow::Borrow, error::Error, ops::RangeBounds};
 
 use thiserror::Error;
 
@@ -13,6 +8,12 @@ use crate::{MaybeSend, MaybeSendFuture, MaybeSendStream, MaybeSync};
 
 #[derive(Error, Debug)]
 pub enum BTreeError {
+  #[error("Not found")]
+  NotFound,
+
+  #[error("Type mismatch")]
+  TypeMismatch,
+
   #[error("Conflict")]
   Conflict,
 
@@ -83,10 +84,38 @@ pub trait BTreeTransaction<K, V>: BTreeWriteExecutor<K, V> {
     Self: Sized;
 }
 
-pub trait BTree<K, V>: BTreeReadExecutor<K, V> {
+pub trait BTree<K, V>: Clone + BTreeReadExecutor<K, V> + 'static {
   type Transaction: BTreeTransaction<K, V>;
+
+  fn create<D>(definition: &D) -> impl MaybeSendFuture<Output = BTreeResult<Self>>
+  where
+    Self: Sized,
+    D: BTreeDefinition;
 
   fn transaction<'a>(
     &'a self,
   ) -> impl MaybeSendFuture<Output = BTreeResult<Self::Transaction>> + 'a;
+}
+
+pub trait BTreeDefinition: Clone + MaybeSend + MaybeSync + 'static {
+  type Key;
+  type Value;
+
+  fn id(&self) -> &str;
+}
+
+pub trait BTreeManager: MaybeSend + MaybeSync {
+  fn get<D, T>(&self, definition: &D) -> impl MaybeSendFuture<Output = BTreeResult<T>>
+  where
+    D: BTreeDefinition,
+    T: BTree<D::Key, D::Value>;
+
+  fn insert<D, T>(&self, definition: &D) -> impl MaybeSendFuture<Output = BTreeResult<T>>
+  where
+    D: BTreeDefinition,
+    T: BTree<D::Key, D::Value>;
+
+  fn remove<D>(&self, definition: &D) -> impl MaybeSendFuture<Output = BTreeResult<()>>
+  where
+    D: BTreeDefinition;
 }

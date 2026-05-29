@@ -234,7 +234,7 @@ pub fn parse_and_translate_statement_with_params(
 }
 
 /// Variant of `parse_and_translate_statement` that accepts a custom `ValueMapper`.
-#[allow(dead_code)]
+
 pub fn parse_and_translate_statement_with_mapper(
   sql: &str,
   resolver: &dyn SchemaResolver,

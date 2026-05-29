@@ -130,7 +130,7 @@ mod tests {
     }};
   }
 
-  fn eq_pred(table: &str, column_index: usize, value: EngineValue) -> QualifiedPredicate {
+  fn eq_pred(table: &str, column_index: ColumnIndex, value: EngineValue) -> QualifiedPredicate {
     QualifiedPredicate::Equals(
       QualifiedOperand::Column(QualifiedColumn {
         table: table.into(),

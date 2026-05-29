@@ -7,7 +7,6 @@ use db_engine::{
   EngineValue, HavingPredicate, OrderBy, QualifiedColumn, QualifiedOperand, QualifiedPredicate,
   RefOrAgg, SelectOptions, SortDirection, TableSchema,
 };
-use db_in_memory::InMemoryNamedBTree;
 
 type TestDb = EngineDatabase<InMemoryNamedBTree<EngineKey, Vec<u8>>>;
 

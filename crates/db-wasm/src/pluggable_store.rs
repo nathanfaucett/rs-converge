@@ -3,7 +3,7 @@ use core::borrow::Borrow;
 use core::ops::RangeBounds;
 use db_core::{BTree, BTreeError, BTreeResult, MaybeSend, NamedBTreeMap};
 use db_engine::{EngineKey, EngineStoreTransaction};
-use db_in_memory::InMemoryNamedBTree;
+
 use futures::{Stream, StreamExt, pin_mut};
 
 use crate::store_adapter::{StoreAdapterCallbacks, StoreAdapterTransaction, StoreAdapterTree};

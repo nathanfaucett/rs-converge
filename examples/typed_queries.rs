@@ -11,7 +11,7 @@ use futures::executor::block_on;
 use serde::Deserialize;
 
 /// Define a struct that matches the schema of your table
-#[allow(dead_code)]
+
 #[derive(Deserialize, Debug)]
 struct User {
   id: Vec<u8>, // UUID is stored as bytes
@@ -19,7 +19,6 @@ struct User {
   email: Option<String>,
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize, Debug)]
 struct Product {
   id: Vec<u8>, // UUID
