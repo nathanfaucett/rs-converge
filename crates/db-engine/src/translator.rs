@@ -18,23 +18,19 @@ pub enum TranslateError {
 
 #[async_trait]
 pub trait Translator {
-  fn translate_with_params<S>(
+  async fn translate_with_params<S>(
     &self,
     query: &str,
     params: Option<&[Value]>,
     resolver: &S,
-  ) -> impl MaybeSendFuture<Output = Result<Query, TranslateError>>
+  ) -> Result<Query, TranslateError>
   where
-    S: DescribeSchema;
+    S: DescribeSchema + Send + Sync;
 
-  fn translate<S>(
-    &self,
-    query: &str,
-    resolver: &S,
-  ) -> impl MaybeSendFuture<Output = Result<Query, TranslateError>>
+  async fn translate<S>(&self, query: &str, resolver: &S) -> Result<Query, TranslateError>
   where
-    S: DescribeSchema,
+    S: DescribeSchema + Send + Sync,
   {
-    self.translate_with_params(query, None, resolver)
+    self.translate_with_params(query, None, resolver).await
   }
 }

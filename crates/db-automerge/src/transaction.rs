@@ -1,3 +1,4 @@
+use crate::AutoCommit;
 use crate::compaction::build_lifecycle_write;
 use crate::document_change_key::DocumentChangeKey;
 use crate::document_change_key::document_entry_bounds;
@@ -5,7 +6,6 @@ use crate::reconstruction::{reconstruct_state, uuid_in_range};
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use async_stream::stream;
-use automerge::AutoCommit;
 use core::ops::RangeBounds;
 use db_engine::{BTreeError, BTreeTransaction};
 use futures::{Stream, StreamExt, pin_mut};

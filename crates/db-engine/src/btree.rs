@@ -5,6 +5,7 @@ use core::{borrow::Borrow, error::Error, ops::RangeBounds};
 use thiserror::Error;
 
 use crate::{MaybeSend, MaybeSendFuture, MaybeSendStream, MaybeSync};
+use serde::{Serialize, de::DeserializeOwned};
 
 #[derive(Error, Debug)]
 pub enum BTreeError {
@@ -44,11 +45,23 @@ impl BTreeError {
   }
 }
 
-pub trait BTreeKey: Ord + MaybeSend + MaybeSync + Clone + 'static {}
-impl<T> BTreeKey for T where T: Ord + MaybeSend + MaybeSync + Clone + 'static {}
+pub trait BTreeKey:
+  Ord + MaybeSend + MaybeSync + Clone + Serialize + DeserializeOwned + 'static
+{
+}
+impl<T> BTreeKey for T where
+  T: Ord + MaybeSend + MaybeSync + Clone + Serialize + DeserializeOwned + 'static
+{
+}
 
-pub trait BTreeValue: MaybeSend + MaybeSync + Clone + 'static {}
-impl<T> BTreeValue for T where T: MaybeSend + MaybeSync + Clone + 'static {}
+pub trait BTreeValue:
+  MaybeSend + MaybeSync + Clone + Serialize + DeserializeOwned + 'static
+{
+}
+impl<T> BTreeValue for T where
+  T: MaybeSend + MaybeSync + Clone + Serialize + DeserializeOwned + 'static
+{
+}
 
 pub trait BTreeReadExecutor<K, V>: MaybeSend + MaybeSync
 where

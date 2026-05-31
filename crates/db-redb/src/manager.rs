@@ -46,8 +46,8 @@ impl BTreeManager for RedbBTreeManager {
   type BTree<K, V>
     = RedbBTree<K, V>
   where
-    K: BTreeKey + serde::Serialize + serde::de::DeserializeOwned,
-    V: BTreeValue + serde::Serialize + serde::de::DeserializeOwned;
+    K: BTreeKey,
+    V: BTreeValue;
 
   async fn get<D>(&self, definition: &D) -> BTreeResult<Self::BTree<D::Key, D::Value>>
   where

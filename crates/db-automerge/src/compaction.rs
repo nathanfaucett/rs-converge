@@ -1,7 +1,7 @@
+use crate::AutoCommit;
 use crate::document_change_key::DocumentChangeKey;
 use crate::document_type::DocumentType;
 use alloc::vec::Vec;
-use automerge::AutoCommit;
 use db_engine::{BTreeError, BTreeResult, BTreeTransaction};
 use futures::{StreamExt, pin_mut};
 use sha2::{Digest, Sha256};

@@ -1,3 +1,4 @@
+use crate::AutoCommit;
 use crate::compaction::{CompactionPolicy, ThresholdPolicy, build_lifecycle_write, run_compaction};
 use crate::document_change_key::{DocumentChangeKey, all_document_bounds, document_entry_bounds};
 use crate::reconstruction::{
@@ -9,7 +10,6 @@ use crate::transaction::AutomergeTransaction;
 use alloc::string::ToString;
 use alloc::vec::Vec;
 use async_stream::stream;
-use automerge::AutoCommit;
 use db_engine::{
   BTree, BTreeError, BTreeReadExecutor, BTreeResult, BTreeTransaction, BTreeWriteExecutor,
   MaybeSend, MaybeSendFuture,

@@ -912,7 +912,7 @@ impl Translator for SqlTranslator {
     resolver: &S,
   ) -> Result<Query, TranslateError>
   where
-    S: DescribeSchema,
+    S: DescribeSchema + Send + Sync,
   {
     let mut pstate = ParamState::new(params);
 

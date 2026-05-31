@@ -1,7 +1,8 @@
+use crate::AutoCommit;
 use crate::document_change_key::DocumentChangeKey;
 use crate::document_type::DocumentType;
 use alloc::vec::Vec;
-use automerge::{AutoCommit, AutomergeError};
+use automerge::AutomergeError;
 use core::ops::{Bound, RangeBounds};
 use db_engine::BTreeError;
 use futures::{Stream, StreamExt, pin_mut};

@@ -48,8 +48,8 @@ impl<K, V> RedbBTree<K, V> {
 #[allow(clippy::needless_lifetimes)]
 impl<K, V> BTreeReadExecutor<K, V> for RedbBTree<K, V>
 where
-  K: BTreeKey + serde::Serialize + serde::de::DeserializeOwned,
-  V: BTreeValue + serde::Serialize + serde::de::DeserializeOwned,
+  K: BTreeKey,
+  V: BTreeValue,
 {
   async fn get<'a, Q>(&'a self, key: Q) -> BTreeResult<Option<V>>
   where
@@ -133,8 +133,8 @@ where
 #[allow(clippy::needless_lifetimes)]
 impl<K, V> BTreeWriteExecutor<K, V> for RedbBTree<K, V>
 where
-  K: BTreeKey + serde::Serialize + serde::de::DeserializeOwned,
-  V: BTreeValue + serde::Serialize + serde::de::DeserializeOwned,
+  K: BTreeKey,
+  V: BTreeValue,
 {
   async fn insert<'a>(&'a mut self, key: K, value: V) -> BTreeResult<()>
   where
@@ -202,8 +202,8 @@ where
 
 impl<K, V> BTree<K, V> for RedbBTree<K, V>
 where
-  K: BTreeKey + serde::Serialize + serde::de::DeserializeOwned,
-  V: BTreeValue + serde::Serialize + serde::de::DeserializeOwned,
+  K: BTreeKey,
+  V: BTreeValue,
 {
   type Transaction = RedbTransaction<K, V>;
 

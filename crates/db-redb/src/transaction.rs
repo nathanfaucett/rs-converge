@@ -42,8 +42,8 @@ pub struct RedbTransaction<K, V> {
 
 impl<K, V> RedbTransaction<K, V>
 where
-  K: BTreeKey + serde::Serialize + serde::de::DeserializeOwned,
-  V: BTreeValue + serde::Serialize + serde::de::DeserializeOwned,
+  K: BTreeKey,
+  V: BTreeValue,
 {
   pub fn new_read(
     db: Arc<redb::Database>,
@@ -83,8 +83,8 @@ where
 #[allow(clippy::needless_lifetimes)]
 impl<K, V> BTreeTransaction<K, V> for RedbTransaction<K, V>
 where
-  K: BTreeKey + serde::Serialize + serde::de::DeserializeOwned,
-  V: BTreeValue + serde::Serialize + serde::de::DeserializeOwned,
+  K: BTreeKey,
+  V: BTreeValue,
 {
   fn commit(self) -> impl core::future::Future<Output = BTreeResult<()>>
   where
@@ -155,8 +155,8 @@ where
 #[allow(clippy::needless_lifetimes)]
 impl<K, V> BTreeReadExecutor<K, V> for RedbTransaction<K, V>
 where
-  K: BTreeKey + serde::Serialize + serde::de::DeserializeOwned,
-  V: BTreeValue + serde::Serialize + serde::de::DeserializeOwned,
+  K: BTreeKey,
+  V: BTreeValue,
 {
   async fn get<'a, Q>(&'a self, key: Q) -> BTreeResult<Option<V>>
   where
@@ -287,8 +287,8 @@ where
 #[allow(clippy::needless_lifetimes)]
 impl<K, V> BTreeWriteExecutor<K, V> for RedbTransaction<K, V>
 where
-  K: BTreeKey + serde::Serialize + serde::de::DeserializeOwned,
-  V: BTreeValue + serde::Serialize + serde::de::DeserializeOwned,
+  K: BTreeKey,
+  V: BTreeValue,
 {
   async fn insert<'a>(&'a mut self, key: K, value: V) -> BTreeResult<()>
   where
