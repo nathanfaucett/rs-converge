@@ -11,8 +11,6 @@ use core::{
 };
 use uuid::Uuid;
 
-pub type PrimaryKey = Uuid;
-
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum Value {
   Null,

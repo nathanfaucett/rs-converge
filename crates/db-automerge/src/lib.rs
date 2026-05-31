@@ -1,17 +1,22 @@
-// Keep this crate root thin: implementation lives in `automerge_btree`.
+#![cfg_attr(not(feature = "std"), no_std)]
+
+#[cfg(not(feature = "std"))]
 extern crate alloc;
 
-mod automerge_btree;
-pub use automerge_btree::*;
-mod catalog;
-mod format_adapter;
-mod format_docs;
-mod store_adapter;
-pub use automerge::AutoCommit;
-pub use format_adapter::{
-  AutomergeFormatAdapter, AutomergeSyncMetrics, automerge_layout_metrics, sync_automerge_layouts,
-};
-pub use store_adapter::{
-  AutomergeEngineStore, apply_documents, automerge_metrics, collect_documents,
-  sync_automerge_stores,
-};
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+
+mod automerge_tree;
+mod compaction;
+mod document_change_key;
+mod document_type;
+mod reconstruction;
+mod transaction;
+
+pub use automerge_tree::AutomergeBTree;
+pub use compaction::{CompactionPolicy, ThresholdPolicy, hash_hashes, hash_heads, run_compaction};
+pub use document_change_key::DocumentChangeKey;
+pub use document_type::DocumentType;
+pub use transaction::AutomergeTransaction;
+
+pub type AutomergeEntry = Vec<u8>;

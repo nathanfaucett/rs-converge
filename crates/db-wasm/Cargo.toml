@@ -31,13 +31,10 @@ wasm-bindgen = { version = "0.2", default-features = false, features = ["std"] }
 wasm-bindgen-futures = { version = "0.4", default-features = false }
 
 # workspace dependencies
-db-facade = { path = "../db-facade", default-features = false, features = [
-  "std",
-] }
 db-engine = { path = "../db-engine", default-features = false, features = [
   "wasm",
 ] }
-db-sql-to-engine = { path = "../db-sql-to-engine", default-features = false, features = [
+db-sql-translator = { path = "../db-sql-translator", default-features = false, features = [
   "wasm",
 ] }
 

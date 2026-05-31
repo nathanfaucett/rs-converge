@@ -9,11 +9,11 @@ use core::{any::Any, borrow::Borrow, mem::take, ops::RangeBounds};
 use futures::Stream;
 
 use crate::{
-  BTree, BTreeDefinition, BTreeManager, BTreeReadExecutor, BTreeResult, BTreeTransaction,
-  BTreeWriteExecutor, MaybeSend, MaybeSync, btree,
+  BTree, BTreeDefinition, BTreeError, BTreeManager, BTreeReadExecutor, BTreeResult,
+  BTreeTransaction, BTreeWriteExecutor, MaybeSend, MaybeSync,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct InMemoryBTree<K, V> {
   inner: Arc<RwLock<BTreeMap<K, V>>>,
 }
@@ -32,6 +32,14 @@ impl<K, V> InMemoryBTree<K, V> {
   }
 }
 
+impl<K, V> Clone for InMemoryBTree<K, V> {
+  fn clone(&self) -> Self {
+    Self {
+      inner: self.inner.clone(),
+    }
+  }
+}
+
 impl<K, V> Default for InMemoryBTree<K, V>
 where
   K: Ord,
@@ -43,8 +51,8 @@ where
 
 impl<K, V> BTreeReadExecutor<K, V> for InMemoryBTree<K, V>
 where
-  K: Clone + Ord + Send + Sync + 'static,
-  V: Clone + Send + Sync + 'static,
+  K: Clone + Ord + MaybeSend + MaybeSync + 'static,
+  V: Clone + MaybeSend + MaybeSync + 'static,
 {
   async fn get<'a, Q>(&'a self, key: Q) -> BTreeResult<Option<V>>
   where
@@ -72,8 +80,8 @@ where
 
 impl<K, V> BTreeWriteExecutor<K, V> for InMemoryBTree<K, V>
 where
-  K: Clone + Ord + Send + Sync + 'static,
-  V: Clone + Send + Sync + 'static,
+  K: Clone + Ord + MaybeSend + MaybeSync + 'static,
+  V: Clone + MaybeSend + MaybeSync + 'static,
 {
   async fn insert(&mut self, key: K, value: V) -> BTreeResult<()>
   where
@@ -269,8 +277,8 @@ pub struct InMemoryBTreeTransaction<K, V> {
 
 impl<K, V> BTreeTransaction<K, V> for InMemoryBTreeTransaction<K, V>
 where
-  K: Clone + Ord + Send + Sync + 'static,
-  V: Clone + Send + Sync + 'static,
+  K: Clone + Ord + MaybeSend + MaybeSync + 'static,
+  V: Clone + MaybeSend + MaybeSync + 'static,
 {
   async fn commit(self) -> BTreeResult<()> {
     let patch = take(&mut *self.patch.write().await);
@@ -286,8 +294,8 @@ where
 
 impl<K, V> BTreeReadExecutor<K, V> for InMemoryBTreeTransaction<K, V>
 where
-  K: Clone + Ord + Send + Sync + 'static,
-  V: Clone + Send + Sync + 'static,
+  K: Clone + Ord + MaybeSend + MaybeSync + 'static,
+  V: Clone + MaybeSend + MaybeSync + 'static,
 {
   async fn get<'a, Q>(&'a self, key: Q) -> BTreeResult<Option<V>>
   where
@@ -321,8 +329,8 @@ where
 
 impl<K, V> BTreeWriteExecutor<K, V> for InMemoryBTreeTransaction<K, V>
 where
-  K: Clone + Ord + Send + Sync + 'static,
-  V: Clone + Send + Sync + 'static,
+  K: Clone + Ord + MaybeSend + MaybeSync + 'static,
+  V: Clone + MaybeSend + MaybeSync + 'static,
 {
   async fn insert(&mut self, key: K, value: V) -> BTreeResult<()>
   where
@@ -349,15 +357,15 @@ where
 
 impl<K, V> BTree<K, V> for InMemoryBTree<K, V>
 where
-  K: Clone + Ord + Send + Sync + 'static,
-  V: Clone + Send + Sync + 'static,
+  K: Clone + Ord + MaybeSend + MaybeSync + 'static,
+  V: Clone + MaybeSend + MaybeSync + 'static,
 {
   type Transaction = InMemoryBTreeTransaction<K, V>;
 
   async fn create<D>(_: &D) -> BTreeResult<Self>
   where
     Self: Sized,
-    D: BTreeDefinition,
+    D: BTreeDefinition<Key = K, Value = V>,
   {
     Ok(Self::new())
   }
@@ -380,21 +388,24 @@ pub struct InMemoryBTreeManager {
 }
 
 impl BTreeManager for InMemoryBTreeManager {
-  async fn get<D, T>(&self, definition: &D) -> BTreeResult<T>
+  type BTree<K, V> = InMemoryBTree<K, V>;
+
+  async fn get<D>(&self, definition: &D) -> BTreeResult<Self::BTree<D::Key, D::Value>>
   where
     D: BTreeDefinition,
-    T: BTree<D::Key, D::Value>,
+    <D as BTreeDefinition>::Key: Clone + Ord + MaybeSend + MaybeSync + 'static,
+    <D as BTreeDefinition>::Value: Clone + MaybeSend + MaybeSync + 'static,
   {
-    if let Some(btree) = self.inner.read().await.get(definition.id()) {
-      let btree_any = btree.as_ref() as &dyn Any;
+    if let Some(btree_box) = self.inner.read().await.get(definition.id()) {
+      let btree_any = btree_box.as_ref() as &dyn Any;
 
-      if let Some(typed) = btree_any.downcast_ref::<T>() {
-        Ok(typed.clone())
+      if let Some(typed) = btree_any.downcast_ref::<InMemoryBTree<D::Key, D::Value>>() {
+        return Ok(typed.clone());
       } else {
-        Err(btree::BTreeError::TypeMismatch)
+        return Err(BTreeError::TypeMismatch);
       }
     } else {
-      let btree = T::create::<D>(definition).await?;
+      let btree = InMemoryBTree::<D::Key, D::Value>::new();
       let btree_any: Box<dyn InMemoryBTreeManagerValue> = Box::new(btree.clone());
 
       self
@@ -407,10 +418,11 @@ impl BTreeManager for InMemoryBTreeManager {
     }
   }
 
-  async fn insert<D, T>(&self, definition: &D) -> BTreeResult<T>
+  async fn insert<D>(&self, definition: &D) -> BTreeResult<Self::BTree<D::Key, D::Value>>
   where
     D: BTreeDefinition,
-    T: BTree<D::Key, D::Value>,
+    <D as BTreeDefinition>::Key: Clone + Ord + MaybeSend + MaybeSync + 'static,
+    <D as BTreeDefinition>::Value: Clone + MaybeSend + MaybeSync + 'static,
   {
     self.get(definition).await
   }
@@ -418,6 +430,8 @@ impl BTreeManager for InMemoryBTreeManager {
   async fn remove<D>(&self, definition: &D) -> BTreeResult<()>
   where
     D: BTreeDefinition,
+    <D as BTreeDefinition>::Key: Clone + Ord + MaybeSend + MaybeSync + 'static,
+    <D as BTreeDefinition>::Value: Clone + MaybeSend + MaybeSync + 'static,
   {
     self.inner.write().await.remove(definition.id());
     Ok(())

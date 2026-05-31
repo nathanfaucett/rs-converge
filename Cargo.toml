@@ -17,22 +17,15 @@ workspace = true
 [features]
 default = ["std", "automerge", "redb"]
 std = []
-redb = ["std", "db-facade/redb"]
-automerge = ["std", "db-facade/automerge"]
+redb = ["std"]
+automerge = ["std"]
 
 [lib]
 name = "db"
 
 [dependencies]
-db-facade = { path = "crates/db-facade", default-features = false, features = [
-  "std",
-] }
 
 [dev-dependencies]
-db-facade = { path = "crates/db-facade", default-features = false, features = [
-  "std",
-  "automerge",
-] }
 db-engine = { path = "crates/db-engine", default-features = false, features = [
   "std",
 ] }
@@ -41,11 +34,10 @@ serde = { version = "1.0", default-features = false, features = ["derive"] }
 uuid = { version = "1.0", default-features = false, features = ["v4"] }
 [workspace]
 members = [
-  "crates/db-facade",
   "crates/db-engine",
   "crates/db-redb",
   "crates/db-automerge",
-  "crates/db-sql-to-engine",
+  "crates/db-sql-translator",
   "crates/db-wasm",
 ]
 resolver = "2"

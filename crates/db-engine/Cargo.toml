@@ -36,6 +36,7 @@ hashbrown = { version = "0.17", default-features = false, features = [
   "default-hasher",
 ] }
 thiserror = { version = "2.0", default-features = false }
+async-trait = { version = "0.1", default-features = false }
 uuid = { version = "1.23", default-features = false, features = ["serde"] }
 
 # Optional TS generation + serde for tsify

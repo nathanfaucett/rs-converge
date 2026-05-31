@@ -1,7 +1,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, vec::Vec};
 
-use crate::value::ValueType;
+use crate::{MaybeSend, MaybeSendFuture, MaybeSync, value::ValueType};
 
 pub type ColumnIndex = u8;
 
@@ -26,6 +26,6 @@ pub struct TableSchema {
   pub primary_key_index: Vec<ColumnIndex>,
 }
 
-pub trait SchemaResolver {
-  fn describe_table(&self, table_name: &str) -> Option<TableSchema>;
+pub trait DescribeSchema: MaybeSend + MaybeSync {
+  fn describe_table(&self, table_name: &str) -> impl MaybeSendFuture<Output = Option<TableSchema>>;
 }

@@ -1,7 +1,7 @@
 #[cfg(all(not(feature = "std"), feature = "wasm"))]
 use alloc::string::ToString;
 #[cfg(not(feature = "std"))]
-use alloc::{boxed::Box, string::String, vec, vec::Vec};
+use alloc::{borrow::ToOwned, boxed::Box, string::String, vec, vec::Vec};
 
 use crate::{
   ColumnIndex, FromRow, Row, Value,
@@ -42,7 +42,7 @@ pub enum JoinKind {
   Full,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 #[cfg_attr(
   feature = "wasm",
   derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
@@ -62,7 +62,7 @@ impl ExtractTables for Join {
   }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 #[cfg_attr(
   feature = "wasm",
   derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
@@ -73,7 +73,7 @@ pub enum SortDirection {
   Desc,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 #[cfg_attr(
   feature = "wasm",
   derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
@@ -90,7 +90,7 @@ impl ExtractTables for OrderBy {
   }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 #[cfg_attr(
   feature = "wasm",
   derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
@@ -110,7 +110,7 @@ impl ExtractTables for ExprValue {
   }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 #[cfg_attr(
   feature = "wasm",
   derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
@@ -180,7 +180,7 @@ impl ExtractTables for Expr {
   }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 #[cfg_attr(
   feature = "wasm",
   derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
@@ -192,7 +192,7 @@ pub enum CountTarget {
   DistinctMulti(Vec<String>), // COUNT(DISTINCT col1, col2)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 #[cfg_attr(
   feature = "wasm",
   derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
@@ -205,7 +205,7 @@ pub enum Aggregate {
   Max(Column),
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Eq, PartialEq, Default)]
 #[cfg_attr(
   feature = "wasm",
   derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
@@ -220,6 +220,19 @@ pub struct SelectOptions {
   pub offset: Option<usize>,
   pub distinct: bool,
   pub having: Option<Expr>,
+}
+
+impl SelectOptions {
+  pub fn is_simple(&self) -> bool {
+    self.joins.is_empty()
+      && self.aggregates.is_empty()
+      && self.group_by.is_empty()
+      && self.order_by.is_empty()
+      && self.limit.is_none()
+      && self.offset.is_none()
+      && !self.distinct
+      && self.having.is_none()
+  }
 }
 
 impl ExtractTables for SelectOptions {
@@ -238,7 +251,7 @@ impl ExtractTables for SelectOptions {
   }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 #[cfg_attr(
   feature = "wasm",
   derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
@@ -307,7 +320,7 @@ impl Result {
   }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 #[cfg_attr(
   feature = "wasm",
   derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
@@ -403,17 +416,16 @@ mod tests {
 
     let join = Join {
       kind: JoinKind::Inner,
-      left_table: "users".into(),
-      right_table: "orders".into(),
-      on: JoinOn::ColumnEq {
-        left: left_col.clone(),
-        right: right_col.clone(),
-      },
+      table: "orders".into(),
+      on: Expr::Equals(
+        ExprValue::Column(left_col.clone()),
+        ExprValue::Column(right_col.clone()),
+      ),
     };
 
     let options = SelectOptions {
       joins: vec![join],
-      aggregates: vec![Aggregate::Count(None)],
+      aggregates: vec![Aggregate::Count(CountTarget::AllRows)],
       group_by: vec![left_col.clone()],
       order_by: vec![OrderBy {
         expr: left_col.clone(),
