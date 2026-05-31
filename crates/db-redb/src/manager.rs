@@ -2,14 +2,19 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 
-use db_engine::{BTree, BTreeDefinition, BTreeManager, BTreeResult, MaybeSendFuture};
+use db_engine::{
+  BTreeDefinition, BTreeKey, BTreeManager, BTreeResult, BTreeValue, MaybeSend, MaybeSync,
+};
 
 use crate::btree::RedbBTree;
 use redb::TableDefinition;
 
+trait RedbBTreeManagerValue: core::any::Any + MaybeSend + MaybeSync + 'static {}
+impl<T> RedbBTreeManagerValue for T where T: core::any::Any + MaybeSend + MaybeSync + 'static {}
+
 pub struct RedbBTreeManager {
   db: Arc<redb::Database>,
-  inner: DashMap<String, Box<dyn core::any::Any + MaybeSend + MaybeSync>>,
+  inner: DashMap<String, Box<dyn RedbBTreeManagerValue>>,
   names: DashMap<String, &'static str>,
 }
 
@@ -38,7 +43,11 @@ impl RedbBTreeManager {
 }
 
 impl BTreeManager for RedbBTreeManager {
-  type BTree<K, V> = RedbBTree<K, V>;
+  type BTree<K, V>
+    = RedbBTree<K, V>
+  where
+    K: BTreeKey + serde::Serialize + serde::de::DeserializeOwned,
+    V: BTreeValue + serde::Serialize + serde::de::DeserializeOwned;
 
   async fn get<D>(&self, definition: &D) -> BTreeResult<Self::BTree<D::Key, D::Value>>
   where
@@ -50,7 +59,7 @@ impl BTreeManager for RedbBTreeManager {
     let names = &self.names;
 
     if let Some(entry) = inner.get(&id) {
-      let any_ref = entry.value().as_ref();
+      let any_ref = entry.value().as_ref() as &dyn core::any::Any;
       if let Some(typed) = any_ref.downcast_ref::<RedbBTree<D::Key, D::Value>>() {
         return Ok(typed.clone());
       } else {
@@ -74,11 +83,11 @@ impl BTreeManager for RedbBTreeManager {
     let table_def = TableDefinition::<&'static [u8], &'static [u8]>::new(static_name);
 
     let btree = RedbBTree::<D::Key, D::Value>::new(db.clone(), &id, table_def.clone());
-    let boxed: Box<dyn core::any::Any + MaybeSend + MaybeSync> = Box::new(btree.clone());
+    let boxed: Box<dyn RedbBTreeManagerValue> = Box::new(btree.clone());
     inner.insert(id.clone(), boxed);
 
     let entry = inner.get(&id).unwrap();
-    let any_ref = entry.value().as_ref();
+    let any_ref = entry.value().as_ref() as &dyn core::any::Any;
     if let Some(typed) = any_ref.downcast_ref::<RedbBTree<D::Key, D::Value>>() {
       Ok(typed.clone())
     } else {

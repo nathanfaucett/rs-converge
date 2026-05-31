@@ -323,6 +323,7 @@ dependencies = [
  "base64",
  "db-engine",
  "futures",
+ "serde",
  "sha2 0.10.9",
  "uuid",
 ]

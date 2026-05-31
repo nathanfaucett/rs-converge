@@ -249,17 +249,12 @@ where
 {
   type Transaction = AutomergeTransaction<B::Transaction>;
 
-  fn create<D>(definition: &D) -> impl MaybeSendFuture<Output = BTreeResult<Self>>
+  fn create<D>(_definition: &D) -> impl MaybeSendFuture<Output = BTreeResult<Self>>
   where
     Self: Sized,
-    D: db_engine::BTreeDefinition,
+    D: db_engine::BTreeDefinition<Key = Uuid, Value = AutoCommit>,
   {
-    let definition = definition.clone();
-    async move {
-      B::create(&definition)
-        .await
-        .map(|inner| AutomergeBTree::new(inner))
-    }
+    async move { Err(BTreeError::UnsupportedOperation) }
   }
 
   async fn transaction(&self) -> Result<Self::Transaction, BTreeError> {

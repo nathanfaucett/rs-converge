@@ -1,12 +1,11 @@
 use std::{borrow::Borrow, marker::PhantomData, sync::Arc};
 
 use async_stream::stream;
-use futures::Stream;
 use std::ops::RangeBounds;
 
 use db_engine::{
-  BTree, BTreeReadExecutor, BTreeResult, BTreeWriteExecutor, MaybeSend, MaybeSendFuture,
-  MaybeSendStream,
+  BTree, BTreeKey, BTreeReadExecutor, BTreeResult, BTreeValue, BTreeWriteExecutor, MaybeSend,
+  MaybeSendFuture, MaybeSendStream, MaybeSync,
 };
 
 use crate::transaction::RedbTransaction;
@@ -49,8 +48,8 @@ impl<K, V> RedbBTree<K, V> {
 #[allow(clippy::needless_lifetimes)]
 impl<K, V> BTreeReadExecutor<K, V> for RedbBTree<K, V>
 where
-  K: serde::Serialize + serde::de::DeserializeOwned + Ord + Clone + MaybeSend + MaybeSync + 'static,
-  V: serde::Serialize + serde::de::DeserializeOwned + Clone + MaybeSend + MaybeSync + 'static,
+  K: BTreeKey + serde::Serialize + serde::de::DeserializeOwned,
+  V: BTreeValue + serde::Serialize + serde::de::DeserializeOwned,
 {
   async fn get<'a, Q>(&'a self, key: Q) -> BTreeResult<Option<V>>
   where
@@ -134,8 +133,8 @@ where
 #[allow(clippy::needless_lifetimes)]
 impl<K, V> BTreeWriteExecutor<K, V> for RedbBTree<K, V>
 where
-  K: serde::Serialize + serde::de::DeserializeOwned + Ord + Clone + MaybeSend + MaybeSync + 'static,
-  V: serde::Serialize + serde::de::DeserializeOwned + Clone + MaybeSend + MaybeSync + 'static,
+  K: BTreeKey + serde::Serialize + serde::de::DeserializeOwned,
+  V: BTreeValue + serde::Serialize + serde::de::DeserializeOwned,
 {
   async fn insert<'a>(&'a mut self, key: K, value: V) -> BTreeResult<()>
   where
@@ -203,8 +202,8 @@ where
 
 impl<K, V> BTree<K, V> for RedbBTree<K, V>
 where
-  K: serde::Serialize + serde::de::DeserializeOwned + Ord + Clone + MaybeSend + MaybeSync + 'static,
-  V: serde::Serialize + serde::de::DeserializeOwned + Clone + MaybeSend + MaybeSync + 'static,
+  K: BTreeKey + serde::Serialize + serde::de::DeserializeOwned,
+  V: BTreeValue + serde::Serialize + serde::de::DeserializeOwned,
 {
   type Transaction = RedbTransaction<K, V>;
 

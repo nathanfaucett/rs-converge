@@ -13,7 +13,9 @@ use crate::{
   BTreeTransaction, BTreeWriteExecutor, MaybeSend, MaybeSync,
 };
 
-#[derive(Debug)]
+use crate::btree::{BTreeKey, BTreeValue};
+
+#[derive(Debug, Clone)]
 pub struct InMemoryBTree<K, V> {
   inner: Arc<RwLock<BTreeMap<K, V>>>,
 }
@@ -32,14 +34,6 @@ impl<K, V> InMemoryBTree<K, V> {
   }
 }
 
-impl<K, V> Clone for InMemoryBTree<K, V> {
-  fn clone(&self) -> Self {
-    Self {
-      inner: self.inner.clone(),
-    }
-  }
-}
-
 impl<K, V> Default for InMemoryBTree<K, V>
 where
   K: Ord,
@@ -51,8 +45,8 @@ where
 
 impl<K, V> BTreeReadExecutor<K, V> for InMemoryBTree<K, V>
 where
-  K: Clone + Ord + MaybeSend + MaybeSync + 'static,
-  V: Clone + MaybeSend + MaybeSync + 'static,
+  K: BTreeKey,
+  V: BTreeValue,
 {
   async fn get<'a, Q>(&'a self, key: Q) -> BTreeResult<Option<V>>
   where
@@ -80,8 +74,8 @@ where
 
 impl<K, V> BTreeWriteExecutor<K, V> for InMemoryBTree<K, V>
 where
-  K: Clone + Ord + MaybeSend + MaybeSync + 'static,
-  V: Clone + MaybeSend + MaybeSync + 'static,
+  K: BTreeKey,
+  V: BTreeValue,
 {
   async fn insert(&mut self, key: K, value: V) -> BTreeResult<()>
   where
@@ -277,8 +271,8 @@ pub struct InMemoryBTreeTransaction<K, V> {
 
 impl<K, V> BTreeTransaction<K, V> for InMemoryBTreeTransaction<K, V>
 where
-  K: Clone + Ord + MaybeSend + MaybeSync + 'static,
-  V: Clone + MaybeSend + MaybeSync + 'static,
+  K: BTreeKey,
+  V: BTreeValue,
 {
   async fn commit(self) -> BTreeResult<()> {
     let patch = take(&mut *self.patch.write().await);
@@ -294,8 +288,8 @@ where
 
 impl<K, V> BTreeReadExecutor<K, V> for InMemoryBTreeTransaction<K, V>
 where
-  K: Clone + Ord + MaybeSend + MaybeSync + 'static,
-  V: Clone + MaybeSend + MaybeSync + 'static,
+  K: BTreeKey,
+  V: BTreeValue,
 {
   async fn get<'a, Q>(&'a self, key: Q) -> BTreeResult<Option<V>>
   where
@@ -329,8 +323,8 @@ where
 
 impl<K, V> BTreeWriteExecutor<K, V> for InMemoryBTreeTransaction<K, V>
 where
-  K: Clone + Ord + MaybeSend + MaybeSync + 'static,
-  V: Clone + MaybeSend + MaybeSync + 'static,
+  K: BTreeKey,
+  V: BTreeValue,
 {
   async fn insert(&mut self, key: K, value: V) -> BTreeResult<()>
   where
@@ -357,8 +351,8 @@ where
 
 impl<K, V> BTree<K, V> for InMemoryBTree<K, V>
 where
-  K: Clone + Ord + MaybeSend + MaybeSync + 'static,
-  V: Clone + MaybeSend + MaybeSync + 'static,
+  K: BTreeKey,
+  V: BTreeValue,
 {
   type Transaction = InMemoryBTreeTransaction<K, V>;
 
@@ -388,13 +382,17 @@ pub struct InMemoryBTreeManager {
 }
 
 impl BTreeManager for InMemoryBTreeManager {
-  type BTree<K, V> = InMemoryBTree<K, V>;
+  type BTree<K, V>
+    = InMemoryBTree<K, V>
+  where
+    K: BTreeKey,
+    V: BTreeValue;
 
   async fn get<D>(&self, definition: &D) -> BTreeResult<Self::BTree<D::Key, D::Value>>
   where
     D: BTreeDefinition,
-    <D as BTreeDefinition>::Key: Clone + Ord + MaybeSend + MaybeSync + 'static,
-    <D as BTreeDefinition>::Value: Clone + MaybeSend + MaybeSync + 'static,
+    <D as BTreeDefinition>::Key: BTreeKey,
+    <D as BTreeDefinition>::Value: BTreeValue,
   {
     if let Some(btree_box) = self.inner.read().await.get(definition.id()) {
       let btree_any = btree_box.as_ref() as &dyn Any;
@@ -421,8 +419,8 @@ impl BTreeManager for InMemoryBTreeManager {
   async fn insert<D>(&self, definition: &D) -> BTreeResult<Self::BTree<D::Key, D::Value>>
   where
     D: BTreeDefinition,
-    <D as BTreeDefinition>::Key: Clone + Ord + MaybeSend + MaybeSync + 'static,
-    <D as BTreeDefinition>::Value: Clone + MaybeSend + MaybeSync + 'static,
+    <D as BTreeDefinition>::Key: BTreeKey,
+    <D as BTreeDefinition>::Value: BTreeValue,
   {
     self.get(definition).await
   }
@@ -430,8 +428,8 @@ impl BTreeManager for InMemoryBTreeManager {
   async fn remove<D>(&self, definition: &D) -> BTreeResult<()>
   where
     D: BTreeDefinition,
-    <D as BTreeDefinition>::Key: Clone + Ord + MaybeSend + MaybeSync + 'static,
-    <D as BTreeDefinition>::Value: Clone + MaybeSend + MaybeSync + 'static,
+    <D as BTreeDefinition>::Key: BTreeKey,
+    <D as BTreeDefinition>::Value: BTreeValue,
   {
     self.inner.write().await.remove(definition.id());
     Ok(())

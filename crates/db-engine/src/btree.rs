@@ -44,10 +44,16 @@ impl BTreeError {
   }
 }
 
+pub trait BTreeKey: Ord + MaybeSend + MaybeSync + Clone + 'static {}
+impl<T> BTreeKey for T where T: Ord + MaybeSend + MaybeSync + Clone + 'static {}
+
+pub trait BTreeValue: MaybeSend + MaybeSync + Clone + 'static {}
+impl<T> BTreeValue for T where T: MaybeSend + MaybeSync + Clone + 'static {}
+
 pub trait BTreeReadExecutor<K, V>: MaybeSend + MaybeSync
 where
-  K: Ord + MaybeSend + MaybeSync + 'static,
-  V: MaybeSend + MaybeSync + 'static,
+  K: BTreeKey,
+  V: BTreeValue,
 {
   fn get<'a, Q>(&'a self, key: Q) -> impl MaybeSendFuture<Output = BTreeResult<Option<V>>> + 'a
   where
@@ -60,8 +66,8 @@ where
 
 pub trait BTreeWriteExecutor<K, V>: BTreeReadExecutor<K, V>
 where
-  K: Ord + MaybeSend + MaybeSync + 'static,
-  V: MaybeSend + MaybeSync + 'static,
+  K: BTreeKey,
+  V: BTreeValue,
 {
   fn insert<'a>(
     &'a mut self,
@@ -79,8 +85,8 @@ where
 
 pub trait BTreeTransaction<K, V>: BTreeWriteExecutor<K, V>
 where
-  K: Ord + MaybeSend + MaybeSync + 'static,
-  V: MaybeSend + MaybeSync + 'static,
+  K: BTreeKey,
+  V: BTreeValue,
 {
   fn commit(self) -> impl MaybeSendFuture<Output = BTreeResult<()>>
   where
@@ -93,8 +99,8 @@ where
 
 pub trait BTree<K, V>: Clone + BTreeReadExecutor<K, V> + 'static
 where
-  K: Ord + MaybeSend + MaybeSync + 'static,
-  V: MaybeSend + MaybeSync + 'static,
+  K: BTreeKey,
+  V: BTreeValue,
 {
   type Transaction: BTreeTransaction<K, V>;
 
@@ -109,8 +115,8 @@ where
 }
 
 pub trait BTreeDefinition: Clone + MaybeSend + MaybeSync + 'static {
-  type Key: Ord + MaybeSend + MaybeSync + Clone + 'static;
-  type Value: MaybeSend + MaybeSync + Clone + 'static;
+  type Key: BTreeKey;
+  type Value: BTreeValue;
 
   fn id(&self) -> &str;
 }
@@ -118,30 +124,24 @@ pub trait BTreeDefinition: Clone + MaybeSend + MaybeSync + 'static {
 pub trait BTreeManager: MaybeSend + MaybeSync {
   type BTree<K, V>: BTree<K, V>
   where
-    K: Clone + Ord + MaybeSend + MaybeSync + 'static,
-    V: Clone + MaybeSend + MaybeSync + 'static;
+    K: BTreeKey,
+    V: BTreeValue;
 
   fn get<D>(
     &self,
     definition: &D,
   ) -> impl MaybeSendFuture<Output = BTreeResult<Self::BTree<D::Key, D::Value>>>
   where
-    D: BTreeDefinition,
-    <D as BTreeDefinition>::Key: Clone + Ord + MaybeSend + MaybeSync + 'static,
-    <D as BTreeDefinition>::Value: Clone + MaybeSend + MaybeSync + 'static;
+    D: BTreeDefinition;
 
   fn insert<D>(
     &self,
     definition: &D,
   ) -> impl MaybeSendFuture<Output = BTreeResult<Self::BTree<D::Key, D::Value>>>
   where
-    D: BTreeDefinition,
-    <D as BTreeDefinition>::Key: Clone + Ord + MaybeSend + MaybeSync + 'static,
-    <D as BTreeDefinition>::Value: Clone + MaybeSend + MaybeSync + 'static;
+    D: BTreeDefinition;
 
   fn remove<D>(&self, definition: &D) -> impl MaybeSendFuture<Output = BTreeResult<()>>
   where
-    D: BTreeDefinition,
-    <D as BTreeDefinition>::Key: Clone + Ord + MaybeSend + MaybeSync + 'static,
-    <D as BTreeDefinition>::Value: Clone + MaybeSend + MaybeSync + 'static;
+    D: BTreeDefinition;
 }

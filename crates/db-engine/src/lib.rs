@@ -16,8 +16,8 @@ mod translator;
 mod value;
 
 pub use btree::{
-  BTree, BTreeDefinition, BTreeError, BTreeManager, BTreeReadExecutor, BTreeResult,
-  BTreeTransaction, BTreeWriteExecutor,
+  BTree, BTreeDefinition, BTreeError, BTreeKey, BTreeManager, BTreeReadExecutor, BTreeResult,
+  BTreeTransaction, BTreeValue, BTreeWriteExecutor,
 };
 pub use concurrency::{MaybeSend, MaybeSendFuture, MaybeSendStream, MaybeSync};
 pub use from_row::{FromRow, RowDeserializeError};

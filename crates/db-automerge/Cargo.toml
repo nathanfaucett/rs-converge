@@ -22,13 +22,14 @@ futures = { version = "0.3", default-features = false, features = [
   "std",
   "executor",
 ] }
-uuid = { version = "1.4", default-features = false, features = ["v4"] }
+uuid = { version = "1.4", default-features = false, features = ["v4", "serde"] }
 sha2 = { version = "0.10", default-features = false, features = ["std"] }
 automerge = { version = "0.9", default-features = false, features = [] }
 db-engine = { path = "../db-engine", default-features = false, features = [
   "std",
 ] }
 async-lock = { version = "3.4", default-features = false, features = ["std"] }
+serde = { version = "1.0", default-features = false, features = ["derive"] }
 base64 = { version = "0.21", default-features = false, features = ["std"] }
 
 [dev-dependencies]

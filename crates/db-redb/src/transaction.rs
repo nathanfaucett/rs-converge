@@ -9,7 +9,8 @@ use std::ops::RangeBounds;
 
 use async_lock::RwLock;
 use db_engine::{
-  BTreeError, BTreeReadExecutor, BTreeResult, BTreeTransaction, BTreeWriteExecutor, MaybeSend,
+  BTreeError, BTreeKey, BTreeReadExecutor, BTreeResult, BTreeTransaction, BTreeValue,
+  BTreeWriteExecutor, MaybeSend, MaybeSync,
 };
 use postcard::{from_bytes, to_stdvec};
 use redb::{ReadableDatabase, ReadableTable, TableDefinition};
@@ -20,8 +21,14 @@ pub enum TransactionPatchEntry<V> {
   Deleted,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct TransactionPatch<K, V>(pub BTreeMap<K, TransactionPatchEntry<V>>);
+
+impl<K, V> Default for TransactionPatch<K, V> {
+  fn default() -> Self {
+    TransactionPatch(BTreeMap::new())
+  }
+}
 
 pub struct RedbTransaction<K, V> {
   pub(crate) db: Arc<redb::Database>,
@@ -35,8 +42,8 @@ pub struct RedbTransaction<K, V> {
 
 impl<K, V> RedbTransaction<K, V>
 where
-  K: Serialize + DeserializeOwned + Ord + Clone + MaybeSend + MaybeSync + 'static,
-  V: Serialize + DeserializeOwned + Clone + MaybeSend + MaybeSync + 'static,
+  K: BTreeKey + serde::Serialize + serde::de::DeserializeOwned,
+  V: BTreeValue + serde::Serialize + serde::de::DeserializeOwned,
 {
   pub fn new_read(
     db: Arc<redb::Database>,
@@ -76,8 +83,8 @@ where
 #[allow(clippy::needless_lifetimes)]
 impl<K, V> BTreeTransaction<K, V> for RedbTransaction<K, V>
 where
-  K: Serialize + DeserializeOwned + Ord + Clone + MaybeSend + MaybeSync + 'static,
-  V: Serialize + DeserializeOwned + Clone + MaybeSend + MaybeSync + 'static,
+  K: BTreeKey + serde::Serialize + serde::de::DeserializeOwned,
+  V: BTreeValue + serde::Serialize + serde::de::DeserializeOwned,
 {
   fn commit(self) -> impl core::future::Future<Output = BTreeResult<()>>
   where
@@ -148,8 +155,8 @@ where
 #[allow(clippy::needless_lifetimes)]
 impl<K, V> BTreeReadExecutor<K, V> for RedbTransaction<K, V>
 where
-  K: Serialize + DeserializeOwned + Ord + Clone + MaybeSend + MaybeSync + 'static,
-  V: Serialize + DeserializeOwned + Clone + MaybeSend + MaybeSync + 'static,
+  K: BTreeKey + serde::Serialize + serde::de::DeserializeOwned,
+  V: BTreeValue + serde::Serialize + serde::de::DeserializeOwned,
 {
   async fn get<'a, Q>(&'a self, key: Q) -> BTreeResult<Option<V>>
   where
@@ -280,8 +287,8 @@ where
 #[allow(clippy::needless_lifetimes)]
 impl<K, V> BTreeWriteExecutor<K, V> for RedbTransaction<K, V>
 where
-  K: Serialize + DeserializeOwned + Ord + Clone + MaybeSend + MaybeSync + 'static,
-  V: Serialize + DeserializeOwned + Clone + MaybeSend + MaybeSync + 'static,
+  K: BTreeKey + serde::Serialize + serde::de::DeserializeOwned,
+  V: BTreeValue + serde::Serialize + serde::de::DeserializeOwned,
 {
   async fn insert<'a>(&'a mut self, key: K, value: V) -> BTreeResult<()>
   where

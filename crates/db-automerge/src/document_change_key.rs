@@ -1,8 +1,9 @@
 use crate::document_type::DocumentType;
 use core::cmp::Ordering;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DocumentChangeKey {
   pub doc_id: Uuid,
   pub doc_type: DocumentType,
