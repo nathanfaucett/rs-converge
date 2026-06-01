@@ -10,14 +10,23 @@ use std::sync::Arc;
 use thiserror::Error;
 
 use crate::{
-  BTreeDefinition, BTreeManager, DescribeSchema, IndexSchema, Query, QueryParams, Row, TableSchema,
-  TranslateError, Translator, Value,
+  BTreeDefinition, BTreeError, BTreeManager, DescribeSchema, IndexSchema, Query, QueryParams, Row,
+  TableSchema, TranslateError, Translator, Value,
 };
 
 #[derive(Error, Debug)]
 pub enum EngineError {
   #[error("Translate error: {0}")]
   TranslateError(#[from] TranslateError),
+
+  #[error("BTree error: {0}")]
+  BTreeError(#[from] BTreeError),
+
+  #[error("Unsupported query shape for MVP executor: {0}")]
+  Unsupported(&'static str),
+
+  #[error("Invalid query: {0}")]
+  InvalidQuery(&'static str),
 }
 
 pub type EngineResult<T> = Result<T, EngineError>;
@@ -75,10 +84,10 @@ impl<M> DescribeSchema for Engine<M>
 where
   M: BTreeManager,
 {
-  async fn describe_table(&self, table_name: &str) -> Option<TableSchema> {
+  async fn describe_table(&self, _table_name: &str) -> Option<TableSchema> {
     let definition = EngineBTreeDefinition::from(ENGINE_TABLES);
-    let btree = self.manager.get(&definition).await.ok()?;
-    unimplemented!("scan the btree for the table name and convert rows to TableSchema")
+    let _btree = self.manager.get(&definition).await.ok()?;
+    unimplemented!("use the executor to query for the table name and convert rows to TableSchema")
   }
 }
 
@@ -86,10 +95,10 @@ impl<M> Engine<M>
 where
   M: BTreeManager,
 {
-  pub async fn describe_index(&self, index_name: &str) -> Option<IndexSchema> {
+  pub async fn describe_index(&self, _index_name: &str) -> Option<IndexSchema> {
     let definition = EngineBTreeDefinition::from(ENGINE_INDICES);
-    let btree = self.manager.get(&definition).await.ok()?;
-    unimplemented!("scan the btree for the index name and convert rows to IndexSchema")
+    let _btree = self.manager.get(&definition).await.ok()?;
+    unimplemented!("use the executor to query for the index name and convert rows to IndexSchema")
   }
 
   pub async fn translate_and_execute_with_params<T>(
@@ -117,6 +126,7 @@ where
   }
 
   pub async fn execute(&self, query: Query) -> EngineResult<Vec<Row>> {
-    unimplemented!("execute is not implemented yet: ")
+    crate::planner::validate(&query)?;
+    crate::executor::execute(self, query).await
   }
 }

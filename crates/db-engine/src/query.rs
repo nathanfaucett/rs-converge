@@ -23,6 +23,15 @@ pub struct Column {
   pub column_index: ColumnIndex,
 }
 
+impl Column {
+  pub fn new(table: String, column_index: ColumnIndex) -> Self {
+    Self {
+      table,
+      column_index,
+    }
+  }
+}
+
 impl ExtractTables for Column {
   fn extract_tables(&self) -> Vec<String> {
     vec![self.table.clone()]

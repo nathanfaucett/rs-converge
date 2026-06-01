@@ -7,6 +7,7 @@ extern crate alloc;
 mod btree;
 mod concurrency;
 mod engine;
+mod executor;
 mod from_row;
 #[cfg(feature = "in-memory")]
 mod in_memory_btree;
