@@ -356,6 +356,7 @@ where
     .describe_table(&table_name)
     .await
     .ok_or_else(|| TranslateError::Custom(format!("unknown table: {}", table_name)))?;
+  let table_index = 0;
 
   // Translate WHERE if present
   let predicate = match &select.selection {
@@ -363,6 +364,7 @@ where
       expr,
       &table_schema,
       &table_name,
+      table_index,
       resolver,
       params,
     )?),
@@ -491,6 +493,7 @@ fn expr_to_expr_value<S>(
   expr: &SQLExpr,
   table_schema: &db_engine::TableSchema,
   table_name: &str,
+  table_index: db_engine::TableIndex,
   _resolver: &S,
   params: &mut ParamState<'_>,
 ) -> Result<db_engine::ExprValue, TranslateError>
@@ -507,14 +510,14 @@ where
     SQLExpr::Identifier(ident) => {
       let idx = find_column_index(table_schema, &ident.value)?;
       Ok(db_engine::ExprValue::Column(db_engine::Column {
-        table: table_name.to_string(),
+        table_index,
         column_index: idx as u8,
       }))
     }
     SQLExpr::CompoundIdentifier(idents) => {
       let idx = resolve_column_from_compound_identifier(idents, table_schema, table_name)?;
       Ok(db_engine::ExprValue::Column(db_engine::Column {
-        table: table_name.to_string(),
+        table_index,
         column_index: idx as u8,
       }))
     }
@@ -535,6 +538,7 @@ fn translate_predicate<S>(
   expr: &SQLExpr,
   table_schema: &db_engine::TableSchema,
   table_name: &str,
+  table_index: db_engine::TableIndex,
   resolver: &S,
   params: &mut ParamState<'_>,
 ) -> Result<db_engine::Expr, TranslateError>
@@ -551,6 +555,7 @@ where
             left.as_ref(),
             table_schema,
             table_name,
+            table_index,
             resolver,
             params,
           )?),
@@ -558,6 +563,7 @@ where
             right.as_ref(),
             table_schema,
             table_name,
+            table_index,
             resolver,
             params,
           )?),
@@ -567,6 +573,7 @@ where
             left.as_ref(),
             table_schema,
             table_name,
+            table_index,
             resolver,
             params,
           )?),
@@ -574,6 +581,7 @@ where
             right.as_ref(),
             table_schema,
             table_name,
+            table_index,
             resolver,
             params,
           )?),
@@ -585,10 +593,22 @@ where
         | BinaryOperator::LtEq
         | BinaryOperator::Gt
         | BinaryOperator::GtEq => {
-          let left_val =
-            expr_to_expr_value(left.as_ref(), table_schema, table_name, resolver, params)?;
-          let right_val =
-            expr_to_expr_value(right.as_ref(), table_schema, table_name, resolver, params)?;
+          let left_val = expr_to_expr_value(
+            left.as_ref(),
+            table_schema,
+            table_name,
+            table_index,
+            resolver,
+            params,
+          )?;
+          let right_val = expr_to_expr_value(
+            right.as_ref(),
+            table_schema,
+            table_name,
+            table_index,
+            resolver,
+            params,
+          )?;
 
           match op {
             BinaryOperator::Eq => Ok(db_engine::Expr::Equals(left_val, right_val)),
@@ -608,7 +628,14 @@ where
     }
     SQLExpr::UnaryOp { op, expr } => {
       // Only support NOT for now
-      let inner = translate_predicate(expr.as_ref(), table_schema, table_name, resolver, params)?;
+      let inner = translate_predicate(
+        expr.as_ref(),
+        table_schema,
+        table_name,
+        table_index,
+        resolver,
+        params,
+      )?;
       match op.to_string().as_str() {
         "NOT" => Ok(db_engine::Expr::Not(Box::new(inner))),
         _ => Err(TranslateError::Custom(format!(
@@ -621,6 +648,7 @@ where
       expr,
       table_schema,
       table_name,
+      table_index,
       resolver,
       params,
     )?)),
@@ -628,6 +656,7 @@ where
       expr,
       table_schema,
       table_name,
+      table_index,
       resolver,
       params,
     )?)),
@@ -651,6 +680,7 @@ where
   match stmt {
     SQLStatement::Insert(insert) => {
       let table = insert.table.to_string();
+      let table_index = 0;
       let table_schema = resolver
         .describe_table(&table)
         .await
@@ -708,7 +738,8 @@ where
             }
 
             Ok(Query::Insert {
-              table,
+              tables: vec![table],
+              table_index,
               row,
               returning: None,
             })
@@ -768,6 +799,7 @@ where
         .describe_table(&table_name)
         .await
         .ok_or_else(|| TranslateError::Custom(format!("unknown table: {}", table_name)))?;
+      let table_index = 0;
 
       // Translate assignments
       let mut assigns: Vec<db_engine::UpdateAssignment> = Vec::new();
@@ -795,11 +827,17 @@ where
               }
             }
             let idx = find_column_index(&table_schema, &col_name)?;
-            let value =
-              expr_to_expr_value(&assign.value, &table_schema, &table_name, resolver, params)?;
+            let value = expr_to_expr_value(
+              &assign.value,
+              &table_schema,
+              &table_name,
+              table_index,
+              resolver,
+              params,
+            )?;
             assigns.push(db_engine::UpdateAssignment {
               column: db_engine::Column {
-                table: table_name.clone(),
+                table_index,
                 column_index: idx as u8,
               },
               value,
@@ -819,6 +857,7 @@ where
           expr,
           &table_schema,
           &table_name,
+          table_index,
           resolver,
           params,
         )?),
@@ -826,11 +865,12 @@ where
       };
 
       Ok(Query::Update {
-        table: table_name,
+        tables: vec![table_name],
+        table_index,
         assignments: assigns,
         predicate,
         joins: Vec::new(),
-        from_tables: Vec::new(),
+        from_table_indexes: Vec::new(),
         returning: None,
       })
     }
@@ -889,12 +929,14 @@ where
         .describe_table(&table)
         .await
         .ok_or_else(|| TranslateError::Custom(format!("unknown table: {}", table)))?;
+      let table_index = 0;
 
       let predicate = match &del.selection {
         Some(expr) => Some(translate_predicate(
           expr,
           &table_schema,
           &table,
+          table_index,
           resolver,
           params,
         )?),
@@ -902,7 +944,8 @@ where
       };
 
       Ok(Query::Delete {
-        table,
+        tables: vec![table],
+        table_index,
         predicate,
         returning: None,
       })

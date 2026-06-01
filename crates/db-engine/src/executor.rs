@@ -5,7 +5,7 @@ use futures::{StreamExt, pin_mut};
 
 use crate::{
   BTree, BTreeManager, BTreeReadExecutor, BTreeTransaction, BTreeWriteExecutor, Column, Engine,
-  EngineError, EngineResult, Expr, ExprValue, Query, Row, UpdateAssignment, Value,
+  EngineError, EngineResult, Expr, ExprValue, Query, Row, TableIndex, UpdateAssignment, Value,
   engine::EngineBTreeDefinition,
 };
 
@@ -15,33 +15,63 @@ where
 {
   match query {
     Query::Select {
-      table,
+      tables,
+      table_index,
       projection,
       predicate,
       ..
-    } => execute_select(engine, &table, &projection, predicate.as_ref()).await,
-    Query::Insert { table, row, .. } => execute_insert(engine, &table, row).await,
+    } => {
+      execute_select(
+        engine,
+        &tables,
+        table_index,
+        &projection,
+        predicate.as_ref(),
+      )
+      .await
+    }
+    Query::Insert {
+      tables,
+      table_index,
+      row,
+      ..
+    } => execute_insert(engine, &tables, table_index, row).await,
     Query::Update {
-      table,
+      tables,
+      table_index,
       assignments,
       predicate,
       ..
-    } => execute_update(engine, &table, &assignments, predicate.as_ref()).await,
+    } => {
+      execute_update(
+        engine,
+        &tables,
+        table_index,
+        &assignments,
+        predicate.as_ref(),
+      )
+      .await
+    }
     Query::Delete {
-      table, predicate, ..
-    } => execute_delete(engine, &table, predicate.as_ref()).await,
+      tables,
+      table_index,
+      predicate,
+      ..
+    } => execute_delete(engine, &tables, table_index, predicate.as_ref()).await,
   }
 }
 
 async fn execute_select<M>(
   engine: &Engine<M>,
-  table: &str,
+  tables: &[String],
+  table_index: TableIndex,
   projection: &[Column],
   predicate: Option<&Expr>,
 ) -> EngineResult<Vec<Row>>
 where
   M: BTreeManager,
 {
+  let table = resolve_table_name(tables, table_index)?;
   let definition = EngineBTreeDefinition::from(table);
   let btree = engine.manager.get(&definition).await?;
 
@@ -52,18 +82,24 @@ where
   while let Some(entry) = stream.next().await {
     let (_key, row) = entry?;
 
-    if matches_predicate(predicate, &row, table)? {
-      rows.push(project_row(&row, table, projection)?);
+    if matches_predicate(predicate, &row, table_index)? {
+      rows.push(project_row(&row, table_index, projection)?);
     }
   }
 
   Ok(rows)
 }
 
-async fn execute_insert<M>(engine: &Engine<M>, table: &str, row: Row) -> EngineResult<Vec<Row>>
+async fn execute_insert<M>(
+  engine: &Engine<M>,
+  tables: &[String],
+  table_index: TableIndex,
+  row: Row,
+) -> EngineResult<Vec<Row>>
 where
   M: BTreeManager,
 {
+  let table = resolve_table_name(tables, table_index)?;
   let definition = EngineBTreeDefinition::from(table);
   let btree = engine.manager.get(&definition).await?;
   let mut tx = btree.transaction().await?;
@@ -80,13 +116,15 @@ where
 
 async fn execute_update<M>(
   engine: &Engine<M>,
-  table: &str,
+  tables: &[String],
+  table_index: TableIndex,
   assignments: &[UpdateAssignment],
   predicate: Option<&Expr>,
 ) -> EngineResult<Vec<Row>>
 where
   M: BTreeManager,
 {
+  let table = resolve_table_name(tables, table_index)?;
   let definition = EngineBTreeDefinition::from(table);
   let btree = engine.manager.get(&definition).await?;
   let mut tx = btree.transaction().await?;
@@ -98,7 +136,7 @@ where
 
     while let Some(entry) = stream.next().await {
       let (key, row) = entry?;
-      if matches_predicate(predicate, &row, table)? {
+      if matches_predicate(predicate, &row, table_index)? {
         to_update.push((key, row));
       }
     }
@@ -108,7 +146,7 @@ where
     let mut new_row = old_row.clone();
 
     for assignment in assignments {
-      if assignment.column.table != table {
+      if assignment.column.table_index != table_index {
         tx.rollback().await?;
         return Err(EngineError::Unsupported(
           "update assignment references another table",
@@ -121,7 +159,7 @@ where
         return Err(EngineError::InvalidQuery("update assignment out of bounds"));
       }
 
-      new_row[index] = eval_expr_value_for_row(&assignment.value, &old_row, table)?;
+      new_row[index] = eval_expr_value_for_row(&assignment.value, &old_row, table_index)?;
     }
 
     let new_key = primary_key_from_row(&new_row)?;
@@ -144,12 +182,14 @@ where
 
 async fn execute_delete<M>(
   engine: &Engine<M>,
-  table: &str,
+  tables: &[String],
+  table_index: TableIndex,
   predicate: Option<&Expr>,
 ) -> EngineResult<Vec<Row>>
 where
   M: BTreeManager,
 {
+  let table = resolve_table_name(tables, table_index)?;
   let definition = EngineBTreeDefinition::from(table);
   let btree = engine.manager.get(&definition).await?;
   let mut tx = btree.transaction().await?;
@@ -161,7 +201,7 @@ where
 
     while let Some(entry) = stream.next().await {
       let (key, row) = entry?;
-      if matches_predicate(predicate, &row, table)? {
+      if matches_predicate(predicate, &row, table_index)? {
         keys.push(key);
       }
     }
@@ -178,14 +218,14 @@ where
   Ok(Vec::new())
 }
 
-fn project_row(row: &Row, table: &str, projection: &[Column]) -> EngineResult<Row> {
+fn project_row(row: &Row, table_index: TableIndex, projection: &[Column]) -> EngineResult<Row> {
   if projection.is_empty() {
     return Ok(row.clone());
   }
 
   let mut projected = Vec::with_capacity(projection.len());
   for column in projection {
-    if column.table != table {
+    if column.table_index != table_index {
       return Err(EngineError::Unsupported(
         "projection references another table",
       ));
@@ -201,39 +241,49 @@ fn project_row(row: &Row, table: &str, projection: &[Column]) -> EngineResult<Ro
   Ok(projected)
 }
 
-fn matches_predicate(predicate: Option<&Expr>, row: &Row, table: &str) -> EngineResult<bool> {
+fn matches_predicate(
+  predicate: Option<&Expr>,
+  row: &Row,
+  table_index: TableIndex,
+) -> EngineResult<bool> {
   match predicate {
-    Some(expr) => eval_expr(expr, row, table),
+    Some(expr) => eval_expr(expr, row, table_index),
     None => Ok(true),
   }
 }
 
-fn eval_expr(expr: &Expr, row: &Row, table: &str) -> EngineResult<bool> {
+fn eval_expr(expr: &Expr, row: &Row, table_index: TableIndex) -> EngineResult<bool> {
   match expr {
-    Expr::Equals(left, right) => {
-      Ok(eval_expr_value_for_row(left, row, table)? == eval_expr_value_for_row(right, row, table)?)
-    }
-    Expr::NotEquals(left, right) => {
-      Ok(eval_expr_value_for_row(left, row, table)? != eval_expr_value_for_row(right, row, table)?)
-    }
-    Expr::LessThan(left, right) => {
-      Ok(eval_expr_value_for_row(left, row, table)? < eval_expr_value_for_row(right, row, table)?)
-    }
-    Expr::LessThanOrEquals(left, right) => {
-      Ok(eval_expr_value_for_row(left, row, table)? <= eval_expr_value_for_row(right, row, table)?)
-    }
-    Expr::GreaterThan(left, right) => {
-      Ok(eval_expr_value_for_row(left, row, table)? > eval_expr_value_for_row(right, row, table)?)
-    }
-    Expr::GreaterThanOrEquals(left, right) => {
-      Ok(eval_expr_value_for_row(left, row, table)? >= eval_expr_value_for_row(right, row, table)?)
-    }
+    Expr::Equals(left, right) => Ok(
+      eval_expr_value_for_row(left, row, table_index)?
+        == eval_expr_value_for_row(right, row, table_index)?,
+    ),
+    Expr::NotEquals(left, right) => Ok(
+      eval_expr_value_for_row(left, row, table_index)?
+        != eval_expr_value_for_row(right, row, table_index)?,
+    ),
+    Expr::LessThan(left, right) => Ok(
+      eval_expr_value_for_row(left, row, table_index)?
+        < eval_expr_value_for_row(right, row, table_index)?,
+    ),
+    Expr::LessThanOrEquals(left, right) => Ok(
+      eval_expr_value_for_row(left, row, table_index)?
+        <= eval_expr_value_for_row(right, row, table_index)?,
+    ),
+    Expr::GreaterThan(left, right) => Ok(
+      eval_expr_value_for_row(left, row, table_index)?
+        > eval_expr_value_for_row(right, row, table_index)?,
+    ),
+    Expr::GreaterThanOrEquals(left, right) => Ok(
+      eval_expr_value_for_row(left, row, table_index)?
+        >= eval_expr_value_for_row(right, row, table_index)?,
+    ),
     Expr::IsNull(value) => Ok(matches!(
-      eval_expr_value_for_row(value, row, table)?,
+      eval_expr_value_for_row(value, row, table_index)?,
       Value::Null
     )),
     Expr::IsNotNull(value) => Ok(!matches!(
-      eval_expr_value_for_row(value, row, table)?,
+      eval_expr_value_for_row(value, row, table_index)?,
       Value::Null
     )),
     Expr::InList {
@@ -241,7 +291,7 @@ fn eval_expr(expr: &Expr, row: &Row, table: &str) -> EngineResult<bool> {
       list,
       negated,
     } => {
-      let value = eval_expr_value_for_row(expr, row, table)?;
+      let value = eval_expr_value_for_row(expr, row, table_index)?;
       let contains = list.iter().any(|item| item == &value);
       Ok(if *negated { !contains } else { contains })
     }
@@ -251,25 +301,33 @@ fn eval_expr(expr: &Expr, row: &Row, table: &str) -> EngineResult<bool> {
       pattern,
       negated,
     } => {
-      let expr_value = eval_expr_value_for_row(expr, row, table)?;
-      let pattern_value = eval_expr_value_for_row(pattern, row, table)?;
+      let expr_value = eval_expr_value_for_row(expr, row, table_index)?;
+      let pattern_value = eval_expr_value_for_row(pattern, row, table_index)?;
       let matches = match (expr_value, pattern_value) {
         (Value::Text(value), Value::Text(pattern)) => like_matches(&value, &pattern),
         _ => false,
       };
       Ok(if *negated { !matches } else { matches })
     }
-    Expr::And(left, right) => Ok(eval_expr(left, row, table)? && eval_expr(right, row, table)?),
-    Expr::Or(left, right) => Ok(eval_expr(left, row, table)? || eval_expr(right, row, table)?),
-    Expr::Not(inner) => Ok(!eval_expr(inner, row, table)?),
+    Expr::And(left, right) => {
+      Ok(eval_expr(left, row, table_index)? && eval_expr(right, row, table_index)?)
+    }
+    Expr::Or(left, right) => {
+      Ok(eval_expr(left, row, table_index)? || eval_expr(right, row, table_index)?)
+    }
+    Expr::Not(inner) => Ok(!eval_expr(inner, row, table_index)?),
   }
 }
 
-fn eval_expr_value_for_row(expr: &ExprValue, row: &Row, table: &str) -> EngineResult<Value> {
+fn eval_expr_value_for_row(
+  expr: &ExprValue,
+  row: &Row,
+  table_index: TableIndex,
+) -> EngineResult<Value> {
   match expr {
     ExprValue::Value(value) => Ok(value.clone()),
     ExprValue::Column(column) => {
-      if column.table != table {
+      if column.table_index != table_index {
         return Err(EngineError::Unsupported(
           "expression references another table",
         ));
@@ -282,6 +340,13 @@ fn eval_expr_value_for_row(expr: &ExprValue, row: &Row, table: &str) -> EngineRe
       Ok(value.clone())
     }
   }
+}
+
+fn resolve_table_name(tables: &[String], table_index: TableIndex) -> EngineResult<&str> {
+  tables
+    .get(usize::from(table_index))
+    .map(|name| name.as_str())
+    .ok_or(EngineError::InvalidQuery("table index out of bounds"))
 }
 
 fn primary_key_from_row(row: &Row) -> EngineResult<Vec<Value>> {

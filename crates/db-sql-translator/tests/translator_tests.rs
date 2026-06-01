@@ -134,7 +134,7 @@ fn select_with_positional_param() {
 
   let expected_pred = Expr::Equals(
     ExprValue::Column(Column {
-      table: "users".to_string(),
+      table_index: 0,
       column_index: 0u8,
     }),
     ExprValue::Value(Value::Integer(42)),
@@ -165,7 +165,7 @@ fn select_with_indexed_param() {
 
   let expected_pred = Expr::Equals(
     ExprValue::Column(Column {
-      table: "users".to_string(),
+      table_index: 0,
       column_index: 0u8,
     }),
     ExprValue::Value(Value::Integer(7)),
@@ -197,7 +197,8 @@ fn insert_with_positional_params() {
   assert_eq!(
     q,
     Query::Insert {
-      table: "users".to_string(),
+      tables: vec!["users".to_string()],
+      table_index: 0,
       row: vec![Value::Integer(1), Value::Text("alice".to_string())],
       returning: None,
     }
@@ -246,7 +247,7 @@ fn select_with_named_param() {
 
   let expected_pred = Expr::Equals(
     ExprValue::Column(Column {
-      table: "users".to_string(),
+      table_index: 0,
       column_index: 0u8,
     }),
     ExprValue::Value(Value::Integer(42)),
@@ -282,7 +283,8 @@ fn insert_with_named_params() {
   assert_eq!(
     q,
     Query::Insert {
-      table: "users".to_string(),
+      tables: vec!["users".to_string()],
+      table_index: 0,
       row: vec![Value::Integer(1), Value::Text("alice".to_string())],
       returning: None,
     }

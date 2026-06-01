@@ -8,9 +8,7 @@ use crate::{
   from_row::{FromRowResult, RowDeserializeError},
 };
 
-pub trait ExtractTables {
-  fn extract_tables(&self) -> Vec<String>;
-}
+pub type TableIndex = u16;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(
@@ -19,22 +17,16 @@ pub trait ExtractTables {
 )]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 pub struct Column {
-  pub table: String,
+  pub table_index: TableIndex,
   pub column_index: ColumnIndex,
 }
 
 impl Column {
-  pub fn new(table: String, column_index: ColumnIndex) -> Self {
+  pub fn new(table_index: TableIndex, column_index: ColumnIndex) -> Self {
     Self {
-      table,
+      table_index,
       column_index,
     }
-  }
-}
-
-impl ExtractTables for Column {
-  fn extract_tables(&self) -> Vec<String> {
-    vec![self.table.clone()]
   }
 }
 
@@ -59,16 +51,8 @@ pub enum JoinKind {
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 pub struct Join {
   pub kind: JoinKind,
-  pub table: String,
+  pub table_index: TableIndex,
   pub on: Expr,
-}
-
-impl ExtractTables for Join {
-  fn extract_tables(&self) -> Vec<String> {
-    let mut tables = vec![self.table.clone()];
-    tables.extend(self.on.extract_tables());
-    tables
-  }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -93,12 +77,6 @@ pub struct OrderBy {
   pub direction: SortDirection,
 }
 
-impl ExtractTables for OrderBy {
-  fn extract_tables(&self) -> Vec<String> {
-    vec![self.expr.table.clone()]
-  }
-}
-
 #[derive(Debug, Clone, Eq, PartialEq)]
 #[cfg_attr(
   feature = "wasm",
@@ -108,15 +86,6 @@ impl ExtractTables for OrderBy {
 pub enum ExprValue {
   Column(Column),
   Value(Value),
-}
-
-impl ExtractTables for ExprValue {
-  fn extract_tables(&self) -> Vec<String> {
-    match self {
-      ExprValue::Column(col) => vec![col.table.clone()],
-      ExprValue::Value(_) => vec![],
-    }
-  }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -152,41 +121,6 @@ pub enum Expr {
   And(Box<Expr>, Box<Expr>),
   Or(Box<Expr>, Box<Expr>),
   Not(Box<Expr>),
-}
-
-impl ExtractTables for Expr {
-  fn extract_tables(&self) -> Vec<String> {
-    match self {
-      Expr::Equals(left, right)
-      | Expr::NotEquals(left, right)
-      | Expr::LessThan(left, right)
-      | Expr::LessThanOrEquals(left, right)
-      | Expr::GreaterThan(left, right)
-      | Expr::GreaterThanOrEquals(left, right) => {
-        let mut tables = left.extract_tables();
-        tables.extend(right.extract_tables());
-        tables
-      }
-      Expr::IsNull(expr) | Expr::IsNotNull(expr) => expr.extract_tables(),
-      Expr::InList { expr, .. } => expr.extract_tables(),
-      Expr::InSubquery { expr, subquery, .. } => {
-        let mut tables = expr.extract_tables();
-        tables.extend(subquery.extract_tables());
-        tables
-      }
-      Expr::Like { expr, pattern, .. } => {
-        let mut tables = expr.extract_tables();
-        tables.extend(pattern.extract_tables());
-        tables
-      }
-      Expr::And(left, right) | Expr::Or(left, right) => {
-        let mut tables = left.extract_tables();
-        tables.extend(right.extract_tables());
-        tables
-      }
-      Expr::Not(inner) => inner.extract_tables(),
-    }
-  }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -244,22 +178,6 @@ impl SelectOptions {
   }
 }
 
-impl ExtractTables for SelectOptions {
-  fn extract_tables(&self) -> Vec<String> {
-    let mut tables = Vec::new();
-    for join in &self.joins {
-      tables.extend(join.extract_tables());
-    }
-    for order in &self.order_by {
-      tables.extend(order.extract_tables());
-    }
-    if let Some(having) = &self.having {
-      tables.extend(having.extract_tables());
-    }
-    tables
-  }
-}
-
 #[derive(Debug, Clone, Eq, PartialEq)]
 #[cfg_attr(
   feature = "wasm",
@@ -269,14 +187,6 @@ impl ExtractTables for SelectOptions {
 pub struct UpdateAssignment {
   pub column: Column,
   pub value: ExprValue,
-}
-
-impl ExtractTables for UpdateAssignment {
-  fn extract_tables(&self) -> Vec<String> {
-    let mut tables = self.column.extract_tables();
-    tables.extend(self.value.extract_tables());
-    tables
-  }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -337,26 +247,30 @@ impl Result {
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
 pub enum Query {
   Select {
-    table: String,
+    tables: Vec<String>,
+    table_index: TableIndex,
     projection: Vec<Column>,
     predicate: Option<Expr>,
     options: Box<SelectOptions>,
   },
   Insert {
-    table: String,
+    tables: Vec<String>,
+    table_index: TableIndex,
     row: Row,
     returning: Option<Vec<Column>>,
   },
   Update {
-    table: String,
+    tables: Vec<String>,
+    table_index: TableIndex,
     assignments: Vec<UpdateAssignment>,
     predicate: Option<Expr>,
     joins: Vec<Join>,
-    from_tables: Vec<String>,
+    from_table_indexes: Vec<TableIndex>,
     returning: Option<Vec<Column>>,
   },
   Delete {
-    table: String,
+    tables: Vec<String>,
+    table_index: TableIndex,
     predicate: Option<Expr>,
     returning: Option<Vec<Column>>,
   },
@@ -364,46 +278,37 @@ pub enum Query {
 
 impl Query {
   pub fn select_simple(table: String, projection: Vec<usize>, predicate: Option<Expr>) -> Self {
+    let table_index = 0;
     let proj = projection
       .into_iter()
       .map(|i| Column {
-        table: table.clone(),
+        table_index,
         column_index: i as ColumnIndex,
       })
       .collect();
 
     Query::Select {
-      table,
+      tables: vec![table],
+      table_index,
       projection: proj,
       predicate,
       options: Box::new(SelectOptions::default()),
     }
   }
-}
 
-impl ExtractTables for Query {
-  fn extract_tables(&self) -> Vec<String> {
+  pub fn table_name(&self, table_index: TableIndex) -> Option<&str> {
+    self
+      .tables()
+      .get(usize::from(table_index))
+      .map(|name| name.as_str())
+  }
+
+  pub fn tables(&self) -> &[String] {
     match self {
-      Query::Select { table, options, .. } => {
-        let mut tables = vec![table.clone()];
-        tables.extend(options.extract_tables());
-        tables
-      }
-      Query::Insert { table, .. } => vec![table.clone()],
-      Query::Update {
-        table,
-        joins,
-        from_tables,
-        ..
-      } => {
-        let mut tables = vec![table.clone()];
-        for join in joins {
-          tables.extend(join.extract_tables());
-        }
-        tables.extend(from_tables.clone());
-        tables
-      }
-      Query::Delete { table, .. } => vec![table.clone()],
+      Query::Select { tables, .. }
+      | Query::Insert { tables, .. }
+      | Query::Update { tables, .. }
+      | Query::Delete { tables, .. } => tables,
     }
   }
 }
@@ -415,17 +320,17 @@ mod tests {
   #[test]
   fn build_select_ex_shape() {
     let left_col = Column {
-      table: "users".into(),
+      table_index: 0,
       column_index: 0,
     };
     let right_col = Column {
-      table: "orders".into(),
+      table_index: 1,
       column_index: 0,
     };
 
     let join = Join {
       kind: JoinKind::Inner,
-      table: "orders".into(),
+      table_index: 1,
       on: Expr::Equals(
         ExprValue::Column(left_col.clone()),
         ExprValue::Column(right_col.clone()),
@@ -447,7 +352,8 @@ mod tests {
     };
 
     let q = Query::Select {
-      table: "users".into(),
+      tables: vec!["users".into(), "orders".into()],
+      table_index: 0,
       projection: vec![left_col],
       predicate: None,
       options: Box::new(options),
@@ -466,7 +372,7 @@ mod tests {
 
     options.order_by.push(OrderBy {
       expr: Column {
-        table: "users".into(),
+        table_index: 0,
         column_index: 0,
       },
       direction: SortDirection::Asc,

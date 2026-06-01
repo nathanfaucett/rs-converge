@@ -26,8 +26,8 @@ pub use from_row::{FromRow, RowDeserializeError};
 #[cfg(feature = "in-memory")]
 pub use in_memory_btree::{InMemoryBTree, InMemoryBTreeManager};
 pub use query::{
-  Column, Expr, ExprValue, ExtractTables, Join, JoinKind, OrderBy, Query, Result, ResultColumn,
-  SelectOptions, UpdateAssignment,
+  Column, Expr, ExprValue, Join, JoinKind, OrderBy, Query, Result, ResultColumn, SelectOptions,
+  TableIndex, UpdateAssignment,
 };
 pub use schema::{ColumnIndex, ColumnSchema, DescribeSchema, IndexSchema, TableSchema};
 pub use translator::{QueryParams, TranslateError, Translator};
