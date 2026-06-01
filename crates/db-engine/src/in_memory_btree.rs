@@ -403,9 +403,9 @@ impl BTreeManager for InMemoryBTreeManager {
       let btree_any = btree_box.as_ref() as &dyn Any;
 
       if let Some(typed) = btree_any.downcast_ref::<InMemoryBTree<D::Key, D::Value>>() {
-        return Ok(typed.clone());
+        Ok(typed.clone())
       } else {
-        return Err(BTreeError::TypeMismatch);
+        Err(BTreeError::TypeMismatch)
       }
     } else {
       let btree = InMemoryBTree::<D::Key, D::Value>::new();
