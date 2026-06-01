@@ -9,7 +9,7 @@ use alloc::{
 };
 
 use async_trait::async_trait;
-use db_engine::{DescribeSchema, Query, TranslateError, Translator, Value};
+use db_engine::{DescribeSchema, Query, QueryParams, TranslateError, Translator, Value};
 use sqlparser::ast::{
   BinaryOperator, Expr as SQLExpr, ObjectName, ObjectNamePart, SelectItem,
   Statement as SQLStatement, TableFactor,
@@ -19,49 +19,160 @@ use sqlparser::parser::Parser;
 
 pub struct SqlTranslator;
 
-// Small helper to track parameter state while translating. Supports both
-// Postgres-style indexed parameters ($1, $2, ...) and positional `?` which
-// consume params in order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlaceholderStyle {
+  PositionalOrIndexed,
+  Named,
+}
+
+enum ParsedPlaceholder {
+  Positional,
+  Indexed(usize),
+  Named(String),
+}
+
+// Small helper to track parameter state while translating.
 struct ParamState<'a> {
-  params: Option<&'a [Value]>,
+  params: Option<&'a QueryParams>,
   next: usize,
+  style: Option<PlaceholderStyle>,
 }
 
 impl<'a> ParamState<'a> {
-  fn new(params: Option<&'a [Value]>) -> Self {
-    Self { params, next: 0 }
+  fn new(params: Option<&'a QueryParams>) -> Self {
+    Self {
+      params,
+      next: 0,
+      style: None,
+    }
+  }
+
+  fn ensure_style(&mut self, style: PlaceholderStyle) -> Result<(), TranslateError> {
+    match self.style {
+      Some(existing) if existing != style => Err(TranslateError::MixedPlaceholderStyles),
+      _ => {
+        self.style = Some(style);
+        Ok(())
+      }
+    }
+  }
+
+  fn positional_params(&self) -> Result<&[Value], TranslateError> {
+    match self.params {
+      Some(QueryParams::Positional(values)) => Ok(values),
+      Some(QueryParams::Named(_)) => Err(TranslateError::Custom(
+        "named parameters provided for positional/indexed placeholder".into(),
+      )),
+      None => Err(TranslateError::Custom(
+        "no parameters provided for positional/indexed placeholder".into(),
+      )),
+    }
   }
 
   fn take_next(&mut self) -> Result<Value, TranslateError> {
+    self.ensure_style(PlaceholderStyle::PositionalOrIndexed)?;
+
+    let values = self.positional_params()?;
+    if self.next >= values.len() {
+      return Err(TranslateError::Custom(format!(
+        "missing parameter at position {}",
+        self.next + 1
+      )));
+    }
+
+    let v = values[self.next].clone();
+    self.next += 1;
+    Ok(v)
+  }
+
+  fn get_indexed(&mut self, idx0: usize) -> Result<Value, TranslateError> {
+    self.ensure_style(PlaceholderStyle::PositionalOrIndexed)?;
+
+    self
+      .positional_params()?
+      .get(idx0)
+      .cloned()
+      .ok_or_else(|| TranslateError::Custom(format!("missing parameter ${}", idx0 + 1)))
+  }
+
+  fn get_named(&mut self, name: &str) -> Result<Value, TranslateError> {
+    self.ensure_style(PlaceholderStyle::Named)?;
+
     match self.params {
-      Some(p) => {
-        if self.next >= p.len() {
-          return Err(TranslateError::Custom(format!(
-            "missing parameter at position {}",
-            self.next + 1
-          )));
-        }
-        let v = p[self.next].clone();
-        self.next += 1;
-        Ok(v)
-      }
+      Some(QueryParams::Named(values)) => values
+        .get(name)
+        .cloned()
+        .ok_or_else(|| TranslateError::MissingNamedParameter(name.to_string())),
+      Some(QueryParams::Positional(_)) => Err(TranslateError::Custom(
+        "positional parameters provided for named placeholder".into(),
+      )),
       None => Err(TranslateError::Custom(
-        "no parameters provided for positional placeholder".into(),
+        "no parameters provided for named placeholder".into(),
       )),
     }
   }
 
-  fn get_indexed(&self, idx0: usize) -> Result<Value, TranslateError> {
-    match self.params {
-      Some(p) => p
-        .get(idx0)
-        .cloned()
-        .ok_or_else(|| TranslateError::Custom(format!("missing parameter ${}", idx0 + 1))),
-      None => Err(TranslateError::Custom(
-        "no parameters provided for indexed placeholder".into(),
-      )),
+  fn resolve_placeholder(
+    &mut self,
+    placeholder: ParsedPlaceholder,
+  ) -> Result<Value, TranslateError> {
+    match placeholder {
+      ParsedPlaceholder::Positional => self.take_next(),
+      ParsedPlaceholder::Indexed(idx0) => self.get_indexed(idx0),
+      ParsedPlaceholder::Named(name) => self.get_named(&name),
     }
   }
+}
+
+fn trim_cast_suffix(raw: &str) -> &str {
+  let s = raw.trim();
+  if let Some(idx) = s.find("::") {
+    s[..idx].trim()
+  } else {
+    s
+  }
+}
+
+fn is_valid_named_param(name: &str) -> bool {
+  let mut chars = name.chars();
+  match chars.next() {
+    Some(c) if c == '_' || c.is_ascii_alphabetic() => {}
+    _ => return false,
+  }
+
+  chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+fn parse_placeholder(expr: &SQLExpr) -> Result<Option<ParsedPlaceholder>, TranslateError> {
+  let raw = expr.to_string();
+  let token = trim_cast_suffix(&raw);
+
+  if token == "?" {
+    return Ok(Some(ParsedPlaceholder::Positional));
+  }
+
+  if let Some(digits) = token.strip_prefix('$') {
+    if !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()) {
+      let idx1 = digits
+        .parse::<usize>()
+        .map_err(|e| TranslateError::Custom(format!("invalid parameter index: {}", e)))?;
+      if idx1 == 0 {
+        return Err(TranslateError::Custom(
+          "parameter index must be >= 1".into(),
+        ));
+      }
+
+      return Ok(Some(ParsedPlaceholder::Indexed(idx1 - 1)));
+    }
+  }
+
+  if let Some(name) = token.strip_prefix(':') {
+    if is_valid_named_param(name) {
+      return Ok(Some(ParsedPlaceholder::Named(name.to_string())));
+    }
+  }
+
+  Ok(None)
 }
 
 fn object_name_to_string(name: &ObjectName) -> String {
@@ -277,15 +388,7 @@ fn parse_literal_for_type(
   raw: &str,
   target_type: &db_engine::ValueType,
 ) -> Result<db_engine::Value, TranslateError> {
-  let s = raw.trim();
-
-  // Remove cast suffixes like '::uuid' if present
-  let s = if let Some(idx) = s.find("::") {
-    &s[..idx]
-  } else {
-    s
-  };
-  let s = s.trim();
+  let s = trim_cast_suffix(raw);
 
   // Null
   if s.eq_ignore_ascii_case("NULL") {
@@ -346,15 +449,7 @@ fn parse_literal_for_type(
 // is used for INSERTs when a target column schema is not available.
 fn expr_to_value_guess(expr: &SQLExpr) -> Result<db_engine::Value, TranslateError> {
   let raw = expr.to_string();
-  let s = raw.trim();
-
-  // Remove cast suffixes like '::uuid' if present
-  let s = if let Some(idx) = s.find("::") {
-    &s[..idx]
-  } else {
-    s
-  };
-  let s = s.trim();
+  let s = trim_cast_suffix(&raw);
 
   if s.eq_ignore_ascii_case("NULL") {
     return Ok(db_engine::Value::Null);
@@ -402,38 +497,10 @@ fn expr_to_expr_value<S>(
 where
   S: DescribeSchema,
 {
-  // Detect placeholders by inspecting the printed form of the expression. This keeps
-  // behavior robust across sqlparser versions and handles casts like `$1::uuid`.
-  let raw = expr.to_string();
-  let s = raw.trim();
-  let s = if let Some(idx) = s.find("::") {
-    &s[..idx]
-  } else {
-    s
-  };
-  let s = s.trim();
-
-  // Positional `?` consumes the next parameter
-  if s == "?" {
-    let v = params.take_next()?;
-    return Ok(db_engine::ExprValue::Value(v));
-  }
-
-  // Postgres-style indexed parameters like $1, $2 (1-based)
-  if s.starts_with('$') {
-    let digits = &s[1..];
-    if !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()) {
-      let idx1 = digits
-        .parse::<usize>()
-        .map_err(|e| TranslateError::Custom(format!("invalid parameter index: {}", e)))?;
-      if idx1 == 0 {
-        return Err(TranslateError::Custom(
-          "parameter index must be >= 1".into(),
-        ));
-      }
-      let v = params.get_indexed(idx1 - 1)?;
-      return Ok(db_engine::ExprValue::Value(v));
-    }
+  if let Some(placeholder) = parse_placeholder(expr)? {
+    return Ok(db_engine::ExprValue::Value(
+      params.resolve_placeholder(placeholder)?,
+    ));
   }
 
   match expr {
@@ -583,15 +650,12 @@ where
 {
   match stmt {
     SQLStatement::Insert(insert) => {
-      let insert = insert; // insert: &sqlparser::ast::Insert
-      // table is a TableObject; use its string form
       let table = insert.table.to_string();
       let table_schema = resolver
         .describe_table(&table)
         .await
         .ok_or_else(|| TranslateError::Custom(format!("unknown table: {}", table)))?;
 
-      // Expect a SOURCE query containing VALUES
       if let Some(source) = &insert.source {
         match &*source.body {
           sqlparser::ast::SetExpr::Values(values) => {
@@ -602,13 +666,10 @@ where
             }
 
             let row_exprs = &values.rows[0];
-
-            // Build target row initialized with NULLs
             let mut row: Vec<db_engine::Value> =
               vec![db_engine::Value::Null; table_schema.columns.len()];
 
             if insert.columns.is_empty() {
-              // Values must match table column count
               if row_exprs.len() != table_schema.columns.len() {
                 return Err(TranslateError::Custom(format!(
                   "VALUES count ({}) does not match table column count ({})",
@@ -619,44 +680,13 @@ where
 
               for (i, expr) in row_exprs.iter().enumerate() {
                 let col_schema = &table_schema.columns[i];
-                // Handle parameter placeholders ($n or ?) first
-                let raw = expr.to_string();
-                let s = raw.trim();
-                let s = if let Some(idx) = s.find("::") {
-                  &s[..idx]
+                row[i] = if let Some(placeholder) = parse_placeholder(expr)? {
+                  params.resolve_placeholder(placeholder)?
                 } else {
-                  s
+                  parse_literal_for_type(&expr.to_string(), &col_schema.r#type)?
                 };
-                let s = s.trim();
-
-                if s == "?" {
-                  row[i] = params.take_next()?;
-                } else if s.starts_with('$') {
-                  let digits = &s[1..];
-                  if !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()) {
-                    let idx1 = digits.parse::<usize>().map_err(|e| {
-                      TranslateError::Custom(format!("invalid parameter index: {}", e))
-                    })?;
-                    if idx1 == 0 {
-                      return Err(TranslateError::Custom(
-                        "parameter index must be >= 1".into(),
-                      ));
-                    }
-                    row[i] = params.get_indexed(idx1 - 1)?;
-                  } else {
-                    return Err(TranslateError::Custom(format!(
-                      "unsupported VALUES expression: {}",
-                      expr
-                    )));
-                  }
-                } else {
-                  // Prefer parsing by column type
-                  let v = parse_literal_for_type(&expr.to_string(), &col_schema.r#type)?;
-                  row[i] = v;
-                }
               }
             } else {
-              // Column list provided: map each value to its declared column
               if insert.columns.len() != row_exprs.len() {
                 return Err(TranslateError::Custom(
                   "number of columns does not match number of VALUES expressions".into(),
@@ -667,35 +697,8 @@ where
                 let idx = find_column_index(&table_schema, &col_ident.to_string())?;
                 let col_schema = &table_schema.columns[idx];
 
-                let raw = expr.to_string();
-                let s = raw.trim();
-                let s = if let Some(idx) = s.find("::") {
-                  &s[..idx]
-                } else {
-                  s
-                };
-                let s = s.trim();
-
-                let v = if s == "?" {
-                  params.take_next()?
-                } else if s.starts_with('$') {
-                  let digits = &s[1..];
-                  if !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()) {
-                    let idx1 = digits.parse::<usize>().map_err(|e| {
-                      TranslateError::Custom(format!("invalid parameter index: {}", e))
-                    })?;
-                    if idx1 == 0 {
-                      return Err(TranslateError::Custom(
-                        "parameter index must be >= 1".into(),
-                      ));
-                    }
-                    params.get_indexed(idx1 - 1)?
-                  } else {
-                    return Err(TranslateError::Custom(format!(
-                      "unsupported VALUES expression: {}",
-                      expr
-                    )));
-                  }
+                let v = if let Some(placeholder) = parse_placeholder(expr)? {
+                  params.resolve_placeholder(placeholder)?
                 } else {
                   parse_literal_for_type(&expr.to_string(), &col_schema.r#type)?
                 };
@@ -715,8 +718,6 @@ where
           )),
         }
       } else if !insert.assignments.is_empty() {
-        // Support INSERT ... SET col = expr (MySQL style) for single-row
-        // Not implementing fully; return not implemented
         Err(TranslateError::Custom(
           "INSERT ... SET not implemented".into(),
         ))
@@ -918,7 +919,7 @@ impl Translator for SqlTranslator {
   async fn translate_with_params<S>(
     &self,
     query: &str,
-    params: Option<&[Value]>,
+    params: Option<&QueryParams>,
     resolver: &S,
   ) -> Result<Query, TranslateError>
   where

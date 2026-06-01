@@ -1,9 +1,10 @@
 use db_engine::{
-  Column, ColumnSchema, DescribeSchema, Expr, ExprValue, Query, TableSchema, Translator, Value,
-  ValueType,
+  Column, ColumnSchema, DescribeSchema, Expr, ExprValue, Query, QueryParams, TableSchema,
+  Translator, Value, ValueType,
 };
 use db_sql_to_engine::SqlTranslator;
 use futures::executor::block_on;
+use hashbrown::HashMap;
 use std::collections::BTreeMap;
 
 struct MockResolver {
@@ -123,7 +124,7 @@ fn select_with_positional_param() {
   );
 
   let translator = SqlTranslator;
-  let params = [Value::Integer(42)];
+  let params = QueryParams::Positional(vec![Value::Integer(42)]);
   let q = block_on(translator.translate_with_params(
     "SELECT id FROM users WHERE id = ?",
     Some(&params),
@@ -154,7 +155,7 @@ fn select_with_indexed_param() {
   );
 
   let translator = SqlTranslator;
-  let params = [Value::Integer(7)];
+  let params = QueryParams::Positional(vec![Value::Integer(7)]);
   let q = block_on(translator.translate_with_params(
     "SELECT id FROM users WHERE id = $1",
     Some(&params),
@@ -185,7 +186,7 @@ fn insert_with_positional_params() {
   );
 
   let translator = SqlTranslator;
-  let params = [Value::Integer(1), Value::Text("alice".to_string())];
+  let params = QueryParams::Positional(vec![Value::Integer(1), Value::Text("alice".to_string())]);
   let q = block_on(translator.translate_with_params(
     "INSERT INTO users (id, name) VALUES (?, ?)",
     Some(&params),
@@ -221,4 +222,113 @@ fn missing_param_errors() {
   assert!(res.is_err());
   let msg = format!("{}", res.err().unwrap());
   assert!(msg.contains("no parameters provided") || msg.contains("missing parameter"));
+}
+
+#[test]
+fn select_with_named_param() {
+  let mut resolver = MockResolver::new();
+  resolver.add_table(
+    "users",
+    vec![("id", ValueType::Integer), ("name", ValueType::Text)],
+  );
+
+  let translator = SqlTranslator;
+  let mut named = HashMap::new();
+  named.insert("user_id".to_string(), Value::Integer(42));
+  let params = QueryParams::Named(named);
+
+  let q = block_on(translator.translate_with_params(
+    "SELECT id FROM users WHERE id = :user_id",
+    Some(&params),
+    &resolver,
+  ))
+  .expect("translate");
+
+  let expected_pred = Expr::Equals(
+    ExprValue::Column(Column {
+      table: "users".to_string(),
+      column_index: 0u8,
+    }),
+    ExprValue::Value(Value::Integer(42)),
+  );
+
+  assert_eq!(
+    q,
+    Query::select_simple("users".to_string(), vec![0], Some(expected_pred))
+  );
+}
+
+#[test]
+fn insert_with_named_params() {
+  let mut resolver = MockResolver::new();
+  resolver.add_table(
+    "users",
+    vec![("id", ValueType::Integer), ("name", ValueType::Text)],
+  );
+
+  let translator = SqlTranslator;
+  let mut named = HashMap::new();
+  named.insert("id".to_string(), Value::Integer(1));
+  named.insert("name".to_string(), Value::Text("alice".to_string()));
+  let params = QueryParams::Named(named);
+
+  let q = block_on(translator.translate_with_params(
+    "INSERT INTO users (id, name) VALUES (:id, :name)",
+    Some(&params),
+    &resolver,
+  ))
+  .expect("translate");
+
+  assert_eq!(
+    q,
+    Query::Insert {
+      table: "users".to_string(),
+      row: vec![Value::Integer(1), Value::Text("alice".to_string())],
+      returning: None,
+    }
+  );
+}
+
+#[test]
+fn missing_named_param_errors() {
+  let mut resolver = MockResolver::new();
+  resolver.add_table(
+    "users",
+    vec![("id", ValueType::Integer), ("name", ValueType::Text)],
+  );
+
+  let translator = SqlTranslator;
+  let params = QueryParams::Named(HashMap::new());
+  let res = block_on(translator.translate_with_params(
+    "SELECT id FROM users WHERE id = :user_id",
+    Some(&params),
+    &resolver,
+  ));
+
+  assert!(res.is_err());
+  let msg = format!("{}", res.err().unwrap());
+  assert!(msg.contains("Missing named parameter"));
+}
+
+#[test]
+fn mixed_placeholder_styles_error() {
+  let mut resolver = MockResolver::new();
+  resolver.add_table(
+    "users",
+    vec![("id", ValueType::Integer), ("name", ValueType::Text)],
+  );
+
+  let translator = SqlTranslator;
+  let mut named = HashMap::new();
+  named.insert("user_id".to_string(), Value::Integer(42));
+  let params = QueryParams::Named(named);
+  let res = block_on(translator.translate_with_params(
+    "SELECT id FROM users WHERE id = :user_id OR id = $1",
+    Some(&params),
+    &resolver,
+  ));
+
+  assert!(res.is_err());
+  let msg = format!("{}", res.err().unwrap());
+  assert!(msg.contains("cannot mix named and positional/indexed"));
 }

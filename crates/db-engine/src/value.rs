@@ -88,7 +88,8 @@ impl Ord for Value {
       (Value::Float(a), Value::Float(b)) => a.to_bits().cmp(&b.to_bits()),
       (Value::Float(a), Value::Integer(b)) => a.to_bits().cmp(&(*b as f64).to_bits()),
       (Value::Integer(a), Value::Float(b)) => (*a as f64).to_bits().cmp(&b.to_bits()),
-      _ => Ordering::Equal,
+      // Different variants — deterministic ordering by variant rank
+      _ => self.r#type().rank().cmp(&other.r#type().rank()),
     }
   }
 }
@@ -104,4 +105,18 @@ pub enum ValueType {
   Text,
   Blob,
   Json,
+}
+
+impl ValueType {
+  pub fn rank(&self) -> u8 {
+    match self {
+      ValueType::Null => 0,
+      ValueType::Uuid => 1,
+      ValueType::Integer => 2,
+      ValueType::Float => 3,
+      ValueType::Text => 4,
+      ValueType::Blob => 5,
+      ValueType::Json => 6,
+    }
+  }
 }

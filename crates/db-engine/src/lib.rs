@@ -20,6 +20,7 @@ pub use btree::{
   BTreeTransaction, BTreeValue, BTreeWriteExecutor,
 };
 pub use concurrency::{MaybeSend, MaybeSendFuture, MaybeSendStream, MaybeSync};
+pub use engine::{Engine, EngineError, EngineResult};
 pub use from_row::{FromRow, RowDeserializeError};
 #[cfg(feature = "in-memory")]
 pub use in_memory_btree::{InMemoryBTree, InMemoryBTreeManager};
@@ -28,5 +29,5 @@ pub use query::{
   SelectOptions, UpdateAssignment,
 };
 pub use schema::{ColumnIndex, ColumnSchema, DescribeSchema, IndexSchema, TableSchema};
-pub use translator::{TranslateError, Translator};
+pub use translator::{QueryParams, TranslateError, Translator};
 pub use value::{Row, Value, ValueType};

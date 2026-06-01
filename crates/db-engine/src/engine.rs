@@ -10,8 +10,8 @@ use std::sync::Arc;
 use thiserror::Error;
 
 use crate::{
-  BTreeDefinition, BTreeManager, BTreeReadExecutor, DescribeSchema, IndexSchema, Query, Row,
-  TableSchema, TranslateError, Translator, Value,
+  BTreeDefinition, BTreeManager, DescribeSchema, IndexSchema, Query, QueryParams, Row, TableSchema,
+  TranslateError, Translator, Value,
 };
 
 #[derive(Error, Debug)]
@@ -95,7 +95,7 @@ where
   pub async fn translate_and_execute_with_params<T>(
     &self,
     query: &str,
-    params: Option<&[Value]>,
+    params: Option<&QueryParams>,
     translator: T,
   ) -> EngineResult<Vec<Row>>
   where
