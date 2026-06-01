@@ -1,3 +1,13 @@
+#[cfg(not(feature = "std"))]
+use alloc::{
+  borrow::ToOwned,
+  boxed::Box,
+  format,
+  string::{String, ToString},
+  vec,
+  vec::Vec,
+};
+
 use async_trait::async_trait;
 use db_engine::{DescribeSchema, Query, TranslateError, Translator, Value};
 use sqlparser::ast::{

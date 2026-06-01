@@ -1,3 +1,6 @@
+#[cfg(not(feature = "std"))]
+use alloc::string::ToString;
+
 use serde::de;
 
 use super::errors::RowDeserializeError;

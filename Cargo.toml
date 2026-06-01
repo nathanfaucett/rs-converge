@@ -4,6 +4,8 @@ description = "Database built on top of a B-Tree implementation."
 repository = "https://github.com/aicacia/rs-db"
 rust-version = "1.95"
 edition = "2024"
+autotests = false
+autoexamples = false
 
 [package.version]
 workspace = true

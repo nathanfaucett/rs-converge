@@ -1,5 +1,5 @@
 #[cfg(not(feature = "std"))]
-use alloc::{borrow::ToOwned, vec::Vec};
+use alloc::{borrow::ToOwned, string::String, vec::Vec};
 
 use serde::de;
 

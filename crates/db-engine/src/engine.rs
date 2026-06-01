@@ -1,3 +1,10 @@
+#[cfg(not(feature = "std"))]
+use alloc::{
+  string::{String, ToString},
+  sync::Arc,
+  vec::Vec,
+};
+#[cfg(feature = "std")]
 use std::sync::Arc;
 
 use thiserror::Error;
