@@ -126,7 +126,6 @@ where
   }
 
   pub async fn execute(&self, query: Query) -> EngineResult<Vec<Row>> {
-    crate::planner::validate(&query)?;
     crate::executor::execute(self, query).await
   }
 }
