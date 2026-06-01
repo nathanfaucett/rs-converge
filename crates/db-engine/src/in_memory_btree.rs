@@ -386,6 +386,20 @@ pub struct InMemoryBTreeManager {
   inner: Arc<RwLock<BTreeMap<String, Box<dyn InMemoryBTreeManagerValue>>>>,
 }
 
+impl InMemoryBTreeManager {
+  pub fn new() -> Self {
+    Self {
+      inner: Arc::new(RwLock::new(BTreeMap::new())),
+    }
+  }
+}
+
+impl Default for InMemoryBTreeManager {
+  fn default() -> Self {
+    Self::new()
+  }
+}
+
 impl BTreeManager for InMemoryBTreeManager {
   type BTree<K, V>
     = InMemoryBTree<K, V>

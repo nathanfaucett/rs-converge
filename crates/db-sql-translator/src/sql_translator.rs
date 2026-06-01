@@ -408,6 +408,21 @@ fn parse_literal_for_type(
   };
 
   match target_type {
+    db_engine::ValueType::Null => Ok(db_engine::Value::Null),
+    db_engine::ValueType::Type => Err(TranslateError::Custom(
+      "type literals are not supported by the minimal translator".into(),
+    )),
+    db_engine::ValueType::Bool => {
+      let s_lower = s.to_ascii_lowercase();
+      match s_lower.as_str() {
+        "true" => Ok(db_engine::Value::Bool(true)),
+        "false" => Ok(db_engine::Value::Bool(false)),
+        _ => Err(TranslateError::Custom(format!(
+          "failed to parse boolean literal: {}",
+          s
+        ))),
+      }
+    }
     db_engine::ValueType::Uuid => {
       let inner = strip_quotes(s);
       match uuid::Uuid::parse_str(&inner) {
@@ -443,7 +458,6 @@ fn parse_literal_for_type(
     db_engine::ValueType::Blob => Err(TranslateError::Custom(
       "blob literals are not supported by the minimal translator".into(),
     )),
-    db_engine::ValueType::Null => Ok(db_engine::Value::Null),
   }
 }
 

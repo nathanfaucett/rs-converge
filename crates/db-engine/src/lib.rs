@@ -5,6 +5,7 @@
 extern crate alloc;
 
 mod btree;
+mod catalog;
 mod concurrency;
 mod engine;
 mod executor;

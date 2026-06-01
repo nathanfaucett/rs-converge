@@ -1,5 +1,5 @@
 #[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec};
 
 use futures::{StreamExt, pin_mut};
 

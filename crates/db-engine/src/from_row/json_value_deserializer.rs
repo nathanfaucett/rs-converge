@@ -35,9 +35,9 @@ impl<'de> de::Deserializer<'de> for JsonValueDeserializer<'de> {
         } else if let Some(f) = n.as_f64() {
           visitor.visit_f64(f)
         } else {
-          return Err(RowDeserializeError::SchemaError(
+          Err(RowDeserializeError::SchemaError(
             "invalid number".to_owned(),
-          ));
+          ))
         }
       }
       serde_json::Value::String(s) => visitor.visit_str(s),

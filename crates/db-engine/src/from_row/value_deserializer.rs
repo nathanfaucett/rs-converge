@@ -1,7 +1,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::string::ToString;
 
-use serde::de;
+use serde::de::{self, EnumAccess};
 
 use super::errors::RowDeserializeError;
 use super::json_value_deserializer::JsonValueDeserializer;
@@ -26,7 +26,10 @@ impl<'de> de::Deserializer<'de> for ValueDeserializer<'de> {
   {
     match self.v {
       Value::Null => visitor.visit_unit(),
+      // TODO use visit_enum
+      Value::Type(t) => unimplemented!("Type deserialization is not supported yet: {:?}", t),
       Value::Uuid(u) => visitor.visit_str(&u.to_string()),
+      Value::Bool(b) => visitor.visit_bool(*b),
       Value::Integer(i) => visitor.visit_i64(*i),
       Value::Float(f) => visitor.visit_f64(*f),
       Value::Text(s) => visitor.visit_str(s),
