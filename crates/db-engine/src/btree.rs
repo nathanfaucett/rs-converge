@@ -140,14 +140,7 @@ pub trait BTreeManager: MaybeSend + MaybeSync {
     K: BTreeKey,
     V: BTreeValue;
 
-  fn get<D>(
-    &self,
-    definition: &D,
-  ) -> impl MaybeSendFuture<Output = BTreeResult<Self::BTree<D::Key, D::Value>>>
-  where
-    D: BTreeDefinition;
-
-  fn insert<D>(
+  fn entry<D>(
     &self,
     definition: &D,
   ) -> impl MaybeSendFuture<Output = BTreeResult<Self::BTree<D::Key, D::Value>>>

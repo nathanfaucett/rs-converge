@@ -5,16 +5,16 @@ use serde::de;
 
 use super::errors::RowDeserializeError;
 use super::value_deserializer::ValueDeserializer;
-use crate::{ResultColumn, Row};
+use crate::{QueryResultColumn, Row};
 
 pub(crate) struct RowMapAccess<'de> {
-  pub(crate) cols: &'de [ResultColumn],
+  pub(crate) cols: &'de [QueryResultColumn],
   pub(crate) row: &'de Row,
   pub(crate) pos: usize,
 }
 
 impl<'de> RowMapAccess<'de> {
-  pub(crate) fn new(cols: &'de [ResultColumn], row: &'de Row) -> Self {
+  pub(crate) fn new(cols: &'de [QueryResultColumn], row: &'de Row) -> Self {
     RowMapAccess { cols, row, pos: 0 }
   }
 }

@@ -1,7 +1,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::string::ToString;
 
-use serde::de::{self, EnumAccess};
+use serde::de;
 
 use super::errors::RowDeserializeError;
 use super::json_value_deserializer::JsonValueDeserializer;

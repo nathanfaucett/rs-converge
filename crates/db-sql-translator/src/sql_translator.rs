@@ -9,10 +9,12 @@ use alloc::{
 };
 
 use async_trait::async_trait;
-use db_engine::{DescribeSchema, Query, QueryParams, TranslateError, Translator, Value};
+use db_engine::{
+  DdlOp, DescribeSchema, Query, QueryParams, Statement, TranslateError, Translator, Value,
+};
 use sqlparser::ast::{
-  BinaryOperator, Expr as SQLExpr, ObjectName, ObjectNamePart, SelectItem,
-  Statement as SQLStatement, TableFactor,
+  BinaryOperator, ColumnOption, DataType, Expr as SQLExpr, ObjectName, ObjectNamePart, SelectItem,
+  Statement as SQLStatement, TableConstraint, TableFactor,
 };
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
@@ -971,6 +973,129 @@ where
   }
 }
 
+fn parse_create_table_schema(
+  create: &sqlparser::ast::CreateTable,
+) -> Result<db_engine::TableSchema, TranslateError> {
+  let table_name = object_name_to_string(&create.name);
+
+  let mut columns = Vec::new();
+  let mut primary_key_index: Vec<u8> = Vec::new();
+
+  for (column_index, col) in create.columns.iter().enumerate() {
+    let column_type = match &col.data_type {
+      DataType::Uuid => db_engine::ValueType::Uuid,
+      DataType::Text => db_engine::ValueType::Text,
+      DataType::Varchar(_)
+      | DataType::Char(_)
+      | DataType::Character(_)
+      | DataType::CharacterVarying(_)
+      | DataType::CharVarying(_)
+      | DataType::Nvarchar(_) => db_engine::ValueType::Text,
+      DataType::Int(_)
+      | DataType::Integer(_)
+      | DataType::Int2(_)
+      | DataType::Int4(_)
+      | DataType::Int8(_)
+      | DataType::Int16
+      | DataType::Int32
+      | DataType::Int64
+      | DataType::Int128
+      | DataType::Int256
+      | DataType::IntUnsigned(_)
+      | DataType::Int4Unsigned(_)
+      | DataType::IntegerUnsigned(_)
+      | DataType::Int2Unsigned(_)
+      | DataType::Int8Unsigned(_) => db_engine::ValueType::Integer,
+      DataType::Float(_)
+      | DataType::FloatUnsigned(_)
+      | DataType::Float4
+      | DataType::Float32
+      | DataType::Float64
+      | DataType::Real
+      | DataType::RealUnsigned
+      | DataType::Float8
+      | DataType::Double(_)
+      | DataType::DoubleUnsigned(_)
+      | DataType::DoublePrecision
+      | DataType::DoublePrecisionUnsigned => db_engine::ValueType::Float,
+      DataType::Boolean => db_engine::ValueType::Bool,
+      DataType::JSON | DataType::JSONB => db_engine::ValueType::Json,
+      _ => {
+        return Err(TranslateError::Custom(format!(
+          "unsupported column type in CREATE TABLE: {}",
+          col.data_type
+        )));
+      }
+    };
+
+    if col
+      .options
+      .iter()
+      .any(|opt| matches!(opt.option, ColumnOption::PrimaryKey(_)))
+    {
+      primary_key_index.push(
+        u8::try_from(column_index)
+          .map_err(|_| TranslateError::Custom("table schema has too many columns".into()))?,
+      );
+    }
+
+    columns.push(db_engine::ColumnSchema {
+      name: col.name.value.clone(),
+      r#type: column_type,
+    });
+  }
+
+  for constraint in create.constraints.iter() {
+    if let TableConstraint::PrimaryKey(pk) = constraint {
+      for ident in &pk.columns {
+        let column_name = ident.column.to_string();
+        let idx = columns
+          .iter()
+          .position(|c| c.name == column_name)
+          .ok_or_else(|| {
+            TranslateError::Custom(format!(
+              "unknown column '{}' in PRIMARY KEY constraint",
+              column_name
+            ))
+          })?;
+        primary_key_index.push(
+          u8::try_from(idx)
+            .map_err(|_| TranslateError::Custom("table schema has too many columns".into()))?,
+        );
+      }
+    }
+  }
+
+  Ok(db_engine::TableSchema {
+    name: table_name,
+    columns,
+    primary_key_index,
+  })
+}
+
+fn translate_create_table<S>(
+  stmt: &SQLStatement,
+  _resolver: &S,
+  _params: &mut ParamState<'_>,
+) -> Result<Statement, TranslateError>
+where
+  S: DescribeSchema,
+{
+  match stmt {
+    SQLStatement::CreateTable(create) => {
+      let schema = parse_create_table_schema(create)?;
+      Ok(Statement::Ddl(DdlOp::CreateTable {
+        schema,
+        if_not_exists: create.if_not_exists,
+      }))
+    }
+    other => Err(TranslateError::Custom(format!(
+      "expected CREATE TABLE statement, got {}",
+      other
+    ))),
+  }
+}
+
 #[async_trait]
 impl Translator for SqlTranslator {
   async fn translate_with_params<S>(
@@ -978,7 +1103,7 @@ impl Translator for SqlTranslator {
     query: &str,
     params: Option<&QueryParams>,
     resolver: &S,
-  ) -> Result<Query, TranslateError>
+  ) -> Result<Statement, TranslateError>
   where
     S: DescribeSchema + Send + Sync,
   {
@@ -988,16 +1113,23 @@ impl Translator for SqlTranslator {
 
     match &stmt {
       SQLStatement::Query(q) => match &*q.body {
-        sqlparser::ast::SetExpr::Select(select) => {
-          translate_select(select, resolver, &mut pstate).await
-        }
+        sqlparser::ast::SetExpr::Select(select) => translate_select(select, resolver, &mut pstate)
+          .await
+          .map(Statement::Query),
         _ => Err(TranslateError::Custom(
           "only simple SELECT statements are supported by the minimal translator".into(),
         )),
       },
-      SQLStatement::Insert(_) => translate_insert(&stmt, resolver, &mut pstate).await,
-      SQLStatement::Update(_) => translate_update(&stmt, resolver, &mut pstate).await,
-      SQLStatement::Delete(_) => translate_delete(&stmt, resolver, &mut pstate).await,
+      SQLStatement::CreateTable(_) => translate_create_table(&stmt, resolver, &mut pstate),
+      SQLStatement::Insert(_) => translate_insert(&stmt, resolver, &mut pstate)
+        .await
+        .map(Statement::Query),
+      SQLStatement::Update(_) => translate_update(&stmt, resolver, &mut pstate)
+        .await
+        .map(Statement::Query),
+      SQLStatement::Delete(_) => translate_delete(&stmt, resolver, &mut pstate)
+        .await
+        .map(Statement::Query),
       other => Err(TranslateError::Custom(format!(
         "unsupported SQL statement: {}",
         other

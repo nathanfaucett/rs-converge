@@ -93,9 +93,9 @@ impl Ord for Value {
       (Value::Text(a), Value::Text(b)) => a.cmp(b),
       (Value::Json(a), Value::Json(b)) => a.to_string().cmp(&b.to_string()),
       (Value::Blob(a), Value::Blob(b)) => a.cmp(b),
-      // Allow comparison between integers and floats for convenience
       (Value::Integer(a), Value::Integer(b)) => a.cmp(b),
       (Value::Float(a), Value::Float(b)) => a.to_bits().cmp(&b.to_bits()),
+      // Allow comparison between integers and floats for convenience
       (Value::Float(a), Value::Integer(b)) => a.to_bits().cmp(&(*b as f64).to_bits()),
       (Value::Integer(a), Value::Float(b)) => (*a as f64).to_bits().cmp(&b.to_bits()),
       // Different variants — deterministic ordering by variant rank

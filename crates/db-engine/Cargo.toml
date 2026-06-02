@@ -49,4 +49,5 @@ wasm-bindgen = { version = "0.2", default-features = false, features = [
 ], optional = true }
 
 [dev-dependencies]
+async-trait = { version = "0.1", default-features = false }
 futures = { version = "0.3", default-features = false, features = ["executor"] }

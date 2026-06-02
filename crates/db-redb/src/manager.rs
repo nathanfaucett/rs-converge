@@ -49,7 +49,7 @@ impl BTreeManager for RedbBTreeManager {
     K: BTreeKey,
     V: BTreeValue;
 
-  async fn get<D>(&self, definition: &D) -> BTreeResult<Self::BTree<D::Key, D::Value>>
+  async fn entry<D>(&self, definition: &D) -> BTreeResult<Self::BTree<D::Key, D::Value>>
   where
     D: BTreeDefinition,
   {
@@ -93,13 +93,6 @@ impl BTreeManager for RedbBTreeManager {
     } else {
       Err(db_engine::BTreeError::TypeMismatch)
     }
-  }
-
-  async fn insert<D>(&self, definition: &D) -> BTreeResult<Self::BTree<D::Key, D::Value>>
-  where
-    D: BTreeDefinition,
-  {
-    self.get(definition).await
   }
 
   async fn remove<D>(&self, definition: &D) -> BTreeResult<()>

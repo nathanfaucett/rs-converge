@@ -5,242 +5,35 @@ import "google/protobuf/empty.proto";
 
 
 // ================================================
-// EngineQuery
+// Statement Start
 // crates/db-engine/src/query.rs
 // ================================================
 
-message QualifiedColumn {
-  string table = 1;
-  uint64 column_index = 2;
+message Statement {
 }
 
-message EngineValue {
-  oneof value {
-    string string_value = 1;
-    int64 int_value = 2;
-    double float_value = 3;
-    bool bool_value = 4;
-    bytes bytes_value = 5;
-    NullValue null_value = 6;
-  }
-}
-
-enum NullValue {
-  NULL_VALUE = 0;
-}
-
-message UpdateValueExpr {
-  oneof expr {
-    EngineValue value = 1;
-    QualifiedColumn column = 2;
-
-    BinaryExpr add = 3;
-    BinaryExpr subtract = 4;
-    BinaryExpr multiply = 5;
-    BinaryExpr divide = 6;
-  }
-}
-
-message BinaryExpr {
-  UpdateValueExpr left = 1;
-  UpdateValueExpr right = 2;
-}
-
-message UpdateAssignment {
-  uint64 column_index = 1;
-  UpdateValueExpr value = 2;
-}
-
-enum JoinKind {
-  INNER = 0;
-  LEFT = 1;
-  RIGHT = 2;
-  FULL = 3;
-}
-
-message JoinOn {
-  oneof kind {
-    JoinColumnEq column_eq = 1;
-    JoinColumnEqList column_eq_list = 2;
-  }
-}
-
-message JoinColumnEq {
-  QualifiedColumn left = 1;
-  QualifiedColumn right = 2;
-}
-
-message JoinColumnPair {
-  QualifiedColumn left = 1;
-  QualifiedColumn right = 2;
-}
-
-message JoinColumnEqList {
-  repeated JoinColumnPair pairs = 1;
-}
-
-message JoinClause {
-  JoinKind kind = 1;
-  string left_table = 2;
-  string right_table = 3;
-  JoinOn on = 4;
-}
-
-enum SortDirection {
-  ASC = 0;
-  DESC = 1;
-}
-
-message OrderBy {
-  QualifiedColumn expr = 1;
-  SortDirection direction = 2;
-}
-
-message QualifiedOperand {
-  oneof operand {
-    QualifiedColumn column = 1;
-    EngineValue value = 2;
-    QualifiedOperand lower = 3;
-  }
-}
-
-message QualifiedPredicate {
-  oneof predicate {
-    BinaryPredicate equals = 1;
-    BinaryPredicate not_equals = 2;
-    BinaryPredicate less_than = 3;
-    BinaryPredicate less_than_or_equals = 4;
-    BinaryPredicate greater_than = 5;
-    BinaryPredicate greater_than_or_equals = 6;
-
-    QualifiedColumn is_null = 7;
-    QualifiedColumn is_not_null = 8;
-
-    InListPredicate in_list = 9;
-    InSubqueryPredicate in_subquery = 10;
-    LikePredicate like = 11;
-
-    LogicalPredicate and = 12;
-    LogicalPredicate or = 13;
-    QualifiedPredicate not = 14;
-  }
-}
-
-message BinaryPredicate {
-  QualifiedOperand left = 1;
-  QualifiedOperand right = 2;
-}
-
-message LogicalPredicate {
-  QualifiedPredicate left = 1;
-  QualifiedPredicate right = 2;
-}
-
-message InListPredicate {
-  QualifiedColumn expr = 1;
-  repeated EngineValue list = 2;
-  bool negated = 3;
-}
-
-message InSubqueryPredicate {
-  QualifiedColumn expr = 1;
-  EngineQuery subquery = 2;
-  bool negated = 3;
-}
-
-message LikePredicate {
-  QualifiedOperand expr = 1;
-  QualifiedOperand pattern = 2;
-  bool negated = 3;
-}
-
-message Aggregate {
-  oneof aggregate {
-    AggregateColumn sum = 1;
-    AggregateColumn min = 2;
-    AggregateColumn max = 3;
-    AggregateColumn avg = 4;
-    CountAggregate count = 5;
-  }
-}
-
-message AggregateColumn {
-  QualifiedColumn column = 1;
-}
-
-message CountAggregate {
-  QualifiedColumn column = 1;
-  bool has_column = 2;
-}
-
-message SelectOptions {
-  repeated JoinClause joins = 1;
-  repeated Aggregate aggregates = 2;
-  repeated QualifiedColumn group_by = 3;
-  repeated OrderBy order_by = 4;
-
-  optional uint64 limit = 5;
-  optional uint64 offset = 6;
-
-  bool distinct = 7;
-}
-
-message SelectQuery {
-  string table = 1;
-  repeated QualifiedColumn projection = 2;
-  optional QualifiedPredicate predicate = 3;
-  SelectOptions options = 4;
-}
-
-message InsertQuery {
-  string table = 1;
-  repeated EngineValue row = 2;
-  repeated UpdateValueExpr returning = 3;
-}
-
-message UpdateQuery {
-  string table = 1;
-  repeated UpdateAssignment assignments = 2;
-  optional QualifiedPredicate predicate = 3;
-  repeated JoinClause joins = 4;
-  repeated string from_tables = 5;
-  repeated UpdateValueExpr returning = 6;
-}
-
-message DeleteQuery {
-  string table = 1;
-  optional QualifiedPredicate predicate = 2;
-  repeated UpdateValueExpr returning = 3;
-}
-
-message EngineQuery {
-  oneof query {
-    SelectQuery select = 1;
-    InsertQuery insert = 2;
-    UpdateQuery update = 3;
-    DeleteQuery delete = 4;
-  }
+message Value {
 }
 
 // ================================================
-// EngineQuery
+// Statement End
 // ================================================
 
-message QueryRequest {
-    EngineQuery query = 1;
+message StatementRequest {
+    Statement statement = 1;
 }
 
-message QueryResponseColumn {
+message StatementResponseColumn {
   string name = 1;
   optional string source_table = 2;
   optional uint64 source_column_index = 3;
 }
 
-message QueryResponseColumn {
-  repeated EngineValue rows = 1;
-  repeated ResponseColumn columns = 1;
+message StatementResponse {
+  repeated Value rows = 1;
+  repeated StatementResponseColumn columns = 2;
 }
 
-service QueryService {
-    rpc Query (EngineQuery) returns (QueryResponseColumn);
+service StatementService {
+    rpc Execute (StatementRequest) returns (StatementResponse);
 }

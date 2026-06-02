@@ -12,8 +12,8 @@ use thiserror::Error;
 
 use crate::{
   BTree, BTreeDefinition, BTreeError, BTreeManager, BTreeReadExecutor, BTreeTransaction,
-  BTreeWriteExecutor, DescribeSchema, IndexSchema, Query, QueryParams, Row, TableSchema,
-  TranslateError, Translator, Value,
+  BTreeWriteExecutor, DescribeSchema, IndexSchema, QueryParams, QueryResult, Row, Statement,
+  TableSchema, TranslateError, Translator, Value,
   catalog::{
     ENGINE_INDEX_FIELDS, ENGINE_INDICES, ENGINE_TABLE_FIELDS, ENGINE_TABLES, IndexFieldRow,
     TableFieldRow, decode_index_field_row, decode_index_row, decode_table_field_row,
@@ -92,7 +92,7 @@ where
 {
   async fn describe_table(&self, table_name: &str) -> Option<TableSchema> {
     let definition = EngineBTreeDefinition::from(ENGINE_TABLES);
-    let btree = self.manager.get(&definition).await.ok()?;
+    let btree = self.manager.entry(&definition).await.ok()?;
 
     let mut exists = false;
     {
@@ -112,7 +112,7 @@ where
     }
 
     let field_definition = EngineBTreeDefinition::from(ENGINE_TABLE_FIELDS);
-    let field_btree = self.manager.get(&field_definition).await.ok()?;
+    let field_btree = self.manager.entry(&field_definition).await.ok()?;
 
     let mut fields = Vec::new();
     {
@@ -138,7 +138,7 @@ where
 {
   pub async fn describe_index(&self, index_name: &str) -> Option<IndexSchema> {
     let definition = EngineBTreeDefinition::from(ENGINE_INDICES);
-    let btree = self.manager.get(&definition).await.ok()?;
+    let btree = self.manager.entry(&definition).await.ok()?;
 
     let mut index_row = None;
     {
@@ -158,7 +158,7 @@ where
     let index_row = index_row?;
 
     let field_definition = EngineBTreeDefinition::from(ENGINE_INDEX_FIELDS);
-    let field_btree = self.manager.get(&field_definition).await.ok()?;
+    let field_btree = self.manager.entry(&field_definition).await.ok()?;
 
     let mut fields = Vec::new();
     {
@@ -179,14 +179,15 @@ where
 
   pub async fn register_table_schema(&self, schema: &TableSchema) -> EngineResult<()> {
     let definition = EngineBTreeDefinition::from(ENGINE_TABLES);
-    let btree = self.manager.get(&definition).await?;
+    let btree: <M as BTreeManager>::BTree<Vec<Value>, Vec<Value>> =
+      self.manager.entry(&definition).await?;
     let mut tx = btree.transaction().await?;
     tx.insert(table_key(&schema.name), encode_table_row(&schema.name))
       .await?;
     tx.commit().await?;
 
     let definition = EngineBTreeDefinition::from(ENGINE_TABLE_FIELDS);
-    let btree = self.manager.get(&definition).await?;
+    let btree = self.manager.entry(&definition).await?;
     let mut tx = btree.transaction().await?;
 
     let mut keys_to_delete = Vec::new();
@@ -231,14 +232,14 @@ where
 
   pub async fn register_index_schema(&self, schema: &IndexSchema) -> EngineResult<()> {
     let definition = EngineBTreeDefinition::from(ENGINE_INDICES);
-    let btree = self.manager.get(&definition).await?;
+    let btree = self.manager.entry(&definition).await?;
     let mut tx = btree.transaction().await?;
     tx.insert(index_key(&schema.name), encode_index_row(schema))
       .await?;
     tx.commit().await?;
 
     let definition = EngineBTreeDefinition::from(ENGINE_INDEX_FIELDS);
-    let btree = self.manager.get(&definition).await?;
+    let btree = self.manager.entry(&definition).await?;
     let mut tx = btree.transaction().await?;
 
     let mut keys_to_delete = Vec::new();
@@ -284,17 +285,21 @@ where
     query: &str,
     params: Option<&QueryParams>,
     translator: T,
-  ) -> EngineResult<Vec<Row>>
+  ) -> EngineResult<QueryResult>
   where
     T: Translator,
   {
-    let q = translator
+    let statement = translator
       .translate_with_params(query, params, self)
       .await?;
-    self.execute(q).await
+    self.execute(statement).await
   }
 
-  pub async fn translate_and_execute<T>(&self, query: &str, translator: T) -> EngineResult<Vec<Row>>
+  pub async fn translate_and_execute<T>(
+    &self,
+    query: &str,
+    translator: T,
+  ) -> EngineResult<QueryResult>
   where
     T: Translator,
   {
@@ -303,8 +308,8 @@ where
       .await
   }
 
-  pub async fn execute(&self, query: Query) -> EngineResult<Vec<Row>> {
-    crate::executor::execute(self, query).await
+  pub async fn execute(&self, statement: Statement) -> EngineResult<QueryResult> {
+    crate::executor::execute_statement(self, statement).await
   }
 }
 
@@ -418,7 +423,7 @@ mod tests {
     let definition = EngineBTreeDefinition::from(table_name);
     let btree = engine
       .manager
-      .get(&definition)
+      .entry(&definition)
       .await
       .expect("get btree for table");
 

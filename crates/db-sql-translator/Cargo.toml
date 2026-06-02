@@ -24,7 +24,9 @@ wasm = [
 ]
 
 [dependencies]
-db-engine = { path = "../db-engine", default-features = false, features = [] }
+db-engine = { path = "../db-engine", default-features = false, features = [
+  "in-memory",
+] }
 sqlparser = { version = "0.61", default-features = false, features = [] }
 hashbrown = { version = "0.17", default-features = false, features = [
   "default-hasher",

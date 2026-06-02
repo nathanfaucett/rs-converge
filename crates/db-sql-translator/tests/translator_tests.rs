@@ -1,6 +1,6 @@
 use db_engine::{
-  Column, ColumnSchema, DescribeSchema, Expr, ExprValue, Query, QueryParams, TableSchema,
-  Translator, Value, ValueType,
+  Column, ColumnSchema, DescribeSchema, Engine, Expr, ExprValue, InMemoryBTreeManager, Query,
+  QueryParams, Statement, TableSchema, Translator, Value, ValueType,
 };
 use db_sql_to_engine::SqlTranslator;
 use futures::executor::block_on;
@@ -59,7 +59,7 @@ fn select_star() {
 
   assert_eq!(
     q,
-    Query::select_simple("users".to_string(), vec![0, 1], None)
+    Statement::Query(Query::select_simple("users".to_string(), vec![0, 1], None))
   );
 }
 
@@ -81,8 +81,40 @@ fn select_columns() {
 
   assert_eq!(
     q,
-    Query::select_simple("users".to_string(), vec![1, 2], None)
+    Statement::Query(Query::select_simple("users".to_string(), vec![1, 2], None))
   );
+}
+
+#[test]
+fn create_table_insert_select_roundtrip() {
+  let engine = Engine::new(InMemoryBTreeManager::new());
+  let translator = SqlTranslator;
+
+  block_on(async {
+    engine
+      .translate_and_execute(
+        "CREATE TABLE users (id UUID PRIMARY KEY, name TEXT);",
+        translator,
+      )
+      .await
+      .expect("create table");
+
+    engine
+      .translate_and_execute(
+        "INSERT INTO users (id, name) VALUES ('00000000-0000-0000-0000-000000000001'::uuid, 'Alice');",
+        SqlTranslator,
+      )
+      .await
+      .expect("insert row");
+
+    let result = engine
+      .translate_and_execute("SELECT id, name FROM users;", SqlTranslator)
+      .await
+      .expect("select rows");
+
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0][1], Value::Text("Alice".to_string()));
+  });
 }
 
 #[test]
@@ -99,7 +131,7 @@ fn select_qualified_wildcard() {
 
   assert_eq!(
     q,
-    Query::select_simple("users".to_string(), vec![0, 1], None)
+    Statement::Query(Query::select_simple("users".to_string(), vec![0, 1], None))
   );
 }
 
@@ -142,7 +174,11 @@ fn select_with_positional_param() {
 
   assert_eq!(
     q,
-    Query::select_simple("users".to_string(), vec![0], Some(expected_pred))
+    Statement::Query(Query::select_simple(
+      "users".to_string(),
+      vec![0],
+      Some(expected_pred)
+    ))
   );
 }
 
@@ -173,7 +209,11 @@ fn select_with_indexed_param() {
 
   assert_eq!(
     q,
-    Query::select_simple("users".to_string(), vec![0], Some(expected_pred))
+    Statement::Query(Query::select_simple(
+      "users".to_string(),
+      vec![0],
+      Some(expected_pred)
+    ))
   );
 }
 
@@ -196,12 +236,12 @@ fn insert_with_positional_params() {
 
   assert_eq!(
     q,
-    Query::Insert {
+    Statement::Query(Query::Insert {
       tables: vec!["users".to_string()],
       table_index: 0,
       row: vec![Value::Integer(1), Value::Text("alice".to_string())],
       returning: None,
-    }
+    })
   );
 }
 
@@ -255,7 +295,11 @@ fn select_with_named_param() {
 
   assert_eq!(
     q,
-    Query::select_simple("users".to_string(), vec![0], Some(expected_pred))
+    Statement::Query(Query::select_simple(
+      "users".to_string(),
+      vec![0],
+      Some(expected_pred)
+    ))
   );
 }
 
@@ -282,12 +326,12 @@ fn insert_with_named_params() {
 
   assert_eq!(
     q,
-    Query::Insert {
+    Statement::Query(Query::Insert {
       tables: vec!["users".to_string()],
       table_index: 0,
       row: vec![Value::Integer(1), Value::Text("alice".to_string())],
       returning: None,
-    }
+    })
   );
 }
 

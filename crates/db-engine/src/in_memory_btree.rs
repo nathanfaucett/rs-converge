@@ -407,7 +407,7 @@ impl BTreeManager for InMemoryBTreeManager {
     K: BTreeKey,
     V: BTreeValue;
 
-  async fn get<D>(&self, definition: &D) -> BTreeResult<Self::BTree<D::Key, D::Value>>
+  async fn entry<D>(&self, definition: &D) -> BTreeResult<Self::BTree<D::Key, D::Value>>
   where
     D: BTreeDefinition,
     <D as BTreeDefinition>::Key: BTreeKey,
@@ -433,15 +433,6 @@ impl BTreeManager for InMemoryBTreeManager {
 
       Ok(btree)
     }
-  }
-
-  async fn insert<D>(&self, definition: &D) -> BTreeResult<Self::BTree<D::Key, D::Value>>
-  where
-    D: BTreeDefinition,
-    <D as BTreeDefinition>::Key: BTreeKey,
-    <D as BTreeDefinition>::Value: BTreeValue,
-  {
-    self.get(definition).await
   }
 
   async fn remove<D>(&self, definition: &D) -> BTreeResult<()>

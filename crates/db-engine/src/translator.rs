@@ -6,7 +6,7 @@ use core::error;
 use hashbrown::HashMap;
 use thiserror::Error;
 
-use crate::{DescribeSchema, Query, Value};
+use crate::{DescribeSchema, Statement, Value};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueryParams {
@@ -36,11 +36,11 @@ pub trait Translator {
     query: &str,
     params: Option<&QueryParams>,
     resolver: &S,
-  ) -> Result<Query, TranslateError>
+  ) -> Result<Statement, TranslateError>
   where
     S: DescribeSchema + Send + Sync;
 
-  async fn translate<S>(&self, query: &str, resolver: &S) -> Result<Query, TranslateError>
+  async fn translate<S>(&self, query: &str, resolver: &S) -> Result<Statement, TranslateError>
   where
     S: DescribeSchema + Send + Sync,
   {

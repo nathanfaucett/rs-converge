@@ -1,16 +1,18 @@
 use serde::de;
 
+use crate::QueryResultColumn;
+
 use super::errors::RowDeserializeError;
 use super::row_map_access::RowMapAccess;
 use super::value_deserializer::ValueDeserializer;
 
 pub(crate) struct RowDeserializer<'de> {
-  pub(crate) cols: &'de [crate::ResultColumn],
+  pub(crate) cols: &'de [QueryResultColumn],
   pub(crate) row: &'de crate::Row,
 }
 
 impl<'de> RowDeserializer<'de> {
-  pub(crate) fn new(cols: &'de [crate::ResultColumn], row: &'de crate::Row) -> Self {
+  pub(crate) fn new(cols: &'de [QueryResultColumn], row: &'de crate::Row) -> Self {
     RowDeserializer { cols, row }
   }
 }

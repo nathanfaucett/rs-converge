@@ -4,12 +4,25 @@ use alloc::{string::String, vec::Vec};
 use futures::{StreamExt, pin_mut};
 
 use crate::{
-  BTree, BTreeManager, BTreeReadExecutor, BTreeTransaction, BTreeWriteExecutor, Column, Engine,
-  EngineError, EngineResult, Expr, ExprValue, Query, Row, TableIndex, UpdateAssignment, Value,
-  engine::EngineBTreeDefinition,
+  BTree, BTreeManager, BTreeReadExecutor, BTreeTransaction, BTreeWriteExecutor, Column, DdlOp,
+  Engine, EngineError, EngineResult, Expr, ExprValue, Query, QueryResult, Row, Statement,
+  TableIndex, UpdateAssignment, Value, engine::EngineBTreeDefinition,
 };
 
-pub async fn execute<M>(engine: &Engine<M>, query: Query) -> EngineResult<Vec<Row>>
+pub async fn execute_statement<M>(
+  engine: &Engine<M>,
+  statement: Statement,
+) -> EngineResult<QueryResult>
+where
+  M: BTreeManager,
+{
+  match statement {
+    Statement::Query(query) => execute_query(engine, query).await,
+    Statement::Ddl(ddl) => execute_ddl(engine, ddl).await,
+  }
+}
+
+pub async fn execute_query<M>(engine: &Engine<M>, query: Query) -> EngineResult<QueryResult>
 where
   M: BTreeManager,
 {
@@ -61,19 +74,44 @@ where
   }
 }
 
+async fn execute_ddl<M>(engine: &Engine<M>, ddl: DdlOp) -> EngineResult<QueryResult>
+where
+  M: BTreeManager,
+{
+  match ddl {
+    DdlOp::CreateTable {
+      schema,
+      if_not_exists: _,
+    } => {
+      engine.register_table_schema(&schema).await?;
+      Ok(QueryResult::new(Vec::new()))
+    }
+    DdlOp::CreateIndex {
+      schema,
+      if_not_exists: _,
+    } => {
+      engine.register_index_schema(&schema).await?;
+      Ok(QueryResult::new(Vec::new()))
+    }
+    DdlOp::DropTable { .. } | DdlOp::DropIndex { .. } => {
+      Err(EngineError::Unsupported("DDL operation not supported"))
+    }
+  }
+}
+
 async fn execute_select<M>(
   engine: &Engine<M>,
   tables: &[String],
   table_index: TableIndex,
   projection: &[Column],
   predicate: Option<&Expr>,
-) -> EngineResult<Vec<Row>>
+) -> EngineResult<QueryResult>
 where
   M: BTreeManager,
 {
   let table = resolve_table_name(tables, table_index)?;
   let definition = EngineBTreeDefinition::from(table);
-  let btree = engine.manager.get(&definition).await?;
+  let btree = engine.manager.entry(&definition).await?;
 
   let mut rows = Vec::new();
   let stream = btree.range(..);
@@ -95,13 +133,13 @@ async fn execute_insert<M>(
   tables: &[String],
   table_index: TableIndex,
   row: Row,
-) -> EngineResult<Vec<Row>>
+) -> EngineResult<QueryResult>
 where
   M: BTreeManager,
 {
   let table = resolve_table_name(tables, table_index)?;
   let definition = EngineBTreeDefinition::from(table);
-  let btree = engine.manager.get(&definition).await?;
+  let btree = engine.manager.entry(&definition).await?;
   let mut tx = btree.transaction().await?;
 
   let key = primary_key_from_row(&row)?;
@@ -120,13 +158,13 @@ async fn execute_update<M>(
   table_index: TableIndex,
   assignments: &[UpdateAssignment],
   predicate: Option<&Expr>,
-) -> EngineResult<Vec<Row>>
+) -> EngineResult<QueryResult>
 where
   M: BTreeManager,
 {
   let table = resolve_table_name(tables, table_index)?;
   let definition = EngineBTreeDefinition::from(table);
-  let btree = engine.manager.get(&definition).await?;
+  let btree = engine.manager.entry(&definition).await?;
   let mut tx = btree.transaction().await?;
 
   let mut to_update = Vec::new();
@@ -185,13 +223,13 @@ async fn execute_delete<M>(
   tables: &[String],
   table_index: TableIndex,
   predicate: Option<&Expr>,
-) -> EngineResult<Vec<Row>>
+) -> EngineResult<QueryResult>
 where
   M: BTreeManager,
 {
   let table = resolve_table_name(tables, table_index)?;
   let definition = EngineBTreeDefinition::from(table);
-  let btree = engine.manager.get(&definition).await?;
+  let btree = engine.manager.entry(&definition).await?;
   let mut tx = btree.transaction().await?;
 
   let mut keys = Vec::new();

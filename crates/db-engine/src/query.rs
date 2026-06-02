@@ -4,11 +4,36 @@ use alloc::string::ToString;
 use alloc::{borrow::ToOwned, boxed::Box, string::String, vec, vec::Vec};
 
 use crate::{
-  ColumnIndex, FromRow, Row, Value,
+  ColumnIndex, FromRow, IndexSchema, Row, TableSchema, Value,
   from_row::{FromRowResult, RowDeserializeError},
 };
 
 pub type TableIndex = u16;
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+#[cfg_attr(
+  feature = "wasm",
+  derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
+)]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+pub enum DdlOp {
+  CreateTable {
+    schema: TableSchema,
+    if_not_exists: bool,
+  },
+  DropTable {
+    table_name: String,
+    if_exists: bool,
+  },
+  CreateIndex {
+    schema: IndexSchema,
+    if_not_exists: bool,
+  },
+  DropIndex {
+    index_name: String,
+    if_exists: bool,
+  },
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(
@@ -195,7 +220,7 @@ pub struct UpdateAssignment {
   derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
 )]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
-pub struct ResultColumn {
+pub struct QueryResultColumn {
   pub name: String,
   pub source_table: Option<String>,
   pub source_column_index: Option<ColumnIndex>,
@@ -207,12 +232,12 @@ pub struct ResultColumn {
   derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
 )]
 #[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
-pub struct Result {
+pub struct QueryResult {
   pub rows: Vec<Row>,
-  pub columns: Vec<ResultColumn>,
+  pub columns: Vec<QueryResultColumn>,
 }
 
-impl Result {
+impl QueryResult {
   pub fn new(rows: Vec<Row>) -> Self {
     Self {
       rows,
@@ -220,7 +245,7 @@ impl Result {
     }
   }
 
-  pub fn new_with_columns(rows: Vec<Row>, columns: Vec<ResultColumn>) -> Self {
+  pub fn new_with_columns(rows: Vec<Row>, columns: Vec<QueryResultColumn>) -> Self {
     Self { rows, columns }
   }
 
@@ -309,6 +334,26 @@ impl Query {
       | Query::Insert { tables, .. }
       | Query::Update { tables, .. }
       | Query::Delete { tables, .. } => tables,
+    }
+  }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+#[cfg_attr(
+  feature = "wasm",
+  derive(serde::Serialize, serde::Deserialize, tsify::Tsify)
+)]
+#[cfg_attr(feature = "wasm", tsify(into_wasm_abi, from_wasm_abi))]
+pub enum Statement {
+  Query(Query),
+  Ddl(DdlOp),
+}
+
+impl Statement {
+  pub fn into_query(self) -> Option<Query> {
+    match self {
+      Statement::Query(query) => Some(query),
+      Statement::Ddl(_) => None,
     }
   }
 }
