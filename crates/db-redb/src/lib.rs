@@ -1,7 +1,11 @@
+#[cfg(feature = "automerge")]
+pub mod automerge_manager;
 pub mod btree;
 pub mod manager;
 pub mod transaction;
 
+#[cfg(feature = "automerge")]
+pub use automerge_manager::RedbAutomergeBTreeManager;
 pub use btree::RedbBTree;
 pub use manager::RedbBTreeManager;
 

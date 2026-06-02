@@ -13,12 +13,13 @@ use db_engine::{
   DdlOp, DescribeSchema, Query, QueryParams, Statement, TranslateError, Translator, Value,
 };
 use sqlparser::ast::{
-  BinaryOperator, ColumnOption, DataType, Expr as SQLExpr, ObjectName, ObjectNamePart, SelectItem,
-  Statement as SQLStatement, TableConstraint, TableFactor,
+  BinaryOperator, ColumnOption, DataType, Expr as SQLExpr, JoinConstraint, JoinOperator,
+  ObjectName, ObjectNamePart, SelectItem, Statement as SQLStatement, TableConstraint, TableFactor,
 };
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 
+#[derive(Debug, Clone, Copy)]
 pub struct SqlTranslator;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,6 +191,196 @@ fn object_name_to_string(name: &ObjectName) -> String {
     .join(".")
 }
 
+fn parse_table_factor_name_and_alias(
+  table_factor: &TableFactor,
+) -> Result<(String, Option<String>), TranslateError> {
+  match table_factor {
+    TableFactor::Table { name, alias, .. } => {
+      let table_name = object_name_to_string(name);
+      let alias_name = alias.as_ref().map(|alias| alias.name.value.clone());
+      Ok((table_name, alias_name))
+    }
+    _ => Err(TranslateError::Custom(
+      "unsupported table factor in FROM clause".into(),
+    )),
+  }
+}
+
+fn decode_join_operator(
+  join_operator: &JoinOperator,
+) -> Result<(db_engine::JoinKind, &JoinConstraint), TranslateError> {
+  match join_operator {
+    JoinOperator::Join(constraint) | JoinOperator::Inner(constraint) => {
+      Ok((db_engine::JoinKind::Inner, constraint))
+    }
+    JoinOperator::Left(constraint) | JoinOperator::LeftOuter(constraint) => {
+      Ok((db_engine::JoinKind::Left, constraint))
+    }
+    JoinOperator::Right(constraint) | JoinOperator::RightOuter(constraint) => {
+      Ok((db_engine::JoinKind::Right, constraint))
+    }
+    JoinOperator::FullOuter(constraint) => Ok((db_engine::JoinKind::Full, constraint)),
+    _ => Err(TranslateError::Custom("unsupported JOIN type".into())),
+  }
+}
+
+struct TableEntry {
+  name: String,
+  alias: Option<String>,
+  schema: db_engine::TableSchema,
+}
+
+impl TableEntry {
+  fn matches_name(&self, name: &str) -> bool {
+    self.name == name || self.alias.as_deref() == Some(name)
+  }
+
+  fn column_index(&self, col_name: &str) -> Option<usize> {
+    self
+      .schema
+      .columns
+      .iter()
+      .position(|col| col.name == col_name)
+  }
+}
+
+fn find_column_in_tables(
+  tables: &[TableEntry],
+  col_name: &str,
+) -> Result<(usize, usize), TranslateError> {
+  let mut matches = Vec::new();
+
+  for (table_index, table) in tables.iter().enumerate() {
+    if let Some(column_index) = table.column_index(col_name) {
+      matches.push((table_index, column_index));
+    }
+  }
+
+  match matches.len() {
+    0 => Err(TranslateError::Custom(format!(
+      "unknown column '{}' in any table",
+      col_name
+    ))),
+    1 => Ok(matches.into_iter().next().unwrap()),
+    _ => Err(TranslateError::Custom(format!(
+      "ambiguous column reference: {}",
+      col_name
+    ))),
+  }
+}
+
+fn resolve_column_from_compound_identifier(
+  idents: &[sqlparser::ast::Ident],
+  tables: &[TableEntry],
+) -> Result<(usize, usize), TranslateError> {
+  if idents.is_empty() {
+    return Err(TranslateError::Custom("empty identifier".into()));
+  }
+
+  let col_name = &idents.last().unwrap().value;
+  if idents.len() >= 2 {
+    let qual = idents[..idents.len() - 1]
+      .iter()
+      .map(|id| id.value.clone())
+      .collect::<Vec<_>>()
+      .join(".");
+
+    for (table_index, table) in tables.iter().enumerate() {
+      if table.matches_name(&qual) {
+        return table
+          .column_index(col_name)
+          .map(|column_index| (table_index, column_index))
+          .ok_or_else(|| {
+            TranslateError::Custom(format!(
+              "unknown column '{}' in table '{}'",
+              col_name, table.name
+            ))
+          });
+      }
+    }
+
+    return Err(TranslateError::Custom(format!(
+      "qualified column refers to unknown table: {}",
+      qual
+    )));
+  }
+
+  find_column_in_tables(tables, col_name)
+}
+
+fn resolve_column_reference(
+  expr: &SQLExpr,
+  tables: &[TableEntry],
+) -> Result<db_engine::Column, TranslateError> {
+  let (table_index, column_index) = match expr {
+    SQLExpr::Identifier(ident) => find_column_in_tables(tables, &ident.value)?,
+    SQLExpr::CompoundIdentifier(idents) => resolve_column_from_compound_identifier(idents, tables)?,
+    _ => {
+      return Err(TranslateError::Custom(format!(
+        "unsupported select expression: {}",
+        expr
+      )));
+    }
+  };
+
+  Ok(db_engine::Column {
+    table_index: table_index as db_engine::TableIndex,
+    column_index: column_index as db_engine::ColumnIndex,
+  })
+}
+
+fn resolve_projection_item(
+  item: &SelectItem,
+  tables: &[TableEntry],
+) -> Result<Vec<db_engine::Column>, TranslateError> {
+  match item {
+    SelectItem::Wildcard(_) => {
+      let mut cols = Vec::new();
+      for (table_index, table) in tables.iter().enumerate() {
+        for column_index in 0..table.schema.columns.len() {
+          cols.push(db_engine::Column {
+            table_index: table_index as db_engine::TableIndex,
+            column_index: column_index as db_engine::ColumnIndex,
+          });
+        }
+      }
+      Ok(cols)
+    }
+    SelectItem::QualifiedWildcard(kind, _) => {
+      let qual = match kind {
+        sqlparser::ast::SelectItemQualifiedWildcardKind::ObjectName(name) => {
+          object_name_to_string(name)
+        }
+        _ => {
+          return Err(TranslateError::Custom(
+            "unsupported qualified wildcard expression".into(),
+          ));
+        }
+      };
+      let table_index = tables
+        .iter()
+        .position(|table| table.matches_name(&qual))
+        .ok_or_else(|| {
+          TranslateError::Custom(format!(
+            "qualified wildcard refers to unknown table: {}",
+            qual
+          ))
+        })?;
+
+      let mut cols = Vec::new();
+      for column_index in 0..tables[table_index].schema.columns.len() {
+        cols.push(db_engine::Column {
+          table_index: table_index as db_engine::TableIndex,
+          column_index: column_index as db_engine::ColumnIndex,
+        });
+      }
+      Ok(cols)
+    }
+    SelectItem::UnnamedExpr(expr) => Ok(vec![resolve_column_reference(expr, tables)?]),
+    SelectItem::ExprWithAlias { expr, .. } => Ok(vec![resolve_column_reference(expr, tables)?]),
+  }
+}
+
 fn parse_single_statement(query: &str) -> Result<SQLStatement, TranslateError> {
   let dialect = GenericDialect {};
   let stmts = Parser::parse_sql(&dialect, query)
@@ -224,101 +415,85 @@ fn find_column_index(
   )))
 }
 
-// Helper: resolve a compound identifier like [schema, table, column] or [table, column].
-fn resolve_column_from_compound_identifier(
-  idents: &[sqlparser::ast::Ident],
-  table_schema: &db_engine::TableSchema,
-  table_name: &str,
-) -> Result<usize, TranslateError> {
-  if idents.is_empty() {
-    return Err(TranslateError::Custom("empty identifier".into()));
+fn translate_join_constraint(
+  constraint: &sqlparser::ast::JoinConstraint,
+  tables: &[TableEntry],
+  params: &mut ParamState<'_>,
+) -> Result<db_engine::Expr, TranslateError> {
+  match constraint {
+    JoinConstraint::On(expr) => translate_predicate(expr, tables, params),
+    JoinConstraint::Using(_) => Err(TranslateError::Custom("JOIN USING is not supported".into())),
+    sqlparser::ast::JoinConstraint::Natural => Err(TranslateError::Custom(
+      "NATURAL JOIN is not supported".into(),
+    )),
+    sqlparser::ast::JoinConstraint::None => Err(TranslateError::Custom(
+      "JOIN without ON is not supported".into(),
+    )),
   }
-
-  let col_name = &idents.last().unwrap().value;
-
-  if idents.len() >= 2 {
-    let qual_table = idents[..idents.len() - 1]
-      .iter()
-      .map(|id| id.value.clone())
-      .collect::<Vec<_>>()
-      .join(".");
-    if qual_table != table_name {
-      return Err(TranslateError::Custom(format!(
-        "qualified column refers to unknown table: {}",
-        qual_table
-      )));
-    }
-  }
-
-  find_column_index(table_schema, col_name)
 }
 
-fn resolve_projection_item(
-  item: &SelectItem,
-  table_schema: &db_engine::TableSchema,
-  table_name: &str,
-) -> Result<Vec<usize>, TranslateError> {
-  // Use the string representation for robust handling across sqlparser versions.
-  let s = item.to_string();
-  let s_trim = s.trim();
+fn translate_predicate(
+  expr: &SQLExpr,
+  tables: &[TableEntry],
+  params: &mut ParamState<'_>,
+) -> Result<db_engine::Expr, TranslateError> {
+  match expr {
+    SQLExpr::BinaryOp { left, op, right } => match op {
+      BinaryOperator::And => Ok(db_engine::Expr::And(
+        Box::new(translate_predicate(left.as_ref(), tables, params)?),
+        Box::new(translate_predicate(right.as_ref(), tables, params)?),
+      )),
+      BinaryOperator::Or => Ok(db_engine::Expr::Or(
+        Box::new(translate_predicate(left.as_ref(), tables, params)?),
+        Box::new(translate_predicate(right.as_ref(), tables, params)?),
+      )),
+      BinaryOperator::Eq
+      | BinaryOperator::NotEq
+      | BinaryOperator::Lt
+      | BinaryOperator::LtEq
+      | BinaryOperator::Gt
+      | BinaryOperator::GtEq => {
+        let left_val = expr_to_expr_value(left.as_ref(), tables, params)?;
+        let right_val = expr_to_expr_value(right.as_ref(), tables, params)?;
 
-  // wildcard
-  if s_trim == "*" {
-    return Ok((0..table_schema.columns.len()).collect());
-  }
-
-  // qualified wildcard like users.*
-  if s_trim.ends_with(".*") {
-    let qual = s_trim[..s_trim.len() - 2].trim().trim_matches('"');
-    if qual == table_name {
-      return Ok((0..table_schema.columns.len()).collect());
-    } else {
-      return Err(TranslateError::Custom(format!(
-        "qualified wildcard refers to unknown table: {}",
-        qual
-      )));
+        match op {
+          BinaryOperator::Eq => Ok(db_engine::Expr::Equals(left_val, right_val)),
+          BinaryOperator::NotEq => Ok(db_engine::Expr::NotEquals(left_val, right_val)),
+          BinaryOperator::Lt => Ok(db_engine::Expr::LessThan(left_val, right_val)),
+          BinaryOperator::LtEq => Ok(db_engine::Expr::LessThanOrEquals(left_val, right_val)),
+          BinaryOperator::Gt => Ok(db_engine::Expr::GreaterThan(left_val, right_val)),
+          BinaryOperator::GtEq => Ok(db_engine::Expr::GreaterThanOrEquals(left_val, right_val)),
+          _ => unreachable!(),
+        }
+      }
+      _ => Err(TranslateError::Custom(format!(
+        "unsupported binary operator in WHERE: {}",
+        op
+      ))),
+    },
+    SQLExpr::UnaryOp { op, expr } => {
+      let inner = translate_predicate(expr.as_ref(), tables, params)?;
+      match op.to_string().as_str() {
+        "NOT" => Ok(db_engine::Expr::Not(Box::new(inner))),
+        _ => Err(TranslateError::Custom(format!(
+          "unsupported unary operator in WHERE: {}",
+          op
+        ))),
+      }
     }
+    SQLExpr::IsNull(expr) => Ok(db_engine::Expr::IsNull(expr_to_expr_value(
+      expr, tables, params,
+    )?)),
+    SQLExpr::IsNotNull(expr) => Ok(db_engine::Expr::IsNotNull(expr_to_expr_value(
+      expr, tables, params,
+    )?)),
+    other => Err(TranslateError::Custom(format!(
+      "unsupported WHERE expression: {}",
+      other
+    ))),
   }
-
-  // remove AS alias if present (case-insensitive)
-  let mut expr_part = s_trim;
-  if let Some(pos) = s_trim.to_uppercase().find(" AS ") {
-    expr_part = &s_trim[..pos];
-  }
-
-  // If it's a simple identifier or qualified identifier like table.col
-  if expr_part.contains('.') {
-    let parts: Vec<&str> = expr_part.split('.').collect();
-    let last = parts.last().unwrap().trim().trim_matches('"');
-    let qual = parts[..parts.len() - 1]
-      .join(".")
-      .trim()
-      .trim_matches('"')
-      .to_string();
-    if qual != table_name {
-      return Err(TranslateError::Custom(format!(
-        "qualified column refers to unknown table: {}",
-        qual
-      )));
-    }
-    return Ok(vec![find_column_index(table_schema, last)?]);
-  }
-
-  // simple identifier
-  let simple = expr_part.trim().trim_matches('"');
-  // disallow expressions for now
-  if simple.contains('(') || simple.contains(' ') || simple.contains('+') || simple.contains('*') {
-    return Err(TranslateError::Custom(format!(
-      "unsupported select expression: {}",
-      item
-    )));
-  }
-
-  Ok(vec![find_column_index(table_schema, simple)?])
 }
 
-// Translate a simple SELECT into our engine Query. Keep this focused and small so we can
-// extend it later (joins, predicates, aggregates, etc.).
 async fn translate_select<S>(
   select: &sqlparser::ast::Select,
   resolver: &S,
@@ -340,51 +515,75 @@ where
   }
 
   let table_with_joins = &select.from[0];
+  let mut table_entries: Vec<TableEntry> = Vec::new();
+  let mut tables: Vec<String> = Vec::new();
 
-  if !table_with_joins.joins.is_empty() {
-    return Err(TranslateError::Custom("JOINs are not supported".into()));
+  let (base_name, base_alias) = parse_table_factor_name_and_alias(&table_with_joins.relation)?;
+  let base_schema = resolver
+    .describe_table(&base_name)
+    .await
+    .ok_or_else(|| TranslateError::Custom(format!("unknown table: {}", base_name)))?;
+
+  table_entries.push(TableEntry {
+    name: base_name.clone(),
+    alias: base_alias,
+    schema: base_schema,
+  });
+  tables.push(base_name);
+
+  let mut joins: Vec<db_engine::Join> = Vec::new();
+  for join in &table_with_joins.joins {
+    let (join_name, join_alias) = parse_table_factor_name_and_alias(&join.relation)?;
+    let join_schema = resolver
+      .describe_table(&join_name)
+      .await
+      .ok_or_else(|| TranslateError::Custom(format!("unknown table: {}", join_name)))?;
+
+    let table_index = table_entries.len() as db_engine::TableIndex;
+    table_entries.push(TableEntry {
+      name: join_name.clone(),
+      alias: join_alias,
+      schema: join_schema,
+    });
+    tables.push(join_name);
+
+    let (join_kind, join_constraint) = decode_join_operator(&join.join_operator)?;
+    let on = translate_join_constraint(join_constraint, &table_entries, params)?;
+
+    joins.push(db_engine::Join {
+      kind: join_kind,
+      table_index,
+      on,
+    });
   }
 
-  let table_name = match &table_with_joins.relation {
-    TableFactor::Table { name, .. } => object_name_to_string(name),
-    _ => {
-      return Err(TranslateError::Custom(
-        "unsupported table factor in FROM clause".into(),
-      ));
-    }
-  };
-
-  let table_schema = resolver
-    .describe_table(&table_name)
-    .await
-    .ok_or_else(|| TranslateError::Custom(format!("unknown table: {}", table_name)))?;
-  let table_index = 0;
-
-  // Translate WHERE if present
   let predicate = match &select.selection {
-    Some(expr) => Some(translate_predicate(
-      expr,
-      &table_schema,
-      &table_name,
-      table_index,
-      resolver,
-      params,
-    )?),
+    Some(expr) => Some(translate_predicate(expr, &table_entries, params)?),
     None => None,
   };
 
-  let mut projection_indices: Vec<usize> = Vec::new();
-
+  let mut projection: Vec<db_engine::Column> = Vec::new();
   for item in &select.projection {
-    let mut resolved = resolve_projection_item(item, &table_schema, &table_name)?;
-    projection_indices.append(&mut resolved);
+    let mut resolved = resolve_projection_item(item, &table_entries)?;
+    projection.append(&mut resolved);
   }
 
-  Ok(Query::select_simple(
-    table_name,
-    projection_indices,
+  Ok(Query::Select {
+    tables,
+    table_index: 0,
+    projection,
     predicate,
-  ))
+    options: Box::new(db_engine::SelectOptions {
+      joins,
+      aggregates: Vec::new(),
+      group_by: Vec::new(),
+      order_by: Vec::new(),
+      limit: None,
+      offset: None,
+      distinct: false,
+      having: None,
+    }),
+  })
 }
 
 // Parse a SQL literal (as string) into a db_engine::Value based on the target column type.
@@ -503,19 +702,13 @@ fn expr_to_value_guess(expr: &SQLExpr) -> Result<db_engine::Value, TranslateErro
   )))
 }
 
-// Convert a SQL expression into an engine ExprValue, using the table schema to resolve
-// column references and to parse literals with a target type.
-fn expr_to_expr_value<S>(
+// Convert a SQL expression into an engine ExprValue, using the table schemas to resolve
+// column references and to parse literals when needed.
+fn expr_to_expr_value(
   expr: &SQLExpr,
-  table_schema: &db_engine::TableSchema,
-  table_name: &str,
-  table_index: db_engine::TableIndex,
-  _resolver: &S,
+  tables: &[TableEntry],
   params: &mut ParamState<'_>,
-) -> Result<db_engine::ExprValue, TranslateError>
-where
-  S: DescribeSchema,
-{
+) -> Result<db_engine::ExprValue, TranslateError> {
   if let Some(placeholder) = parse_placeholder(expr)? {
     return Ok(db_engine::ExprValue::Value(
       params.resolve_placeholder(placeholder)?,
@@ -523,161 +716,14 @@ where
   }
 
   match expr {
-    SQLExpr::Identifier(ident) => {
-      let idx = find_column_index(table_schema, &ident.value)?;
-      Ok(db_engine::ExprValue::Column(db_engine::Column {
-        table_index,
-        column_index: idx as u8,
-      }))
-    }
-    SQLExpr::CompoundIdentifier(idents) => {
-      let idx = resolve_column_from_compound_identifier(idents, table_schema, table_name)?;
-      Ok(db_engine::ExprValue::Column(db_engine::Column {
-        table_index,
-        column_index: idx as u8,
-      }))
-    }
+    SQLExpr::Identifier(_) | SQLExpr::CompoundIdentifier(_) => Ok(db_engine::ExprValue::Column(
+      resolve_column_reference(expr, tables)?,
+    )),
     SQLExpr::Value(_) | SQLExpr::Nested(_) | SQLExpr::Cast { .. } | SQLExpr::TypedString { .. } => {
-      // Try to parse literal without a target type
       Ok(db_engine::ExprValue::Value(expr_to_value_guess(expr)?))
     }
     other => Err(TranslateError::Custom(format!(
       "unsupported expression in assignment/predicate: {}",
-      other
-    ))),
-  }
-}
-
-// Translate a simple boolean expression into a db_engine::Expr. Supports basic binary
-// comparisons and &&/||/NOT composed expressions.
-fn translate_predicate<S>(
-  expr: &SQLExpr,
-  table_schema: &db_engine::TableSchema,
-  table_name: &str,
-  table_index: db_engine::TableIndex,
-  resolver: &S,
-  params: &mut ParamState<'_>,
-) -> Result<db_engine::Expr, TranslateError>
-where
-  S: DescribeSchema,
-{
-  match expr {
-    SQLExpr::BinaryOp { left, op, right } => {
-      // Handle logical operators by recursion so we don't accidentally consume
-      // parameters twice (expr_to_expr_value would otherwise be invoked twice).
-      match op {
-        BinaryOperator::And => Ok(db_engine::Expr::And(
-          Box::new(translate_predicate(
-            left.as_ref(),
-            table_schema,
-            table_name,
-            table_index,
-            resolver,
-            params,
-          )?),
-          Box::new(translate_predicate(
-            right.as_ref(),
-            table_schema,
-            table_name,
-            table_index,
-            resolver,
-            params,
-          )?),
-        )),
-        BinaryOperator::Or => Ok(db_engine::Expr::Or(
-          Box::new(translate_predicate(
-            left.as_ref(),
-            table_schema,
-            table_name,
-            table_index,
-            resolver,
-            params,
-          )?),
-          Box::new(translate_predicate(
-            right.as_ref(),
-            table_schema,
-            table_name,
-            table_index,
-            resolver,
-            params,
-          )?),
-        )),
-        // Comparisons: evaluate both sides to concrete ExprValue
-        BinaryOperator::Eq
-        | BinaryOperator::NotEq
-        | BinaryOperator::Lt
-        | BinaryOperator::LtEq
-        | BinaryOperator::Gt
-        | BinaryOperator::GtEq => {
-          let left_val = expr_to_expr_value(
-            left.as_ref(),
-            table_schema,
-            table_name,
-            table_index,
-            resolver,
-            params,
-          )?;
-          let right_val = expr_to_expr_value(
-            right.as_ref(),
-            table_schema,
-            table_name,
-            table_index,
-            resolver,
-            params,
-          )?;
-
-          match op {
-            BinaryOperator::Eq => Ok(db_engine::Expr::Equals(left_val, right_val)),
-            BinaryOperator::NotEq => Ok(db_engine::Expr::NotEquals(left_val, right_val)),
-            BinaryOperator::Lt => Ok(db_engine::Expr::LessThan(left_val, right_val)),
-            BinaryOperator::LtEq => Ok(db_engine::Expr::LessThanOrEquals(left_val, right_val)),
-            BinaryOperator::Gt => Ok(db_engine::Expr::GreaterThan(left_val, right_val)),
-            BinaryOperator::GtEq => Ok(db_engine::Expr::GreaterThanOrEquals(left_val, right_val)),
-            _ => unreachable!(),
-          }
-        }
-        _ => Err(TranslateError::Custom(format!(
-          "unsupported binary operator in WHERE: {}",
-          op
-        ))),
-      }
-    }
-    SQLExpr::UnaryOp { op, expr } => {
-      // Only support NOT for now
-      let inner = translate_predicate(
-        expr.as_ref(),
-        table_schema,
-        table_name,
-        table_index,
-        resolver,
-        params,
-      )?;
-      match op.to_string().as_str() {
-        "NOT" => Ok(db_engine::Expr::Not(Box::new(inner))),
-        _ => Err(TranslateError::Custom(format!(
-          "unsupported unary operator in WHERE: {}",
-          op
-        ))),
-      }
-    }
-    SQLExpr::IsNull(expr) => Ok(db_engine::Expr::IsNull(expr_to_expr_value(
-      expr,
-      table_schema,
-      table_name,
-      table_index,
-      resolver,
-      params,
-    )?)),
-    SQLExpr::IsNotNull(expr) => Ok(db_engine::Expr::IsNotNull(expr_to_expr_value(
-      expr,
-      table_schema,
-      table_name,
-      table_index,
-      resolver,
-      params,
-    )?)),
-    other => Err(TranslateError::Custom(format!(
-      "unsupported WHERE expression: {}",
       other
     ))),
   }
@@ -843,14 +889,12 @@ where
               }
             }
             let idx = find_column_index(&table_schema, &col_name)?;
-            let value = expr_to_expr_value(
-              &assign.value,
-              &table_schema,
-              &table_name,
-              table_index,
-              resolver,
-              params,
-            )?;
+            let table_entries = vec![TableEntry {
+              name: table_name.clone(),
+              alias: None,
+              schema: table_schema.clone(),
+            }];
+            let value = expr_to_expr_value(&assign.value, &table_entries, params)?;
             assigns.push(db_engine::UpdateAssignment {
               column: db_engine::Column {
                 table_index,
@@ -868,15 +912,14 @@ where
       }
 
       // Translate optional predicate
+      let table_entries = vec![TableEntry {
+        name: table_name.clone(),
+        alias: None,
+        schema: table_schema.clone(),
+      }];
+
       let predicate = match &update.selection {
-        Some(expr) => Some(translate_predicate(
-          expr,
-          &table_schema,
-          &table_name,
-          table_index,
-          resolver,
-          params,
-        )?),
+        Some(expr) => Some(translate_predicate(expr, &table_entries, params)?),
         None => None,
       };
 
@@ -947,15 +990,14 @@ where
         .ok_or_else(|| TranslateError::Custom(format!("unknown table: {}", table)))?;
       let table_index = 0;
 
+      let table_entries = vec![TableEntry {
+        name: table.clone(),
+        alias: None,
+        schema: table_schema.clone(),
+      }];
+
       let predicate = match &del.selection {
-        Some(expr) => Some(translate_predicate(
-          expr,
-          &table_schema,
-          &table,
-          table_index,
-          resolver,
-          params,
-        )?),
+        Some(expr) => Some(translate_predicate(expr, &table_entries, params)?),
         None => None,
       };
 

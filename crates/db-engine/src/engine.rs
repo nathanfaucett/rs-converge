@@ -284,7 +284,7 @@ where
     &self,
     query: &str,
     params: Option<&QueryParams>,
-    translator: T,
+    translator: &T,
   ) -> EngineResult<QueryResult>
   where
     T: Translator,
@@ -298,7 +298,7 @@ where
   pub async fn translate_and_execute<T>(
     &self,
     query: &str,
-    translator: T,
+    translator: &T,
   ) -> EngineResult<QueryResult>
   where
     T: Translator,

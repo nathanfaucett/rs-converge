@@ -10,7 +10,7 @@ rust-version.workspace = true
 
 [lib]
 path = "src/lib.rs"
-name = "db_sql_to_engine"
+name = "db_sql_translator"
 
 [features]
 default = ["std"]

@@ -1,0 +1,22 @@
+[package]
+name = "db-examples-util"
+version = "0.1.0"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "DB Examples Utility Crate"
+
+[lib]
+path = "src/lib.rs"
+name = "db_examples_util"
+
+[dependencies]
+uuid = { version = "1.23", features = ["v7"] }
+db-engine = { path = "../db-engine", default-features = true }
+db-sql-translator = { path = "../db-sql-translator", default-features = true }
+
+[build-dependencies]
+
+[dev-dependencies]

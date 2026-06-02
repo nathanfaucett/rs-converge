@@ -9,6 +9,7 @@ rust-version.workspace = true
 description = "DB Proto"
 
 [lib]
+path = "src/lib.rs"
 name = "db_proto"
 
 [dependencies]

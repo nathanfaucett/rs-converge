@@ -4,8 +4,6 @@ description = "Database built on top of a B-Tree implementation."
 repository = "https://github.com/aicacia/rs-db"
 rust-version = "1.95"
 edition = "2024"
-autotests = false
-autoexamples = false
 
 [package.version]
 workspace = true
@@ -17,23 +15,31 @@ workspace = true
 workspace = true
 
 [features]
-default = ["std", "automerge", "redb"]
-std = []
+default = ["std", "automerge", "redb", "in-memory"]
+std = ["db-automerge/std", "db-sql-translator/std"]
 redb = ["std"]
 automerge = ["std"]
+in-memory = ["db-engine/in-memory"]
 
 [lib]
 name = "db"
 
 [dependencies]
-
-[dev-dependencies]
 db-engine = { path = "crates/db-engine", default-features = false, features = [
   "std",
 ] }
-futures = { version = "0.3", default-features = false, features = ["executor"] }
-serde = { version = "1.0", default-features = false, features = ["derive"] }
-uuid = { version = "1.0", default-features = false, features = ["v4"] }
+db-automerge = { path = "crates/db-automerge", default-features = false, features = [
+  "std",
+] }
+db-redb = { path = "crates/db-redb", default-features = false, features = [] }
+db-sql-translator = { path = "crates/db-sql-translator", default-features = false, features = [
+] }
+
+[dev-dependencies]
+uuid = { version = "1.23", features = ["v7"] }
+tokio = { version = "1.52", features = ["full"] }
+db-examples-util = { path = "crates/db-examples-util" }
+
 [workspace]
 members = [
   "crates/db-engine",
@@ -41,6 +47,7 @@ members = [
   "crates/db-automerge",
   "crates/db-sql-translator",
   "crates/db-wasm",
+  "crates/db-examples-util",
 ]
 resolver = "2"
 

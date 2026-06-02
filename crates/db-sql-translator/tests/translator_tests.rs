@@ -1,8 +1,9 @@
 use db_engine::{
-  Column, ColumnSchema, DescribeSchema, Engine, Expr, ExprValue, InMemoryBTreeManager, Query,
-  QueryParams, Statement, TableSchema, Translator, Value, ValueType,
+  Column, ColumnSchema, DescribeSchema, Engine, Expr, ExprValue, InMemoryBTreeManager, Join,
+  JoinKind, Query, QueryParams, SelectOptions, Statement, TableSchema, Translator, Value,
+  ValueType,
 };
-use db_sql_to_engine::SqlTranslator;
+use db_sql_translator::SqlTranslator;
 use futures::executor::block_on;
 use hashbrown::HashMap;
 use std::collections::BTreeMap;
@@ -86,6 +87,232 @@ fn select_columns() {
 }
 
 #[test]
+fn select_inner_join_translation() {
+  let mut resolver = MockResolver::new();
+  resolver.add_table(
+    "users",
+    vec![("id", ValueType::Integer), ("name", ValueType::Text)],
+  );
+  resolver.add_table(
+    "orders",
+    vec![("id", ValueType::Integer), ("user_id", ValueType::Integer)],
+  );
+
+  let translator = SqlTranslator;
+  let q = block_on(translator.translate(
+    "SELECT users.id, orders.id FROM users INNER JOIN orders ON users.id = orders.user_id",
+    &resolver,
+  ))
+  .expect("translate");
+
+  assert_eq!(
+    q,
+    Statement::Query(Query::Select {
+      tables: vec!["users".to_string(), "orders".to_string()],
+      table_index: 0,
+      projection: vec![
+        Column {
+          table_index: 0,
+          column_index: 0,
+        },
+        Column {
+          table_index: 1,
+          column_index: 0,
+        },
+      ],
+      predicate: None,
+      options: Box::new(SelectOptions {
+        joins: vec![Join {
+          kind: JoinKind::Inner,
+          table_index: 1,
+          on: Expr::Equals(
+            ExprValue::Column(Column {
+              table_index: 0,
+              column_index: 0,
+            }),
+            ExprValue::Column(Column {
+              table_index: 1,
+              column_index: 1,
+            }),
+          ),
+        }],
+        aggregates: Vec::new(),
+        group_by: Vec::new(),
+        order_by: Vec::new(),
+        limit: None,
+        offset: None,
+        distinct: false,
+        having: None,
+      }),
+    })
+  );
+}
+
+#[test]
+fn select_plain_join_translation() {
+  let mut resolver = MockResolver::new();
+  resolver.add_table(
+    "users",
+    vec![("id", ValueType::Integer), ("name", ValueType::Text)],
+  );
+  resolver.add_table(
+    "orders",
+    vec![("id", ValueType::Integer), ("user_id", ValueType::Integer)],
+  );
+
+  let translator = SqlTranslator;
+  let q = block_on(translator.translate(
+    "SELECT users.id, orders.id FROM users JOIN orders ON users.id = orders.user_id",
+    &resolver,
+  ))
+  .expect("translate");
+
+  assert_eq!(
+    q,
+    Statement::Query(Query::Select {
+      tables: vec!["users".to_string(), "orders".to_string()],
+      table_index: 0,
+      projection: vec![
+        Column {
+          table_index: 0,
+          column_index: 0,
+        },
+        Column {
+          table_index: 1,
+          column_index: 0,
+        },
+      ],
+      predicate: None,
+      options: Box::new(SelectOptions {
+        joins: vec![Join {
+          kind: JoinKind::Inner,
+          table_index: 1,
+          on: Expr::Equals(
+            ExprValue::Column(Column {
+              table_index: 0,
+              column_index: 0,
+            }),
+            ExprValue::Column(Column {
+              table_index: 1,
+              column_index: 1,
+            }),
+          ),
+        }],
+        aggregates: Vec::new(),
+        group_by: Vec::new(),
+        order_by: Vec::new(),
+        limit: None,
+        offset: None,
+        distinct: false,
+        having: None,
+      }),
+    })
+  );
+}
+
+#[test]
+fn select_inner_join_roundtrip() {
+  let engine = Engine::new(InMemoryBTreeManager::new());
+  let translator = SqlTranslator;
+
+  block_on(async {
+    engine
+      .translate_and_execute(
+        "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);",
+        &translator,
+      )
+      .await
+      .expect("create users");
+
+    engine
+      .translate_and_execute(
+        "CREATE TABLE orders (id INTEGER PRIMARY KEY, user_id INTEGER);",
+        &translator,
+      )
+      .await
+      .expect("create orders");
+
+    engine
+      .translate_and_execute(
+        "INSERT INTO users (id, name) VALUES (1, 'Alice');",
+        &translator,
+      )
+      .await
+      .expect("insert user");
+
+    engine
+      .translate_and_execute(
+        "INSERT INTO orders (id, user_id) VALUES (10, 1);",
+        &translator,
+      )
+      .await
+      .expect("insert order");
+
+    let result = engine
+      .translate_and_execute(
+        "SELECT users.id, orders.id FROM users INNER JOIN orders ON users.id = orders.user_id;",
+        &translator,
+      )
+      .await
+      .expect("select join");
+
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0], vec![Value::Integer(1), Value::Integer(10)],);
+  });
+}
+
+#[test]
+fn select_plain_join_roundtrip() {
+  let engine = Engine::new(InMemoryBTreeManager::new());
+  let translator = SqlTranslator;
+
+  block_on(async {
+    engine
+      .translate_and_execute(
+        "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);",
+        &translator,
+      )
+      .await
+      .expect("create users");
+
+    engine
+      .translate_and_execute(
+        "CREATE TABLE orders (id INTEGER PRIMARY KEY, user_id INTEGER);",
+        &translator,
+      )
+      .await
+      .expect("create orders");
+
+    engine
+      .translate_and_execute(
+        "INSERT INTO users (id, name) VALUES (1, 'Alice');",
+        &translator,
+      )
+      .await
+      .expect("insert user");
+
+    engine
+      .translate_and_execute(
+        "INSERT INTO orders (id, user_id) VALUES (10, 1);",
+        &translator,
+      )
+      .await
+      .expect("insert order");
+
+    let result = engine
+      .translate_and_execute(
+        "SELECT users.id, orders.id FROM users JOIN orders ON users.id = orders.user_id;",
+        &translator,
+      )
+      .await
+      .expect("select join");
+
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0], vec![Value::Integer(1), Value::Integer(10)],);
+  });
+}
+
+#[test]
 fn create_table_insert_select_roundtrip() {
   let engine = Engine::new(InMemoryBTreeManager::new());
   let translator = SqlTranslator;
@@ -94,7 +321,7 @@ fn create_table_insert_select_roundtrip() {
     engine
       .translate_and_execute(
         "CREATE TABLE users (id UUID PRIMARY KEY, name TEXT);",
-        translator,
+        &translator,
       )
       .await
       .expect("create table");
@@ -102,18 +329,18 @@ fn create_table_insert_select_roundtrip() {
     engine
       .translate_and_execute(
         "INSERT INTO users (id, name) VALUES ('00000000-0000-0000-0000-000000000001'::uuid, 'Alice');",
-        SqlTranslator,
+        &SqlTranslator,
       )
       .await
       .expect("insert row");
 
     let result = engine
-      .translate_and_execute("SELECT id, name FROM users;", SqlTranslator)
+      .translate_and_execute("SELECT id, name FROM users;", &SqlTranslator)
       .await
       .expect("select rows");
 
-    assert_eq!(result.len(), 1);
-    assert_eq!(result[0][1], Value::Text("Alice".to_string()));
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0][1], Value::Text("Alice".to_string()));
   });
 }
 

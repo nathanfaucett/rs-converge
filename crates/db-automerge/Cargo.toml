@@ -10,6 +10,7 @@ rust-version.workspace = true
 
 [lib]
 path = "src/lib.rs"
+name = "db_automerge"
 
 [features]
 std = []
@@ -34,5 +35,6 @@ base64 = { version = "0.21", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 db-engine = { path = "../db-engine", default-features = false, features = [
-  "std", "in-memory"
+  "std",
+  "in-memory",
 ] }

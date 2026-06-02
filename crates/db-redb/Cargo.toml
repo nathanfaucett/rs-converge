@@ -11,9 +11,18 @@ rust-version.workspace = true
 path = "src/lib.rs"
 name = "db_redb"
 
+[features]
+default = []
+automerge = ["dep:db-automerge"]
+
 [dependencies]
 # Engine traits
-db-engine = { path = "../db-engine", default-features = true }
+db-engine = { path = "../db-engine", default-features = false, features = [
+  "std",
+] }
+db-automerge = { path = "../db-automerge", default-features = false, features = [
+  "std",
+], optional = true }
 
 # Concurrency / streams
 async-stream = { version = "0.3", default-features = false, features = [] }
@@ -21,10 +30,10 @@ futures = { version = "0.3", default-features = false, features = [
   "std",
   "executor",
 ] }
-async-lock = { version = "3.4", default-features = false, features = [] }
+async-lock = { version = "3.4", default-features = false, features = ["std"] }
 
 # Storage backend
-redb = { version = "4.0", default-features = false, features = [] }
+redb = { version = "4.1", default-features = false, features = ["uuid"] }
 
 # Concurrent map used by manager
 dashmap = { version = "6.2", default-features = false, features = [] }
@@ -37,6 +46,3 @@ postcard = { version = "1.1", default-features = false, features = [
 ] }
 
 [dev-dependencies]
-
-[features]
-default = []
