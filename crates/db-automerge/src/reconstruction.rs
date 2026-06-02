@@ -1,12 +1,11 @@
-use crate::AutoCommit;
-use crate::document_change_key::DocumentChangeKey;
-use crate::document_type::DocumentType;
 use alloc::vec::Vec;
 use automerge::AutomergeError;
 use core::ops::{Bound, RangeBounds};
 use db_engine::BTreeError;
 use futures::{Stream, StreamExt, pin_mut};
 use uuid::Uuid;
+
+use crate::{DocumentChangeKey, DocumentType, automerge_serde::AutoCommit};
 
 pub(super) struct ReconstructionAccumulator {
   latest_snapshot: Option<Vec<u8>>,

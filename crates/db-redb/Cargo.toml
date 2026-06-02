@@ -12,7 +12,7 @@ path = "src/lib.rs"
 name = "db_redb"
 
 [features]
-default = []
+default = ["automerge"]
 automerge = ["dep:db-automerge"]
 
 [dependencies]

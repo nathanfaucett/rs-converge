@@ -80,7 +80,6 @@ where
   }
 }
 
-#[allow(clippy::needless_lifetimes)]
 impl<K, V> BTreeTransaction<K, V> for RedbTransaction<K, V>
 where
   K: BTreeKey,
@@ -152,7 +151,6 @@ where
   }
 }
 
-#[allow(clippy::needless_lifetimes)]
 impl<K, V> BTreeReadExecutor<K, V> for RedbTransaction<K, V>
 where
   K: BTreeKey,
@@ -284,7 +282,6 @@ where
   }
 }
 
-#[allow(clippy::needless_lifetimes)]
 impl<K, V> BTreeWriteExecutor<K, V> for RedbTransaction<K, V>
 where
   K: BTreeKey,

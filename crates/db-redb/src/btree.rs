@@ -45,7 +45,6 @@ impl<K, V> RedbBTree<K, V> {
   }
 }
 
-#[allow(clippy::needless_lifetimes)]
 impl<K, V> BTreeReadExecutor<K, V> for RedbBTree<K, V>
 where
   K: BTreeKey,
@@ -130,7 +129,6 @@ where
   }
 }
 
-#[allow(clippy::needless_lifetimes)]
 impl<K, V> BTreeWriteExecutor<K, V> for RedbBTree<K, V>
 where
   K: BTreeKey,

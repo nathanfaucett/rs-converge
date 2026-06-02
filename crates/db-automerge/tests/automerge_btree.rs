@@ -33,7 +33,7 @@ fn insert_and_get_latest() {
 #[test]
 fn range_ordering() {
   let underlying = InMemoryBTree::<DocumentChangeKey, Vec<u8>>::new();
-  let mut store = AutomergeBTree::new(underlying);
+  let mut store = AutomergeBTree::new_automerge(underlying);
 
   let mut ids: Vec<Uuid> = Vec::new();
   for i in 0..3 {
@@ -68,7 +68,7 @@ fn range_ordering() {
 fn compaction_with_concurrent_writer() {
   block_on(async {
     let underlying = InMemoryBTree::<DocumentChangeKey, Vec<u8>>::new();
-    let automerge = AutomergeBTree::with_compaction(underlying.clone(), 1, 1);
+    let automerge = AutomergeBTree::with_compaction_automerge(underlying.clone(), 1, 1);
     let doc_id = Uuid::new_v4();
 
     let mut base_doc = AutoCommit::new();
@@ -122,7 +122,7 @@ fn compaction_with_concurrent_writer() {
       tx.commit().await.expect("commit writer tx");
     }
 
-    let final_store = AutomergeBTree::new(underlying.clone());
+    let final_store = AutomergeBTree::new_automerge(underlying.clone());
     let mut final_doc = final_store
       .get(&doc_id)
       .await
@@ -143,7 +143,7 @@ fn compaction_with_concurrent_writer() {
 fn encoded_remove_only_deletes_target_document() {
   block_on(async {
     let underlying = InMemoryBTree::<DocumentChangeKey, Vec<u8>>::new();
-    let mut store = AutomergeBTree::new(underlying);
+    let mut store = AutomergeBTree::new_automerge(underlying);
 
     let doc_a = Uuid::from_u128(1);
     let doc_b = Uuid::from_u128(2);

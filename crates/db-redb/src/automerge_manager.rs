@@ -65,7 +65,7 @@ impl BTreeManager for RedbAutomergeBTreeManager {
     if let Some(entry) = inner.get(&id) {
       let any_ref = entry.value().as_ref() as &dyn core::any::Any;
       if let Some(typed) = any_ref.downcast_ref::<RedbBTree<D::Key, D::Value>>() {
-        return Ok(typed.clone());
+        return Ok(AutomergeBTree::new(typed.clone()));
       } else {
         return Err(db_engine::BTreeError::TypeMismatch);
       }
@@ -93,7 +93,7 @@ impl BTreeManager for RedbAutomergeBTreeManager {
     let entry = inner.get(&id).unwrap();
     let any_ref = entry.value().as_ref() as &dyn core::any::Any;
     if let Some(typed) = any_ref.downcast_ref::<RedbBTree<D::Key, D::Value>>() {
-      Ok(typed.clone())
+      Ok(AutomergeBTree::new(typed.clone()))
     } else {
       Err(db_engine::BTreeError::TypeMismatch)
     }
