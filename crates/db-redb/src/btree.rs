@@ -12,6 +12,10 @@ use crate::transaction::RedbTransaction;
 use postcard::{from_bytes, to_stdvec};
 use redb::{ReadTransaction, ReadableDatabase, ReadableTable, TableDefinition};
 
+fn is_table_missing(error: &redb::TableError) -> bool {
+  matches!(error, redb::TableError::TableDoesNotExist(_))
+}
+
 pub struct RedbBTree<K, V> {
   pub(crate) db: Arc<redb::Database>,
   pub(crate) id: String,
@@ -60,9 +64,11 @@ where
       .map_err(|e| db_engine::BTreeError::Custom(format!("postcard key ser error: {}", e)))?;
 
     let rt: ReadTransaction = self.db.begin_read().map_err(db_engine::BTreeError::other)?;
-    let table = rt
-      .open_table(self.table_def)
-      .map_err(db_engine::BTreeError::other)?;
+    let table = match rt.open_table(self.table_def) {
+      Ok(table) => table,
+      Err(error) if is_table_missing(&error) => return Ok(None),
+      Err(error) => return Err(db_engine::BTreeError::other(error)),
+    };
     let mut full_key = self.id.as_bytes().to_vec();
     full_key.push(0u8);
     full_key.extend_from_slice(&key_bin);
@@ -90,7 +96,16 @@ where
 
     stream! {
       let rt = db.begin_read().map_err(db_engine::BTreeError::other)?;
-      let table = rt.open_table(table_def).map_err(db_engine::BTreeError::other)?;
+      let table = match rt.open_table(table_def) {
+        Ok(table) => table,
+        Err(error) if is_table_missing(&error) => {
+          return;
+        }
+        Err(error) => {
+          yield Err(db_engine::BTreeError::other(error));
+          return;
+        }
+      };
 
       let mut prefix = id.into_bytes();
       prefix.push(0u8);

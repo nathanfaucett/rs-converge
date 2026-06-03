@@ -312,6 +312,7 @@ dependencies = [
  "db-examples-util",
  "db-redb",
  "db-sql-translator",
+ "redb",
  "tokio",
  "uuid",
 ]

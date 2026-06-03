@@ -38,6 +38,7 @@ db-sql-translator = { path = "crates/db-sql-translator", default-features = fals
 [dev-dependencies]
 uuid = { version = "1.23", features = ["v7"] }
 tokio = { version = "1.52", features = ["full"] }
+redb = { version = "4.1" }
 db-examples-util = { path = "crates/db-examples-util" }
 
 [workspace]

@@ -1,10 +1,8 @@
-use std::{borrow::Borrow, collections::BTreeMap, marker::PhantomData, sync::Arc};
+use std::{collections::BTreeMap, marker::PhantomData, sync::Arc};
 
 use async_stream::stream;
 use core::ops::Bound;
-use db_engine::BTreeDefinition;
 use futures::Stream;
-use std::ops::RangeBounds;
 
 use async_lock::RwLock;
 use db_engine::{
@@ -175,7 +173,11 @@ where
     let key_bin = to_stdvec(key.borrow())
       .map_err(|e| BTreeError::Custom(format!("postcard key ser error: {}", e)))?;
     let rt = self.db.begin_read().map_err(BTreeError::other)?;
-    let table = rt.open_table(self.table_def).map_err(BTreeError::other)?;
+    let table = match rt.open_table(self.table_def) {
+      Ok(table) => table,
+      Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+      Err(error) => return Err(BTreeError::other(error)),
+    };
     let mut full_key = self.id.as_bytes().to_vec();
     full_key.push(0u8);
     full_key.extend_from_slice(&key_bin);
@@ -200,7 +202,38 @@ where
       let patch_snapshot = self.patch.read().await.clone();
 
       let rt = db.begin_read().map_err(BTreeError::other)?;
-      let table = rt.open_table(table_def).map_err(BTreeError::other)?;
+      let table = match rt.open_table(table_def) {
+        Ok(table) => table,
+        Err(redb::TableError::TableDoesNotExist(_)) => {
+          for (k, entry) in patch_snapshot.0.into_iter() {
+            let mut in_range = true;
+            match range.start_bound() {
+              Bound::Included(s) => { if k < *s { in_range = false; } }
+              Bound::Excluded(s) => { if k <= *s { in_range = false; } }
+              Bound::Unbounded => {}
+            }
+            match range.end_bound() {
+              Bound::Included(e) => { if k > *e { in_range = false; } }
+              Bound::Excluded(e) => { if k >= *e { in_range = false; } }
+              Bound::Unbounded => {}
+            }
+
+            if !in_range {
+              continue;
+            }
+
+            if let TransactionPatchEntry::Present(v) = entry {
+              yield Ok((k, v));
+            }
+          }
+
+          return;
+        }
+        Err(error) => {
+          yield Err(BTreeError::other(error));
+          return;
+        }
+      };
 
       let mut prefix = id.as_bytes().to_vec();
       prefix.push(0u8);
@@ -323,7 +356,14 @@ where
       let key_bin = to_stdvec(&key_owned)
         .map_err(|e| BTreeError::Custom(format!("postcard key ser error: {}", e)))?;
       let rt = self.db.begin_read().map_err(BTreeError::other)?;
-      let table = rt.open_table(self.table_def).map_err(BTreeError::other)?;
+      let table = match rt.open_table(self.table_def) {
+        Ok(table) => table,
+        Err(redb::TableError::TableDoesNotExist(_)) => {
+          guard.0.insert(key_owned, TransactionPatchEntry::Deleted);
+          return Ok(None);
+        }
+        Err(error) => return Err(BTreeError::other(error)),
+      };
       let mut full_key = self.id.as_bytes().to_vec();
       full_key.push(0u8);
       full_key.extend_from_slice(&key_bin);
