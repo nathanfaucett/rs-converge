@@ -12,17 +12,13 @@ path = "src/lib.rs"
 name = "db_redb"
 
 [features]
-default = ["automerge"]
-automerge = ["dep:db-automerge"]
+default = []
 
 [dependencies]
 # Engine traits
 db-engine = { path = "../db-engine", default-features = false, features = [
   "std",
 ] }
-db-automerge = { path = "../db-automerge", default-features = false, features = [
-  "std",
-], optional = true }
 
 # Concurrency / streams
 async-stream = { version = "0.3", default-features = false, features = [] }

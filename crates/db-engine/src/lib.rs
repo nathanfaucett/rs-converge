@@ -7,6 +7,7 @@ extern crate alloc;
 mod btree;
 mod catalog;
 mod concurrency;
+mod default_manager;
 mod engine;
 mod executor;
 mod from_row;
@@ -18,14 +19,15 @@ mod translator;
 mod value;
 
 pub use btree::{
-  BTree, BTreeDefinition, BTreeError, BTreeKey, BTreeManager, BTreeReadExecutor, BTreeResult,
-  BTreeTransaction, BTreeValue, BTreeWriteExecutor,
+  BTree, BTreeDefinition, BTreeError, BTreeFactory, BTreeKey, BTreeManager, BTreeManagerAnyBTree,
+  BTreeReadExecutor, BTreeResult, BTreeTransaction, BTreeValue, BTreeWriteExecutor,
 };
 pub use concurrency::{MaybeSend, MaybeSendFuture, MaybeSendStream, MaybeSync};
+pub use default_manager::DefaultBTreeManager;
 pub use engine::{Engine, EngineError, EngineResult};
 pub use from_row::{FromRow, RowDeserializeError};
 #[cfg(feature = "in-memory")]
-pub use in_memory_btree::{InMemoryBTree, InMemoryBTreeManager};
+pub use in_memory_btree::{InMemoryBTree, InMemoryBTreeFactory};
 pub use query::{
   Column, DdlOp, Expr, ExprValue, Join, JoinKind, OrderBy, Query, QueryResult, QueryResultColumn,
   SelectOptions, Statement, TableIndex, UpdateAssignment,

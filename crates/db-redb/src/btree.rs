@@ -5,7 +5,7 @@ use std::ops::RangeBounds;
 
 use db_engine::{
   BTree, BTreeKey, BTreeReadExecutor, BTreeResult, BTreeValue, BTreeWriteExecutor, MaybeSend,
-  MaybeSendFuture, MaybeSendStream, MaybeSync,
+  MaybeSendStream,
 };
 
 use crate::transaction::RedbTransaction;
@@ -16,7 +16,7 @@ pub struct RedbBTree<K, V> {
   pub(crate) db: Arc<redb::Database>,
   pub(crate) id: String,
   pub(crate) table_def: TableDefinition<'static, &'static [u8], &'static [u8]>,
-  _marker: PhantomData<fn() -> (K, V)>,
+  _marker: PhantomData<(K, V)>,
 }
 
 impl<K, V> Clone for RedbBTree<K, V> {
@@ -24,7 +24,7 @@ impl<K, V> Clone for RedbBTree<K, V> {
     Self {
       db: self.db.clone(),
       id: self.id.clone(),
-      table_def: self.table_def.clone(),
+      table_def: self.table_def,
       _marker: PhantomData,
     }
   }
@@ -86,7 +86,7 @@ where
   {
     let db = self.db.clone();
     let id = self.id.clone();
-    let table_def = self.table_def.clone();
+    let table_def = self.table_def;
 
     stream! {
       let rt = db.begin_read().map_err(db_engine::BTreeError::other)?;
@@ -138,7 +138,7 @@ where
   where
     K: Ord,
   {
-    let mut wt = self
+    let wt = self
       .db
       .begin_write()
       .map_err(db_engine::BTreeError::other)?;
@@ -167,7 +167,7 @@ where
     K: Ord,
     Q: Borrow<K> + MaybeSend + 'a,
   {
-    let mut wt = self
+    let wt = self
       .db
       .begin_write()
       .map_err(db_engine::BTreeError::other)?;
@@ -205,20 +205,7 @@ where
 {
   type Transaction = RedbTransaction<K, V>;
 
-  fn create<D>(_definition: &D) -> impl MaybeSendFuture<Output = BTreeResult<Self>>
-  where
-    Self: Sized,
-    D: db_engine::BTreeDefinition,
-  {
-    async move { Err(db_engine::BTreeError::UnsupportedOperation) }
-  }
-
-  fn transaction<'a>(
-    &'a self,
-  ) -> impl MaybeSendFuture<Output = BTreeResult<Self::Transaction>> + 'a {
-    let db = self.db.clone();
-    let id = self.id.clone();
-    let table_def = self.table_def.clone();
-    async move { RedbTransaction::new_write(db, &id, table_def).map_err(|e| e) }
+  async fn transaction<'a>(&'a self) -> BTreeResult<Self::Transaction> {
+    RedbTransaction::new_write(self.db.clone(), &self.id, self.table_def)
   }
 }

@@ -1,9 +1,10 @@
-use db_engine::{BTreeManager, Engine, QueryParams, Translator, Value};
+use db_engine::{BTreeFactory, BTreeManager, Engine, QueryParams, Translator, Value};
 use uuid::Uuid;
 
-pub async fn run<M, T>(engine: Engine<M>, translator: T)
+pub async fn run<M, F, T>(engine: Engine<M, F>, translator: T)
 where
-  M: BTreeManager,
+  M: BTreeManager<F>,
+  F: BTreeFactory,
   T: Translator,
 {
   // Create tables via SQL using the facade.

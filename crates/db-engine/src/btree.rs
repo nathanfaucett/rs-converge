@@ -1,6 +1,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::{boxed::Box, string::String};
 use core::{borrow::Borrow, error::Error, ops::RangeBounds};
+use std::any::Any;
 
 use thiserror::Error;
 
@@ -117,11 +118,6 @@ where
 {
   type Transaction: BTreeTransaction<K, V>;
 
-  fn create<D>(definition: &D) -> impl MaybeSendFuture<Output = BTreeResult<Self>>
-  where
-    Self: Sized,
-    D: BTreeDefinition<Key = K, Value = V>;
-
   fn transaction<'a>(
     &'a self,
   ) -> impl MaybeSendFuture<Output = BTreeResult<Self::Transaction>> + 'a;
@@ -134,16 +130,32 @@ pub trait BTreeDefinition: Clone + MaybeSend + MaybeSync + 'static {
   fn id(&self) -> &str;
 }
 
-pub trait BTreeManager: MaybeSend + MaybeSync {
+pub trait BTreeFactory: MaybeSend + MaybeSync {
   type BTree<K, V>: BTree<K, V>
   where
     K: BTreeKey,
     V: BTreeValue;
 
-  fn entry<D>(
+  fn create<D>(
     &self,
     definition: &D,
   ) -> impl MaybeSendFuture<Output = BTreeResult<Self::BTree<D::Key, D::Value>>>
+  where
+    D: BTreeDefinition;
+}
+
+pub trait BTreeManagerAnyBTree: Any + MaybeSend + MaybeSync + 'static {}
+
+impl<T> BTreeManagerAnyBTree for T where T: Any + MaybeSend + MaybeSync + 'static {}
+
+pub trait BTreeManager<F>: MaybeSend + MaybeSync
+where
+  F: BTreeFactory,
+{
+  fn entry<D>(
+    &self,
+    definition: &D,
+  ) -> impl MaybeSendFuture<Output = BTreeResult<F::BTree<D::Key, D::Value>>>
   where
     D: BTreeDefinition;
 

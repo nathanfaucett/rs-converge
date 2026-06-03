@@ -1,5 +1,5 @@
 use db_engine::{
-  Column, ColumnSchema, DescribeSchema, Engine, Expr, ExprValue, InMemoryBTreeManager, Join,
+  Column, ColumnSchema, DefaultBTreeManager, DescribeSchema, Engine, Expr, ExprValue, Join,
   JoinKind, Query, QueryParams, SelectOptions, Statement, TableSchema, Translator, Value,
   ValueType,
 };
@@ -212,7 +212,7 @@ fn select_plain_join_translation() {
 
 #[test]
 fn select_inner_join_roundtrip() {
-  let engine = Engine::new(InMemoryBTreeManager::new());
+  let engine = Engine::new(DefaultBTreeManager::with_in_memory_factory());
   let translator = SqlTranslator;
 
   block_on(async {
@@ -263,7 +263,7 @@ fn select_inner_join_roundtrip() {
 
 #[test]
 fn select_plain_join_roundtrip() {
-  let engine = Engine::new(InMemoryBTreeManager::new());
+  let engine = Engine::new(DefaultBTreeManager::with_in_memory_factory());
   let translator = SqlTranslator;
 
   block_on(async {
@@ -314,7 +314,7 @@ fn select_plain_join_roundtrip() {
 
 #[test]
 fn create_table_insert_select_roundtrip() {
-  let engine = Engine::new(InMemoryBTreeManager::new());
+  let engine = Engine::new(DefaultBTreeManager::with_in_memory_factory());
   let translator = SqlTranslator;
 
   block_on(async {

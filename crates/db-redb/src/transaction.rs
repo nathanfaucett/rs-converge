@@ -4,13 +4,12 @@ use async_stream::stream;
 use core::ops::Bound;
 use db_engine::BTreeDefinition;
 use futures::Stream;
-use serde::{Serialize, de::DeserializeOwned};
 use std::ops::RangeBounds;
 
 use async_lock::RwLock;
 use db_engine::{
   BTreeError, BTreeKey, BTreeReadExecutor, BTreeResult, BTreeTransaction, BTreeValue,
-  BTreeWriteExecutor, MaybeSend, MaybeSync,
+  BTreeWriteExecutor, MaybeSend,
 };
 use postcard::{from_bytes, to_stdvec};
 use redb::{ReadableDatabase, ReadableTable, TableDefinition};
@@ -105,10 +104,10 @@ where
       }
 
       let db = self.db.clone();
-      let table_def = self.table_def.clone();
+      let table_def = self.table_def;
       let id = self.id.clone();
 
-      let mut wt = db.begin_write().map_err(BTreeError::other)?;
+      let wt = db.begin_write().map_err(BTreeError::other)?;
       let mut table = wt.open_table(table_def).map_err(BTreeError::other)?;
 
       for (k, entry) in patch_map {
@@ -192,7 +191,7 @@ where
     K: Ord + Clone,
     R: core::ops::RangeBounds<K> + MaybeSend + 'a,
   {
-    let table_def = self.table_def.clone();
+    let table_def = self.table_def;
     let db = self.db.clone();
     let id = self.id.clone();
 

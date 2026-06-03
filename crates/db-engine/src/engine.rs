@@ -4,6 +4,7 @@ use alloc::{
   sync::Arc,
   vec::Vec,
 };
+use std::marker::PhantomData;
 #[cfg(feature = "std")]
 use std::sync::Arc;
 
@@ -14,6 +15,7 @@ use crate::{
   BTree, BTreeDefinition, BTreeError, BTreeManager, BTreeReadExecutor, BTreeTransaction,
   BTreeWriteExecutor, DescribeSchema, IndexSchema, QueryParams, QueryResult, Row, Statement,
   TableSchema, TranslateError, Translator, Value,
+  btree::BTreeFactory,
   catalog::{
     ENGINE_INDEX_FIELDS, ENGINE_INDICES, ENGINE_TABLE_FIELDS, ENGINE_TABLES, IndexFieldRow,
     TableFieldRow, decode_index_field_row, decode_index_row, decode_table_field_row,
@@ -68,27 +70,30 @@ impl BTreeDefinition for EngineBTreeDefinition {
   }
 }
 
-pub struct Engine<M> {
-  pub manager: Arc<M>,
+pub struct Engine<M, F> {
+  pub(crate) manager: Arc<M>,
+  _phantom_data: PhantomData<F>,
 }
 
-impl<M> From<M> for Engine<M> {
+impl<M, F> From<M> for Engine<M, F> {
   fn from(manager: M) -> Self {
     Self {
       manager: Arc::new(manager),
+      _phantom_data: PhantomData,
     }
   }
 }
 
-impl<M> Engine<M> {
+impl<M, F> Engine<M, F> {
   pub fn new(manager: M) -> Self {
     Self::from(manager)
   }
 }
 
-impl<M> DescribeSchema for Engine<M>
+impl<M, F> DescribeSchema for Engine<M, F>
 where
-  M: BTreeManager,
+  M: BTreeManager<F>,
+  F: BTreeFactory,
 {
   async fn describe_table(&self, table_name: &str) -> Option<TableSchema> {
     let definition = EngineBTreeDefinition::from(ENGINE_TABLES);
@@ -132,9 +137,10 @@ where
   }
 }
 
-impl<M> Engine<M>
+impl<M, F> Engine<M, F>
 where
-  M: BTreeManager,
+  M: BTreeManager<F>,
+  F: BTreeFactory,
 {
   pub async fn describe_index(&self, index_name: &str) -> Option<IndexSchema> {
     let definition = EngineBTreeDefinition::from(ENGINE_INDICES);
@@ -179,7 +185,7 @@ where
 
   pub async fn register_table_schema(&self, schema: &TableSchema) -> EngineResult<()> {
     let definition = EngineBTreeDefinition::from(ENGINE_TABLES);
-    let btree: <M as BTreeManager>::BTree<Vec<Value>, Vec<Value>> =
+    let btree: <F as BTreeFactory>::BTree<Vec<Value>, Vec<Value>> =
       self.manager.entry(&definition).await?;
     let mut tx = btree.transaction().await?;
     tx.insert(table_key(&schema.name), encode_table_row(&schema.name))
@@ -319,12 +325,12 @@ mod tests {
 
   use futures::{StreamExt, executor::block_on, pin_mut};
 
-  use crate::{ColumnSchema, InMemoryBTreeManager, ValueType};
+  use crate::{ColumnSchema, DefaultBTreeManager, ValueType};
 
   #[test]
   fn describe_table_reads_normalized_catalogs() {
     block_on(async {
-      let engine = Engine::new(InMemoryBTreeManager::new());
+      let engine = Engine::new(DefaultBTreeManager::with_in_memory_factory());
       let schema = TableSchema {
         name: "users".to_string(),
         columns: vec![
@@ -354,7 +360,7 @@ mod tests {
   #[test]
   fn describe_index_reads_normalized_catalogs() {
     block_on(async {
-      let engine = Engine::new(InMemoryBTreeManager::new());
+      let engine = Engine::new(DefaultBTreeManager::with_in_memory_factory());
       let schema = IndexSchema {
         name: "users_name_idx".to_string(),
         table_name: "users".to_string(),
@@ -376,7 +382,7 @@ mod tests {
   #[test]
   fn registration_writes_normalized_system_tables() {
     block_on(async {
-      let engine = Engine::new(InMemoryBTreeManager::new());
+      let engine = Engine::new(DefaultBTreeManager::with_in_memory_factory());
 
       let table_schema = TableSchema {
         name: "users".to_string(),
@@ -419,7 +425,11 @@ mod tests {
     });
   }
 
-  async fn count_rows(engine: &Engine<InMemoryBTreeManager>, table_name: &str) -> usize {
+  async fn count_rows<M, F>(engine: &Engine<M, F>, table_name: &str) -> usize
+  where
+    M: BTreeManager<F>,
+    F: BTreeFactory,
+  {
     let definition = EngineBTreeDefinition::from(table_name);
     let btree = engine
       .manager

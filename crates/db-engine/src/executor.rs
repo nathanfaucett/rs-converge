@@ -7,15 +7,16 @@ use crate::{
   BTree, BTreeManager, BTreeReadExecutor, BTreeTransaction, BTreeWriteExecutor, Column,
   ColumnIndex, DdlOp, DescribeSchema, Engine, EngineError, EngineResult, Expr, ExprValue, Query,
   QueryResult, QueryResultColumn, Row, Statement, TableIndex, TableSchema, UpdateAssignment, Value,
-  engine::EngineBTreeDefinition,
+  btree::BTreeFactory, engine::EngineBTreeDefinition,
 };
 
-pub async fn execute_statement<M>(
-  engine: &Engine<M>,
+pub async fn execute_statement<M, F>(
+  engine: &Engine<M, F>,
   statement: Statement,
 ) -> EngineResult<QueryResult>
 where
-  M: BTreeManager,
+  M: BTreeManager<F>,
+  F: BTreeFactory,
 {
   match statement {
     Statement::Query(query) => execute_query(engine, query).await,
@@ -23,9 +24,10 @@ where
   }
 }
 
-pub async fn execute_query<M>(engine: &Engine<M>, query: Query) -> EngineResult<QueryResult>
+pub async fn execute_query<M, F>(engine: &Engine<M, F>, query: Query) -> EngineResult<QueryResult>
 where
-  M: BTreeManager,
+  M: BTreeManager<F>,
+  F: BTreeFactory,
 {
   match query {
     Query::Select {
@@ -81,9 +83,10 @@ where
   }
 }
 
-async fn execute_ddl<M>(engine: &Engine<M>, ddl: DdlOp) -> EngineResult<QueryResult>
+async fn execute_ddl<M, F>(engine: &Engine<M, F>, ddl: DdlOp) -> EngineResult<QueryResult>
 where
-  M: BTreeManager,
+  M: BTreeManager<F>,
+  F: BTreeFactory,
 {
   match ddl {
     DdlOp::CreateTable {
@@ -106,8 +109,8 @@ where
   }
 }
 
-async fn execute_select<M>(
-  engine: &Engine<M>,
+async fn execute_select<M, F>(
+  engine: &Engine<M, F>,
   tables: &[String],
   table_index: TableIndex,
   projection: &[Column],
@@ -115,7 +118,8 @@ async fn execute_select<M>(
   options: &crate::SelectOptions,
 ) -> EngineResult<QueryResult>
 where
-  M: BTreeManager,
+  M: BTreeManager<F>,
+  F: BTreeFactory,
 {
   if options.joins.is_empty() {
     let table = resolve_table_name(tables, table_index)?;
@@ -162,9 +166,13 @@ where
   Ok(QueryResult::new_with_columns(rows, columns))
 }
 
-async fn collect_table_rows<M>(engine: &Engine<M>, tables: &[String]) -> EngineResult<Vec<Vec<Row>>>
+async fn collect_table_rows<M, F>(
+  engine: &Engine<M, F>,
+  tables: &[String],
+) -> EngineResult<Vec<Vec<Row>>>
 where
-  M: BTreeManager,
+  M: BTreeManager<F>,
+  F: BTreeFactory,
 {
   let mut all_rows = Vec::with_capacity(tables.len());
 
@@ -364,15 +372,16 @@ fn eval_expr_value_for_row_context(
   }
 }
 
-async fn execute_insert<M>(
-  engine: &Engine<M>,
+async fn execute_insert<M, F>(
+  engine: &Engine<M, F>,
   tables: &[String],
   table_index: TableIndex,
   row: Row,
   returning: Option<Vec<Column>>,
 ) -> EngineResult<QueryResult>
 where
-  M: BTreeManager,
+  M: BTreeManager<F>,
+  F: BTreeFactory,
 {
   let table = resolve_table_name(tables, table_index)?;
   let definition = EngineBTreeDefinition::from(table);
@@ -402,8 +411,8 @@ where
   .await
 }
 
-async fn execute_update<M>(
-  engine: &Engine<M>,
+async fn execute_update<M, F>(
+  engine: &Engine<M, F>,
   tables: &[String],
   table_index: TableIndex,
   assignments: &[UpdateAssignment],
@@ -411,7 +420,8 @@ async fn execute_update<M>(
   returning: Option<Vec<Column>>,
 ) -> EngineResult<QueryResult>
 where
-  M: BTreeManager,
+  M: BTreeManager<F>,
+  F: BTreeFactory,
 {
   let table = resolve_table_name(tables, table_index)?;
   let definition = EngineBTreeDefinition::from(table);
@@ -480,15 +490,16 @@ where
   execute_returning(engine, table, table_index, returning_columns, updated_rows).await
 }
 
-async fn execute_delete<M>(
-  engine: &Engine<M>,
+async fn execute_delete<M, F>(
+  engine: &Engine<M, F>,
   tables: &[String],
   table_index: TableIndex,
   predicate: Option<&Expr>,
   returning: Option<Vec<Column>>,
 ) -> EngineResult<QueryResult>
 where
-  M: BTreeManager,
+  M: BTreeManager<F>,
+  F: BTreeFactory,
 {
   let table = resolve_table_name(tables, table_index)?;
   let definition = EngineBTreeDefinition::from(table);
@@ -528,13 +539,14 @@ where
   execute_returning(engine, table, table_index, returning_columns, deleted_rows).await
 }
 
-async fn build_query_result_columns_for_query<M>(
-  engine: &Engine<M>,
+async fn build_query_result_columns_for_query<M, F>(
+  engine: &Engine<M, F>,
   tables: &[String],
   projection: &[Column],
 ) -> EngineResult<Vec<QueryResultColumn>>
 where
-  M: BTreeManager,
+  M: BTreeManager<F>,
+  F: BTreeFactory,
 {
   let mut columns = Vec::with_capacity(projection.len());
   for column in projection {
@@ -554,14 +566,15 @@ where
   Ok(columns)
 }
 
-async fn build_query_result_columns<M>(
-  engine: &Engine<M>,
+async fn build_query_result_columns<M, F>(
+  engine: &Engine<M, F>,
   table: &str,
   table_index: TableIndex,
   projection: &[Column],
 ) -> EngineResult<Vec<QueryResultColumn>>
 where
-  M: BTreeManager,
+  M: BTreeManager<F>,
+  F: BTreeFactory,
 {
   let schema = engine
     .describe_table(table)
@@ -621,15 +634,16 @@ fn build_query_result_column(
   })
 }
 
-async fn execute_returning<M>(
-  engine: &Engine<M>,
+async fn execute_returning<M, F>(
+  engine: &Engine<M, F>,
   table: &str,
   table_index: TableIndex,
   returning: Option<&[Column]>,
   rows: Vec<Row>,
 ) -> EngineResult<QueryResult>
 where
-  M: BTreeManager,
+  M: BTreeManager<F>,
+  F: BTreeFactory,
 {
   let returning_columns = match returning {
     Some(columns) => columns,

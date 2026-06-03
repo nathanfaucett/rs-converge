@@ -1,4 +1,4 @@
-use std::ops::RangeBounds;
+use core::ops::RangeBounds;
 
 #[cfg(not(feature = "std"))]
 use alloc::string::ToString;
@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 use async_stream::stream;
 use db_engine::{
   BTree, BTreeError, BTreeReadExecutor, BTreeResult, BTreeTransaction, BTreeWriteExecutor,
-  MaybeSend, MaybeSendFuture, MaybeSendStream,
+  MaybeSend, MaybeSendStream,
 };
 use futures::{Stream, StreamExt};
 use uuid::Uuid;
@@ -25,7 +25,7 @@ use crate::{
 };
 
 #[derive(Clone)]
-struct AutomergeBTreeInner<B> {
+pub struct AutomergeBTreeInner<B> {
   pub inner: B,
   pub policy: ThresholdPolicy,
 }
@@ -251,14 +251,6 @@ where
 {
   type Transaction = AutomergeBTreeTransactionInner<B::Transaction>;
 
-  fn create<D>(_definition: &D) -> impl MaybeSendFuture<Output = BTreeResult<Self>>
-  where
-    Self: Sized,
-    D: db_engine::BTreeDefinition<Key = Uuid, Value = AutoCommit>,
-  {
-    async move { Err(BTreeError::UnsupportedOperation) }
-  }
-
   async fn transaction(&self) -> BTreeResult<Self::Transaction> {
     let inner_tx = self.inner.transaction().await?;
     Ok(AutomergeBTreeTransactionInner::new(inner_tx))
@@ -276,66 +268,79 @@ impl<B> AutomergeBTree<B> {
   }
 }
 
-impl<B, K, V> BTreeReadExecutor<K, V> for AutomergeBTree<B>
-where
-  B: BTree<Uuid, AutoCommit>,
-  K: db_engine::BTreeKey,
-  V: db_engine::BTreeValue,
-{
-  async fn get<'a, Q>(&'a self, key: Q) -> BTreeResult<Option<V>>
-  where
-    Q: core::borrow::Borrow<K> + MaybeSend + 'a,
-  {
-    todo!()
+impl<B> AutomergeBTree<AutomergeBTreeInner<B>> {
+  pub fn new_automerge(inner: B) -> Self {
+    Self {
+      inner: AutomergeBTreeInner::new(inner),
+    }
   }
 
-  fn range<'a, R>(&'a self, range: R) -> impl MaybeSendStream<Item = BTreeResult<(K, V)>> + 'a
-  where
-    R: RangeBounds<K> + MaybeSend + 'a,
-  {
-    todo!()
+  pub fn with_compaction_automerge(
+    inner: B,
+    threshold_count: usize,
+    threshold_bytes: usize,
+  ) -> Self {
+    Self {
+      inner: AutomergeBTreeInner::with_compaction(inner, threshold_count, threshold_bytes),
+    }
   }
 }
 
-impl<B, K, V> BTreeWriteExecutor<K, V> for AutomergeBTree<B>
+impl<B> BTreeReadExecutor<Uuid, AutoCommit> for AutomergeBTree<B>
 where
   B: BTree<Uuid, AutoCommit>,
-  K: db_engine::BTreeKey,
-  V: db_engine::BTreeValue,
 {
-  async fn insert<'a>(&'a mut self, key: K, value: V) -> BTreeResult<()>
+  async fn get<'a, Q>(&'a self, key: Q) -> BTreeResult<Option<AutoCommit>>
   where
-    K: Ord,
+    Q: core::borrow::Borrow<Uuid> + MaybeSend + 'a,
   {
-    unimplemented!()
+    self.inner.get(key).await
   }
 
-  async fn remove<'a, Q>(&'a mut self, key: Q) -> BTreeResult<Option<V>>
+  fn range<'a, R>(
+    &'a self,
+    range: R,
+  ) -> impl MaybeSendStream<Item = BTreeResult<(Uuid, AutoCommit)>> + 'a
   where
-    K: Ord,
-    Q: core::borrow::Borrow<K> + MaybeSend + 'a,
+    R: RangeBounds<Uuid> + MaybeSend + 'a,
   {
-    todo!()
+    self.inner.range(range)
   }
 }
 
-impl<B, K, V> BTree<K, V> for AutomergeBTree<B>
+impl<B> BTreeWriteExecutor<Uuid, AutoCommit> for AutomergeBTree<B>
 where
   B: BTree<Uuid, AutoCommit>,
-  K: db_engine::BTreeKey,
-  V: db_engine::BTreeValue,
+{
+  async fn insert<'a>(&'a mut self, key: Uuid, value: AutoCommit) -> BTreeResult<()>
+  where
+    Uuid: Ord,
+  {
+    let mut tx = self.inner.transaction().await?;
+    tx.insert(key, value).await?;
+    tx.commit().await
+  }
+
+  async fn remove<'a, Q>(&'a mut self, key: Q) -> BTreeResult<Option<AutoCommit>>
+  where
+    Uuid: Ord,
+    Q: core::borrow::Borrow<Uuid> + MaybeSend + 'a,
+  {
+    let mut tx = self.inner.transaction().await?;
+    let value = tx.remove(key).await?;
+    tx.commit().await?;
+    Ok(value)
+  }
+}
+
+impl<B> BTree<Uuid, AutoCommit> for AutomergeBTree<B>
+where
+  B: BTree<Uuid, AutoCommit>,
 {
   type Transaction = AutomergeBTreeTransaction<B::Transaction>;
 
-  async fn create<D>(definition: &D) -> BTreeResult<Self>
-  where
-    Self: Sized,
-    D: db_engine::BTreeDefinition<Key = K, Value = V>,
-  {
-    todo!()
-  }
-
   async fn transaction(&self) -> BTreeResult<Self::Transaction> {
-    todo!()
+    let tx = self.inner.transaction().await?;
+    Ok(AutomergeBTreeTransaction::new(tx))
   }
 }

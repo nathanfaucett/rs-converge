@@ -10,12 +10,12 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use async_lock::RwLock;
 use async_stream::stream;
-use core::{any::Any, borrow::Borrow, mem::take, ops::RangeBounds};
+use core::{borrow::Borrow, mem::take, ops::RangeBounds};
 use futures::Stream;
 
 use crate::{
-  BTree, BTreeDefinition, BTreeError, BTreeManager, BTreeReadExecutor, BTreeResult,
-  BTreeTransaction, BTreeWriteExecutor, MaybeSend, MaybeSync,
+  BTree, BTreeDefinition, BTreeReadExecutor, BTreeResult, BTreeTransaction, BTreeWriteExecutor,
+  MaybeSend, btree::BTreeFactory,
 };
 
 use crate::btree::{BTreeKey, BTreeValue};
@@ -361,14 +361,6 @@ where
 {
   type Transaction = InMemoryBTreeTransaction<K, V>;
 
-  async fn create<D>(_: &D) -> BTreeResult<Self>
-  where
-    Self: Sized,
-    D: BTreeDefinition<Key = K, Value = V>,
-  {
-    Ok(Self::new())
-  }
-
   async fn transaction(&self) -> BTreeResult<Self::Transaction> {
     let inner = self.inner.clone();
     Ok(InMemoryBTreeTransaction {
@@ -378,71 +370,27 @@ where
   }
 }
 
-trait InMemoryBTreeManagerValue: Any + MaybeSend + MaybeSync + 'static {}
+#[derive(Default, Clone, Copy)]
+pub struct InMemoryBTreeFactory;
 
-impl<T> InMemoryBTreeManagerValue for T where T: Any + MaybeSend + MaybeSync + 'static {}
-
-pub struct InMemoryBTreeManager {
-  inner: Arc<RwLock<BTreeMap<String, Box<dyn InMemoryBTreeManagerValue>>>>,
-}
-
-impl InMemoryBTreeManager {
+impl InMemoryBTreeFactory {
   pub fn new() -> Self {
-    Self {
-      inner: Arc::new(RwLock::new(BTreeMap::new())),
-    }
+    Self
   }
 }
 
-impl Default for InMemoryBTreeManager {
-  fn default() -> Self {
-    Self::new()
-  }
-}
-
-impl BTreeManager for InMemoryBTreeManager {
+impl BTreeFactory for InMemoryBTreeFactory {
   type BTree<K, V>
     = InMemoryBTree<K, V>
   where
     K: BTreeKey,
     V: BTreeValue;
 
-  async fn entry<D>(&self, definition: &D) -> BTreeResult<Self::BTree<D::Key, D::Value>>
+  async fn create<D>(&self, _definition: &D) -> BTreeResult<Self::BTree<D::Key, D::Value>>
   where
     D: BTreeDefinition,
-    <D as BTreeDefinition>::Key: BTreeKey,
-    <D as BTreeDefinition>::Value: BTreeValue,
   {
-    if let Some(btree_box) = self.inner.read().await.get(definition.id()) {
-      let btree_any = btree_box.as_ref() as &dyn Any;
-
-      if let Some(typed) = btree_any.downcast_ref::<InMemoryBTree<D::Key, D::Value>>() {
-        Ok(typed.clone())
-      } else {
-        Err(BTreeError::TypeMismatch)
-      }
-    } else {
-      let btree = InMemoryBTree::<D::Key, D::Value>::new();
-      let btree_any: Box<dyn InMemoryBTreeManagerValue> = Box::new(btree.clone());
-
-      self
-        .inner
-        .write()
-        .await
-        .insert(definition.id().to_string(), btree_any);
-
-      Ok(btree)
-    }
-  }
-
-  async fn remove<D>(&self, definition: &D) -> BTreeResult<()>
-  where
-    D: BTreeDefinition,
-    <D as BTreeDefinition>::Key: BTreeKey,
-    <D as BTreeDefinition>::Value: BTreeValue,
-  {
-    self.inner.write().await.remove(definition.id());
-    Ok(())
+    Ok(InMemoryBTree::new())
   }
 }
 

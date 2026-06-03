@@ -35,7 +35,7 @@ fn transaction_commit_and_rollback() {
       Box::leak("aicacia_btree_tx_commit".to_string().into_boxed_str());
     let table_def = TableDefinition::<&'static [u8], &'static [u8]>::new(static_name);
 
-    let mut store = RedbBTree::<i32, i32>::new(arc_db.clone(), "test-commit", table_def.clone());
+    let mut store = RedbBTree::<i32, i32>::new(arc_db.clone(), "test-commit", table_def);
 
     store
       .insert(1, 100)
@@ -66,7 +66,7 @@ fn transaction_range_merges_pending_changes() {
       Box::leak("aicacia_btree_range_tx".to_string().into_boxed_str());
     let table_def = TableDefinition::<&'static [u8], &'static [u8]>::new(static_name);
 
-    let mut store = RedbBTree::<i32, i32>::new(arc_db.clone(), "test-range", table_def.clone());
+    let mut store = RedbBTree::<i32, i32>::new(arc_db.clone(), "test-range", table_def);
 
     store
       .insert(1, 100)
@@ -107,7 +107,7 @@ fn transaction_get_honors_pending_delete() {
     let static_name: &'static str = Box::leak("aicacia_btree_get_tx".to_string().into_boxed_str());
     let table_def = TableDefinition::<&'static [u8], &'static [u8]>::new(static_name);
 
-    let mut store = RedbBTree::<i32, i32>::new(arc_db.clone(), "test-get", table_def.clone());
+    let mut store = RedbBTree::<i32, i32>::new(arc_db.clone(), "test-get", table_def);
 
     store
       .insert(1, 100)
@@ -134,7 +134,7 @@ fn transaction_rollback_discards_changes() {
       Box::leak("aicacia_btree_rollback_tx".to_string().into_boxed_str());
     let table_def = TableDefinition::<&'static [u8], &'static [u8]>::new(static_name);
 
-    let mut store = RedbBTree::<i32, i32>::new(arc_db.clone(), "test-rollback", table_def.clone());
+    let mut store = RedbBTree::<i32, i32>::new(arc_db.clone(), "test-rollback", table_def);
 
     store
       .insert(1, 100)
@@ -169,8 +169,7 @@ fn transaction_remove_pending_insert_returns_old_value() {
     );
     let table_def = TableDefinition::<&'static [u8], &'static [u8]>::new(static_name);
 
-    let mut store =
-      RedbBTree::<i32, i32>::new(arc_db.clone(), "test-remove-pending", table_def.clone());
+    let store = RedbBTree::<i32, i32>::new(arc_db.clone(), "test-remove-pending", table_def);
 
     let mut tx = store.transaction().await.expect("start tx");
     tx.insert(1, 100).await.expect("insert in tx");

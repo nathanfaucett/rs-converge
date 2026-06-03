@@ -80,7 +80,7 @@ pub fn decode_table_field_row(row: &Row) -> Option<TableFieldRow> {
   let table_name = row.first()?.as_text()?.to_owned();
   let column_index = row.get(1)?.as_integer()? as ColumnIndex;
   let column_name = row.get(2)?.as_text()?.to_owned();
-  let value_type = row.get(3)?.as_type()?.clone();
+  let value_type = *row.get(3)?.as_type()?;
   let primary_key = row.get(4)?.as_bool()?;
 
   Some(TableFieldRow {

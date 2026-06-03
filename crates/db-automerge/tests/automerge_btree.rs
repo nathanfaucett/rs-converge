@@ -17,14 +17,14 @@ fn insert_and_get_latest() {
   let _ = fs::remove_file(tmp_path("basic"));
 
   let underlying = InMemoryBTree::<DocumentChangeKey, Vec<u8>>::new();
-  let mut store = AutomergeBTree::new(underlying);
+  let mut store = AutomergeBTree::new_automerge(underlying);
 
   let doc_id = Uuid::new_v4();
   let doc = AutoCommit::new();
   let mut expected = doc.clone();
 
   block_on(store.insert(doc_id, doc)).expect("insert");
-  let mut got = block_on(store.get(&doc_id)).expect("get").expect("missing");
+  let mut got: AutoCommit = block_on(store.get(&doc_id)).expect("get").expect("missing");
   let expected_bytes = expected.save();
   let got_bytes = got.save();
   assert_eq!(got_bytes, expected_bytes);
@@ -51,8 +51,8 @@ fn range_ordering() {
   let end = &Uuid::from_u128(u128::MAX);
 
   let s = store.range(start..=end);
-  let items = block_on(async move {
-    let mut collected = Vec::new();
+  let items: Vec<(Uuid, AutoCommit)> = block_on(async move {
+    let mut collected: Vec<(Uuid, AutoCommit)> = Vec::new();
     futures::pin_mut!(s);
     while let Some(item) = s.next().await {
       let (k, v) = item.expect("range failed");
@@ -123,7 +123,7 @@ fn compaction_with_concurrent_writer() {
     }
 
     let final_store = AutomergeBTree::new_automerge(underlying.clone());
-    let mut final_doc = final_store
+    let mut final_doc: AutoCommit = final_store
       .get(&doc_id)
       .await
       .expect("get final")
@@ -156,7 +156,7 @@ fn encoded_remove_only_deletes_target_document() {
     store.insert(doc_a, first.clone()).await.expect("insert a");
     store.insert(doc_b, second.clone()).await.expect("insert b");
 
-    let mut removed = store
+    let mut removed: AutoCommit = store
       .remove(&doc_a)
       .await
       .expect("remove a")
@@ -164,7 +164,7 @@ fn encoded_remove_only_deletes_target_document() {
     assert_eq!(removed.save(), first.save());
 
     assert!(store.get(&doc_a).await.expect("get removed").is_none());
-    let mut remaining = store
+    let mut remaining: AutoCommit = store
       .get(&doc_b)
       .await
       .expect("get remaining")

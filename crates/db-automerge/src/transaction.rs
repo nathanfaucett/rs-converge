@@ -3,8 +3,8 @@ use alloc::vec::Vec;
 use async_stream::stream;
 use core::{borrow::Borrow, ops::RangeBounds};
 use db_engine::{
-  BTree, BTreeError, BTreeKey, BTreeReadExecutor, BTreeResult, BTreeTransaction, BTreeValue,
-  BTreeWriteExecutor, MaybeSend, MaybeSendStream,
+  BTreeError, BTreeReadExecutor, BTreeResult, BTreeTransaction, BTreeWriteExecutor, MaybeSend,
+  MaybeSendStream,
 };
 use futures::{Stream, StreamExt, pin_mut};
 use uuid::Uuid;
@@ -17,7 +17,7 @@ use crate::{
   reconstruction::{reconstruct_state, uuid_in_range},
 };
 
-pub(crate) struct AutomergeBTreeTransactionInner<T> {
+pub struct AutomergeBTreeTransactionInner<T> {
   inner_tx: T,
   pending: BTreeMap<Uuid, Option<AutoCommit>>,
 }
@@ -313,62 +313,59 @@ impl<T> AutomergeBTreeTransaction<T> {
   }
 }
 
-impl<T, K, V> BTreeReadExecutor<K, V> for AutomergeBTreeTransaction<T>
+impl<T> BTreeReadExecutor<Uuid, AutoCommit> for AutomergeBTreeTransaction<T>
 where
-  T: BTree<Uuid, AutoCommit>,
-  K: BTreeKey,
-  V: BTreeValue,
+  T: BTreeTransaction<Uuid, AutoCommit>,
 {
-  async fn get<'a, Q>(&'a self, key: Q) -> BTreeResult<Option<V>>
+  async fn get<'a, Q>(&'a self, key: Q) -> BTreeResult<Option<AutoCommit>>
   where
-    Q: Borrow<K> + MaybeSend + 'a,
+    Q: Borrow<Uuid> + MaybeSend + 'a,
   {
-    todo!()
+    self.0.get(key).await
   }
 
-  fn range<'a, R>(&'a self, range: R) -> impl MaybeSendStream<Item = BTreeResult<(K, V)>> + 'a
+  fn range<'a, R>(
+    &'a self,
+    range: R,
+  ) -> impl MaybeSendStream<Item = BTreeResult<(Uuid, AutoCommit)>> + 'a
   where
-    R: RangeBounds<K> + MaybeSend + 'a,
+    R: RangeBounds<Uuid> + MaybeSend + 'a,
   {
-    todo!()
+    self.0.range(range)
   }
 }
 
-impl<T, K, V> BTreeWriteExecutor<K, V> for AutomergeBTreeTransaction<T>
+impl<T> BTreeWriteExecutor<Uuid, AutoCommit> for AutomergeBTreeTransaction<T>
 where
-  T: BTree<Uuid, AutoCommit>,
-  K: BTreeKey,
-  V: BTreeValue,
+  T: BTreeTransaction<Uuid, AutoCommit>,
 {
-  async fn insert<'a>(&'a mut self, key: K, value: V) -> BTreeResult<()> {
-    todo!()
+  async fn insert<'a>(&'a mut self, key: Uuid, value: AutoCommit) -> BTreeResult<()> {
+    self.0.insert(key, value).await
   }
 
-  async fn remove<'a, Q>(&'a mut self, key: Q) -> BTreeResult<Option<V>>
+  async fn remove<'a, Q>(&'a mut self, key: Q) -> BTreeResult<Option<AutoCommit>>
   where
-    Q: Borrow<K> + MaybeSend + 'a,
+    Q: Borrow<Uuid> + MaybeSend + 'a,
   {
-    todo!()
+    self.0.remove(key).await
   }
 }
 
-impl<T, K, V> BTreeTransaction<K, V> for AutomergeBTreeTransaction<T>
+impl<T> BTreeTransaction<Uuid, AutoCommit> for AutomergeBTreeTransaction<T>
 where
-  T: BTree<Uuid, AutoCommit>,
-  K: BTreeKey,
-  V: BTreeValue,
+  T: BTreeTransaction<Uuid, AutoCommit>,
 {
   async fn commit(self) -> BTreeResult<()>
   where
     Self: Sized,
   {
-    todo!()
+    self.0.commit().await
   }
 
   async fn rollback(self) -> BTreeResult<()>
   where
     Self: Sized,
   {
-    todo!()
+    self.0.rollback().await
   }
 }

@@ -9,6 +9,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug)]
 pub struct AutoCommit(automerge::AutoCommit);
 
+impl Default for AutoCommit {
+  fn default() -> Self {
+    Self::new()
+  }
+}
+
 impl AutoCommit {
   pub fn load(bytes: &[u8]) -> Result<Self, automerge::AutomergeError> {
     automerge::AutoCommit::load(bytes).map(AutoCommit)

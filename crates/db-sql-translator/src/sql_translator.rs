@@ -154,25 +154,26 @@ fn parse_placeholder(expr: &SQLExpr) -> Result<Option<ParsedPlaceholder>, Transl
     return Ok(Some(ParsedPlaceholder::Positional));
   }
 
-  if let Some(digits) = token.strip_prefix('$') {
-    if !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()) {
-      let idx1 = digits
-        .parse::<usize>()
-        .map_err(|e| TranslateError::Custom(format!("invalid parameter index: {}", e)))?;
-      if idx1 == 0 {
-        return Err(TranslateError::Custom(
-          "parameter index must be >= 1".into(),
-        ));
-      }
-
-      return Ok(Some(ParsedPlaceholder::Indexed(idx1 - 1)));
+  if let Some(digits) = token.strip_prefix('$')
+    && !digits.is_empty()
+    && digits.chars().all(|c| c.is_ascii_digit())
+  {
+    let idx1 = digits
+      .parse::<usize>()
+      .map_err(|e| TranslateError::Custom(format!("invalid parameter index: {}", e)))?;
+    if idx1 == 0 {
+      return Err(TranslateError::Custom(
+        "parameter index must be >= 1".into(),
+      ));
     }
+
+    return Ok(Some(ParsedPlaceholder::Indexed(idx1 - 1)));
   }
 
-  if let Some(name) = token.strip_prefix(':') {
-    if is_valid_named_param(name) {
-      return Ok(Some(ParsedPlaceholder::Named(name.to_string())));
-    }
+  if let Some(name) = token.strip_prefix(':')
+    && is_valid_named_param(name)
+  {
+    return Ok(Some(ParsedPlaceholder::Named(name.to_string())));
   }
 
   Ok(None)
@@ -405,7 +406,7 @@ fn find_column_index(
   col_name: &str,
 ) -> Result<usize, TranslateError> {
   for (i, col) in table_schema.columns.iter().enumerate() {
-    if &col.name == col_name {
+    if col.name == col_name {
       return Ok(i);
     }
   }
@@ -880,13 +881,13 @@ where
             } else {
               (None, parts[0].to_string())
             };
-            if let Some(q) = qual {
-              if q != table_name {
-                return Err(TranslateError::Custom(format!(
-                  "qualified column refers to unknown table: {}",
-                  q
-                )));
-              }
+            if let Some(q) = qual
+              && q != table_name
+            {
+              return Err(TranslateError::Custom(format!(
+                "qualified column refers to unknown table: {}",
+                q
+              )));
             }
             let idx = find_column_index(&table_schema, &col_name)?;
             let table_entries = vec![TableEntry {
