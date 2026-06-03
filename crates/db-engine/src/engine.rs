@@ -13,7 +13,7 @@ use thiserror::Error;
 
 use crate::{
   BTree, BTreeDefinition, BTreeError, BTreeManager, BTreeReadExecutor, BTreeTransaction,
-  BTreeWriteExecutor, DescribeSchema, IndexSchema, QueryParams, QueryResult, Row, Statement,
+  BTreeWriteExecutor, DescribeSchema, IndexSchema, QueryParams, QueryResult, Statement,
   TableSchema, TranslateError, Translator, Value,
   btree::BTreeFactory,
   catalog::{
@@ -63,7 +63,7 @@ impl From<&str> for EngineBTreeDefinition {
 
 impl BTreeDefinition for EngineBTreeDefinition {
   type Key = Vec<Value>;
-  type Value = Row;
+  type Value = Vec<Value>;
 
   fn id(&self) -> &str {
     &self.table_name

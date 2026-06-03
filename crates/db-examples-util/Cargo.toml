@@ -16,6 +16,7 @@ name = "db_examples_util"
 uuid = { version = "1.23", features = ["v7"] }
 db-engine = { path = "../db-engine", default-features = true }
 db-sql-translator = { path = "../db-sql-translator", default-features = true }
+rustyline = { version = "18.0" }
 
 [build-dependencies]
 
