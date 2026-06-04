@@ -9,7 +9,6 @@ use db_engine::{
   BTreeError, BTreeKey, BTreeReadExecutor, BTreeResult, BTreeTransaction, BTreeValue,
   BTreeWriteExecutor, MaybeSend,
 };
-use postcard::{from_bytes, to_stdvec};
 use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 
 #[derive(Debug, Clone)]
@@ -109,15 +108,14 @@ where
       let mut table = wt.open_table(table_def).map_err(BTreeError::other)?;
 
       for (k, entry) in patch_map {
-        let key_bin = to_stdvec(&k)
-          .map_err(|e| BTreeError::Custom(format!("postcard key ser error: {}", e)))?;
+        let key_bin = k.encode()?;
         let mut full_key = id.as_bytes().to_vec();
         full_key.push(0u8);
         full_key.extend_from_slice(&key_bin);
 
         match entry {
           TransactionPatchEntry::Present(v) => {
-            let val_bin = crate::encode_value(&v)?;
+            let val_bin = v.encode()?;
             table
               .insert(full_key.as_slice(), val_bin.as_slice())
               .map_err(BTreeError::other)?;
@@ -170,8 +168,7 @@ where
     }
 
     // Fallback to persistent storage
-    let key_bin = to_stdvec(key.borrow())
-      .map_err(|e| BTreeError::Custom(format!("postcard key ser error: {}", e)))?;
+    let key_bin = key.borrow().encode()?;
     let rt = self.db.begin_read().map_err(BTreeError::other)?;
     let table = match rt.open_table(self.table_def) {
       Ok(table) => table,
@@ -183,7 +180,7 @@ where
     full_key.extend_from_slice(&key_bin);
 
     match table.get(full_key.as_slice()).map_err(BTreeError::other)? {
-      Some(val) => Ok(Some(crate::decode_value(val.value())?)),
+      Some(val) => Ok(Some(V::decode(val.value())?)),
       None => Ok(None),
     }
   }
@@ -251,7 +248,7 @@ where
           continue;
         }
         let user_key_bytes = &key_bytes[prefix.len()..];
-        let k: K = from_bytes(user_key_bytes).map_err(|e| BTreeError::Custom(format!("postcard key de error: {}", e)))?;
+        let k: K = K::decode(user_key_bytes)?;
 
         // Range check
         let mut in_range = true;
@@ -273,7 +270,7 @@ where
           Some(TransactionPatchEntry::Deleted) => continue,
           Some(TransactionPatchEntry::Present(_)) => continue,
           None => {
-            let v: V = crate::decode_value(val)?;
+            let v: V = V::decode(val)?;
             merged.insert(k, v);
           }
         }
@@ -353,8 +350,7 @@ where
       }
 
       // Not in patch; read from DB to find previous value (if any) and record deletion in patch
-      let key_bin = to_stdvec(&key_owned)
-        .map_err(|e| BTreeError::Custom(format!("postcard key ser error: {}", e)))?;
+      let key_bin = key_owned.encode()?;
       let rt = self.db.begin_read().map_err(BTreeError::other)?;
       let table = match rt.open_table(self.table_def) {
         Ok(table) => table,
@@ -370,7 +366,7 @@ where
 
       let prev = match table.get(full_key.as_slice()).map_err(BTreeError::other)? {
         Some(removed_guard) => {
-          let v = crate::decode_value::<V>(removed_guard.value())?;
+          let v = V::decode(removed_guard.value())?;
           Some(v)
         }
         None => None,

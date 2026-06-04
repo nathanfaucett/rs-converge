@@ -3,6 +3,7 @@ use alloc::{boxed::Box, string::String};
 use core::{borrow::Borrow, error::Error, ops::RangeBounds};
 use std::any::Any;
 
+use postcard::{from_bytes, to_stdvec};
 use thiserror::Error;
 
 use crate::{MaybeSend, MaybeSendFuture, MaybeSendStream, MaybeSync};
@@ -46,21 +47,38 @@ impl BTreeError {
   }
 }
 
-pub trait BTreeKey:
-  Ord + MaybeSend + MaybeSync + Clone + Serialize + DeserializeOwned + 'static
-{
-}
-impl<T> BTreeKey for T where
-  T: Ord + MaybeSend + MaybeSync + Clone + Serialize + DeserializeOwned + 'static
-{
-}
-
 pub trait BTreeValue:
   MaybeSend + MaybeSync + Clone + Serialize + DeserializeOwned + 'static
 {
+  fn encode(&self) -> BTreeResult<Vec<u8>>;
+
+  fn decode(bytes: &[u8]) -> BTreeResult<Self>
+  where
+    Self: Sized;
 }
-impl<T> BTreeValue for T where
-  T: MaybeSend + MaybeSync + Clone + Serialize + DeserializeOwned + 'static
+
+impl<T> BTreeValue for T
+where
+  T: MaybeSend + MaybeSync + Clone + Serialize + DeserializeOwned + 'static,
+{
+  fn encode(&self) -> BTreeResult<Vec<u8>> {
+    to_stdvec(self).map_err(|e| BTreeError::Custom(format!("postcard value ser error: {}", e)))
+  }
+
+  fn decode(bytes: &[u8]) -> BTreeResult<Self>
+  where
+    Self: Sized,
+  {
+    from_bytes(bytes).map_err(|e| BTreeError::Custom(format!("postcard value de error: {}", e)))
+  }
+}
+
+pub trait BTreeKey:
+  BTreeValue + Ord + MaybeSend + MaybeSync + Clone + Serialize + DeserializeOwned + 'static
+{
+}
+impl<T> BTreeKey for T where
+  T: BTreeValue + Ord + MaybeSend + MaybeSync + Clone + Serialize + DeserializeOwned + 'static
 {
 }
 

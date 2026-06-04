@@ -9,7 +9,6 @@ use db_engine::{
 };
 
 use crate::transaction::RedbTransaction;
-use postcard::{from_bytes, to_stdvec};
 use redb::{ReadTransaction, ReadableDatabase, ReadableTable, TableDefinition};
 
 fn is_table_missing(error: &redb::TableError) -> bool {
@@ -60,8 +59,7 @@ where
     Q: Borrow<K> + MaybeSend + 'a,
   {
     let key_ref = key.borrow();
-    let key_bin = to_stdvec(key_ref)
-      .map_err(|e| db_engine::BTreeError::Custom(format!("postcard key ser error: {}", e)))?;
+    let key_bin = key_ref.encode()?;
 
     let rt: ReadTransaction = self.db.begin_read().map_err(db_engine::BTreeError::other)?;
     let table = match rt.open_table(self.table_def) {
@@ -78,7 +76,7 @@ where
       .map_err(db_engine::BTreeError::other)?
     {
       Some(val_guard) => {
-        let v = crate::decode_value::<V>(val_guard.value())?;
+        let v = V::decode(val_guard.value())?;
         Ok(Some(v))
       }
       None => Ok(None),
@@ -119,8 +117,7 @@ where
           continue;
         }
         let user_key_bytes = &key_bytes[prefix.len()..];
-        let k: K = from_bytes(user_key_bytes)
-          .map_err(|e| db_engine::BTreeError::Custom(format!("postcard key de error: {}", e)))?;
+        let k: K = K::decode(user_key_bytes)?;
 
         let mut in_range = true;
         use core::ops::Bound;
@@ -137,7 +134,7 @@ where
 
         if !in_range { continue; }
 
-        let v: V = crate::decode_value(val)?;
+        let v: V = V::decode(val)?;
         yield Ok((k, v));
       }
     }
@@ -161,12 +158,11 @@ where
       .open_table(self.table_def)
       .map_err(db_engine::BTreeError::other)?;
 
-    let key_bin = to_stdvec(&key)
-      .map_err(|e| db_engine::BTreeError::Custom(format!("postcard key ser error: {}", e)))?;
+    let key_bin = key.encode()?;
     let mut full_key = self.id.as_bytes().to_vec();
     full_key.push(0u8);
     full_key.extend_from_slice(&key_bin);
-    let val_bin = crate::encode_value(&value)?;
+    let val_bin = value.encode()?;
 
     table
       .insert(full_key.as_slice(), val_bin.as_slice())
@@ -190,8 +186,7 @@ where
       .open_table(self.table_def)
       .map_err(db_engine::BTreeError::other)?;
 
-    let key_bin = to_stdvec(key.borrow())
-      .map_err(|e| db_engine::BTreeError::Custom(format!("postcard key ser error: {}", e)))?;
+    let key_bin = key.borrow().encode()?;
     let mut full_key = self.id.as_bytes().to_vec();
     full_key.push(0u8);
     full_key.extend_from_slice(&key_bin);
@@ -201,7 +196,7 @@ where
       .map_err(db_engine::BTreeError::other)?
     {
       Some(removed_guard) => {
-        let v = crate::decode_value::<V>(removed_guard.value())?;
+        let v = V::decode(removed_guard.value())?;
         Some(v)
       }
       None => None,

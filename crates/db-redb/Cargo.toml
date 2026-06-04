@@ -34,11 +34,7 @@ redb = { version = "4.1", default-features = false, features = ["uuid"] }
 # Concurrent map used by manager
 dashmap = { version = "6.2", default-features = false, features = [] }
 
-# Serialization (user requested postcard)
+# Serialization
 serde = { version = "1.0", default-features = false, features = ["std"] }
-postcard = { version = "1.1", default-features = false, features = [
-  "heapless-cas",
-  "use-std",
-] }
 
 [dev-dependencies]
