@@ -11,7 +11,7 @@ mod reconstruction;
 mod transaction;
 
 pub use automerge_serde::AutoCommit;
-pub use automerge_tree::AutomergeBTree;
+pub use automerge_tree::{AutomergeBTree, AutomergeBTreeInner};
 pub use compaction::{CompactionPolicy, ThresholdPolicy, hash_hashes, hash_heads, run_compaction};
 pub use document_change_key::DocumentChangeKey;
 pub use document_type::DocumentType;

@@ -4,6 +4,9 @@ use alloc::{
   sync::Arc,
   vec::Vec,
 };
+#[cfg(not(feature = "std"))]
+use core::marker::PhantomData;
+#[cfg(feature = "std")]
 use std::marker::PhantomData;
 #[cfg(feature = "std")]
 use std::sync::Arc;

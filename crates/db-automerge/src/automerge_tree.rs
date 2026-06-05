@@ -100,7 +100,6 @@ where
     key: Q,
   ) -> BTreeResult<(Option<AutoCommit>, bool)>
   where
-    Uuid: Ord,
     Q: core::borrow::Borrow<Uuid> + MaybeSend + 'a,
   {
     let doc_id = *key.borrow();
@@ -139,7 +138,6 @@ where
     key: Q,
   ) -> BTreeResult<Option<AutoCommit>>
   where
-    Uuid: Ord,
     Q: core::borrow::Borrow<Uuid> + MaybeSend + 'a,
   {
     let doc_id = *key.borrow();
@@ -166,7 +164,6 @@ where
 {
   async fn get<'a, Q>(&'a self, key: Q) -> BTreeResult<Option<AutoCommit>>
   where
-    Uuid: Ord,
     Q: core::borrow::Borrow<Uuid> + MaybeSend + 'a,
   {
     let mut tx = self.inner.transaction().await?;
@@ -179,7 +176,6 @@ where
 
   fn range<'a, R>(&'a self, range: R) -> impl Stream<Item = BTreeResult<(Uuid, AutoCommit)>> + 'a
   where
-    Uuid: Ord,
     R: core::ops::RangeBounds<Uuid> + MaybeSend + 'a,
   {
     stream! {
@@ -224,10 +220,7 @@ impl<B> BTreeWriteExecutor<Uuid, AutoCommit> for AutomergeBTreeInner<B>
 where
   B: BTree<DocumentChangeKey, Vec<u8>>,
 {
-  async fn insert<'a>(&'a mut self, key: Uuid, value: AutoCommit) -> BTreeResult<()>
-  where
-    Uuid: Ord,
-  {
+  async fn insert<'a>(&'a mut self, key: Uuid, value: AutoCommit) -> BTreeResult<()> {
     let mut tx = self.inner.transaction().await?;
     self.insert_with_tx(&mut tx, key, value).await?;
     tx.commit().await
@@ -235,7 +228,6 @@ where
 
   async fn remove<'a, Q>(&'a mut self, key: Q) -> BTreeResult<Option<AutoCommit>>
   where
-    Uuid: Ord,
     Q: core::borrow::Borrow<Uuid> + MaybeSend + 'a,
   {
     let mut tx = self.inner.transaction().await?;
@@ -313,9 +305,7 @@ where
   B: BTree<Uuid, AutoCommit>,
 {
   async fn insert<'a>(&'a mut self, key: Uuid, value: AutoCommit) -> BTreeResult<()>
-  where
-    Uuid: Ord,
-  {
+where {
     let mut tx = self.inner.transaction().await?;
     tx.insert(key, value).await?;
     tx.commit().await
@@ -323,7 +313,6 @@ where
 
   async fn remove<'a, Q>(&'a mut self, key: Q) -> BTreeResult<Option<AutoCommit>>
   where
-    Uuid: Ord,
     Q: core::borrow::Borrow<Uuid> + MaybeSend + 'a,
   {
     let mut tx = self.inner.transaction().await?;

@@ -38,3 +38,5 @@ db-engine = { path = "../db-engine", default-features = false, features = [
   "std",
   "in-memory",
 ] }
+db-redb = { path = "../db-redb", default-features = false, features = [] }
+redb = { version = "4.1", default-features = false, features = ["uuid"] }

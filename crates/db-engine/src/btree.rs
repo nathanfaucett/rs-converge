@@ -1,7 +1,15 @@
 #[cfg(not(feature = "std"))]
 use alloc::{boxed::Box, string::String};
+#[cfg(not(feature = "std"))]
+use core::any::Any;
 use core::{borrow::Borrow, error::Error, ops::RangeBounds};
+#[cfg(feature = "std")]
 use std::any::Any;
+
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+#[cfg(feature = "std")]
+use std::vec::Vec;
 
 use postcard::{from_bytes, to_stdvec};
 use thiserror::Error;

@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum DocumentType {
-  Incremental = 0,
-  Snapshot = 1,
+  Snapshot = 0,
+  Incremental = 1,
 }
 
 impl DocumentType {
