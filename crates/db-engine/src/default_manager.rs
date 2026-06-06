@@ -11,12 +11,10 @@ use std::{collections::BTreeMap, sync::Arc};
 use async_lock::RwLock;
 use core::any::Any;
 
-use crate::{
-  BTreeDefinition, BTreeError, BTreeManager, BTreeResult,
-  btree::{BTreeFactory, BTreeManagerAnyBTree},
+use db_btree::{
+  BTreeDefinition, BTreeError, BTreeFactory, BTreeKey, BTreeManager, BTreeManagerAnyBTree,
+  BTreeResult, BTreeValue,
 };
-
-use crate::btree::{BTreeKey, BTreeValue};
 
 pub struct DefaultBTreeManager<F> {
   // TODO: find a concurrent hashmap that not supports no_std envs
@@ -43,9 +41,9 @@ where
 }
 
 #[cfg(feature = "in-memory")]
-impl DefaultBTreeManager<crate::InMemoryBTreeFactory> {
+impl DefaultBTreeManager<db_btree::InMemoryBTreeFactory> {
   pub fn with_in_memory_factory() -> Self {
-    Self::new(crate::InMemoryBTreeFactory::new())
+    Self::new(db_btree::InMemoryBTreeFactory::new())
   }
 }
 
@@ -94,17 +92,16 @@ where
 
 #[cfg(all(test, feature = "in-memory"))]
 mod tests {
+  #[cfg(not(feature = "std"))]
+  use alloc::string::{String, ToString};
 
   use futures::executor::block_on;
 
-  use crate::btree::{
-    BTree, BTreeManager, BTreeReadExecutor, BTreeTransaction, BTreeWriteExecutor,
+  use db_btree::{
+    BTree, BTreeDefinition, BTreeManager, BTreeReadExecutor, BTreeTransaction, BTreeWriteExecutor,
   };
-  use crate::{BTreeDefinition, DefaultBTreeManager};
-  #[cfg(not(feature = "std"))]
-  use alloc::string::{String, ToString};
-  #[cfg(feature = "std")]
-  use std::string::{String, ToString};
+
+  use super::DefaultBTreeManager;
 
   #[derive(Clone)]
   struct TestDefinition(String);

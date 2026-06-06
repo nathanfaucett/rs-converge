@@ -376,6 +376,8 @@ dependencies = [
  "async-stream",
  "automerge 0.9.0",
  "base64",
+ "db-btree",
+ "db-core",
  "db-engine",
  "db-redb",
  "futures",
@@ -386,14 +388,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "db-btree"
+version = "0.1.0"
+dependencies = [
+ "async-lock",
+ "async-stream",
+ "db-core",
+ "futures",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "db-core"
+version = "0.1.0"
+dependencies = [
+ "futures",
+]
+
+[[package]]
 name = "db-engine"
 version = "0.1.0"
 dependencies = [
  "async-lock",
  "async-stream",
- "async-trait",
  "automerge 0.10.0",
  "autosurgeon",
+ "db-btree",
+ "db-core",
+ "db-query",
+ "db-schema",
+ "db-value",
  "futures",
  "hashbrown 0.17.0",
  "postcard",
@@ -410,10 +434,28 @@ dependencies = [
 name = "db-examples-util"
 version = "0.1.0"
 dependencies = [
+ "db-btree",
  "db-engine",
+ "db-query",
  "db-sql-translator",
+ "db-value",
  "rustyline",
  "uuid",
+]
+
+[[package]]
+name = "db-query"
+version = "0.1.0"
+dependencies = [
+ "db-core",
+ "db-schema",
+ "db-value",
+ "serde",
+ "serde-wasm-bindgen",
+ "thiserror 2.0.18",
+ "tsify",
+ "uuid",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -423,6 +465,8 @@ dependencies = [
  "async-lock",
  "async-stream",
  "dashmap",
+ "db-btree",
+ "db-core",
  "db-engine",
  "futures",
  "redb",
@@ -430,11 +474,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "db-schema"
+version = "0.1.0"
+dependencies = [
+ "db-core",
+ "db-value",
+ "serde",
+ "serde-wasm-bindgen",
+ "tsify",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "db-sql-translator"
 version = "0.1.0"
 dependencies = [
- "async-trait",
- "db-engine",
+ "db-core",
+ "db-query",
+ "db-schema",
+ "db-value",
  "futures",
  "hashbrown 0.17.0",
  "serde",
@@ -442,6 +500,20 @@ dependencies = [
  "serde_json",
  "sqlparser",
  "thiserror 2.0.18",
+ "tsify",
+ "uuid",
+ "wasm-bindgen",
+]
+
+[[package]]
+name = "db-value"
+version = "0.1.0"
+dependencies = [
+ "automerge 0.10.0",
+ "autosurgeon",
+ "serde",
+ "serde-wasm-bindgen",
+ "serde_json",
  "tsify",
  "uuid",
  "wasm-bindgen",

@@ -2,12 +2,12 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use async_stream::stream;
 use core::{borrow::Borrow, ops::RangeBounds};
-use db_engine::{
-  BTreeError, BTreeReadExecutor, BTreeResult, BTreeTransaction, BTreeWriteExecutor, MaybeSend,
-  MaybeSendStream,
-};
+
 use futures::{Stream, StreamExt, pin_mut};
 use uuid::Uuid;
+
+use db_btree::{BTreeError, BTreeReadExecutor, BTreeResult, BTreeTransaction, BTreeWriteExecutor};
+use db_core::{MaybeSend, MaybeSendStream};
 
 use crate::{
   DocumentChangeKey,
@@ -105,7 +105,7 @@ where
         let existing_state = Self::load_existing_state(inner_tx, doc_id).await?;
 
         if let Some((entry_key, entry_bytes)) =
-          build_lifecycle_write(doc_id, snapshot_doc, existing_state).map_err(BTreeError::other)?
+          build_lifecycle_write(doc_id, snapshot_doc, existing_state).map_err(BTreeError::custom)?
         {
           inner_tx.insert(entry_key, entry_bytes).await?;
         }

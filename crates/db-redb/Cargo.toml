@@ -15,10 +15,13 @@ name = "db_redb"
 default = []
 
 [dependencies]
-# Engine traits
+# internal dependencies
 db-engine = { path = "../db-engine", default-features = false, features = [
   "std",
 ] }
+db-btree = { path = "../db-btree", default-features = false, features = ["std"] }
+db-core = { path = "../db-core", default-features = false, features = ["std"] }
+
 
 # Concurrency / streams
 async-stream = { version = "0.3", default-features = false, features = [] }

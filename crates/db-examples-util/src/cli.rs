@@ -1,4 +1,6 @@
-use db_engine::{BTreeFactory, BTreeManager, Engine, Translator};
+use db_btree::{BTreeFactory, BTreeManager};
+use db_engine::Engine;
+use db_query::Translator;
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 

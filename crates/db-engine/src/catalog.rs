@@ -1,7 +1,8 @@
 #[cfg(not(feature = "std"))]
 use alloc::{borrow::ToOwned, string::String, vec::Vec};
 
-use crate::{ColumnIndex, ColumnSchema, IndexSchema, Row, TableSchema, Value, ValueType};
+use db_schema::{ColumnSchema, ColumnSchemaIndex, IndexSchema, TableSchema};
+use db_value::{Row, Value, ValueType};
 
 pub const ENGINE_TABLES: &str = "tables";
 pub const ENGINE_INDICES: &str = "indices";
@@ -11,7 +12,7 @@ pub const ENGINE_INDEX_FIELDS: &str = "index_fields";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableFieldRow {
   pub table_name: String,
-  pub column_index: ColumnIndex,
+  pub column_index: ColumnSchemaIndex,
   pub column_name: String,
   pub value_type: ValueType,
   pub primary_key: bool,
@@ -24,11 +25,13 @@ pub struct IndexRow {
   pub unique: bool,
 }
 
+pub type FieldOrder = ColumnSchemaIndex;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexFieldRow {
   pub index_name: String,
-  pub field_order: u8,
-  pub column_index: ColumnIndex,
+  pub field_order: FieldOrder,
+  pub column_index: ColumnSchemaIndex,
 }
 
 pub fn table_key(table_name: &str) -> Vec<Value> {
@@ -39,14 +42,14 @@ pub fn index_key(index_name: &str) -> Vec<Value> {
   vec![Value::Text(index_name.to_owned())]
 }
 
-pub fn table_field_key(table_name: &str, column_index: u8) -> Vec<Value> {
+pub fn table_field_key(table_name: &str, column_index: ColumnSchemaIndex) -> Vec<Value> {
   vec![
     Value::Text(table_name.to_owned()),
     Value::Integer(i64::from(column_index)),
   ]
 }
 
-pub fn index_field_key(index_name: &str, field_order: u8) -> Vec<Value> {
+pub fn index_field_key(index_name: &str, field_order: FieldOrder) -> Vec<Value> {
   vec![
     Value::Text(index_name.to_owned()),
     Value::Integer(i64::from(field_order)),
@@ -78,7 +81,7 @@ pub fn encode_table_field_row(table_name: &str, field: &TableFieldRow) -> Row {
 
 pub fn decode_table_field_row(row: &Row) -> Option<TableFieldRow> {
   let table_name = row.first()?.as_text()?.to_owned();
-  let column_index = row.get(1)?.as_integer()? as ColumnIndex;
+  let column_index = row.get(1)?.as_integer()? as ColumnSchemaIndex;
   let column_name = row.get(2)?.as_text()?.to_owned();
   let value_type = *row.get(3)?.as_type()?;
   let primary_key = row.get(4)?.as_bool()?;
@@ -122,8 +125,8 @@ pub fn encode_index_field_row(index_name: &str, field: &IndexFieldRow) -> Row {
 
 pub fn decode_index_field_row(row: &Row) -> Option<IndexFieldRow> {
   let index_name = row.first()?.as_text()?.to_owned();
-  let field_order = row.get(1)?.as_integer()? as ColumnIndex;
-  let column_index = row.get(2)?.as_integer()? as ColumnIndex;
+  let field_order = row.get(1)?.as_integer()? as FieldOrder;
+  let column_index = row.get(2)?.as_integer()? as ColumnSchemaIndex;
 
   Some(IndexFieldRow {
     index_name,
@@ -144,7 +147,7 @@ pub fn table_schema_from_rows(table_name: &str, rows: &[TableFieldRow]) -> Table
     })
     .collect();
 
-  let primary_key_index = sorted_rows
+  let primary_key = sorted_rows
     .iter()
     .filter(|row| row.primary_key)
     .map(|row| row.column_index)
@@ -153,12 +156,13 @@ pub fn table_schema_from_rows(table_name: &str, rows: &[TableFieldRow]) -> Table
   TableSchema {
     name: table_name.to_owned(),
     columns,
-    primary_key_index,
+    primary_key,
   }
 }
 
 pub fn index_schema_from_rows(index: IndexRow, rows: &[IndexFieldRow]) -> IndexSchema {
   let mut sorted_rows = rows.to_vec();
+
   sorted_rows.sort_by_key(|row| row.field_order);
 
   let column_indices = sorted_rows.iter().map(|row| row.column_index).collect();

@@ -13,11 +13,15 @@ path = "src/lib.rs"
 name = "db_automerge"
 
 [features]
-std = []
+std = ["db-btree/std", "db-core/std", "async-lock/std", "futures/std", "uuid/std", "serde/std", "base64/std"]
 wasm = ["automerge/wasm"]
-default = []
+default = ["std"]
 
 [dependencies]
+# internal dependencies
+db-btree = { path = "../db-btree", default-features = false, features = [] }
+db-core = { path = "../db-core", default-features = false, features = [] }
+
 async-stream = { version = "0.3", default-features = false, features = [] }
 futures = { version = "0.3", default-features = false, features = [
   "std",

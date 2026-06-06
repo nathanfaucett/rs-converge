@@ -2,6 +2,7 @@
 use alloc::collections::BTreeMap;
 #[cfg(not(feature = "std"))]
 use alloc::sync::Arc;
+use db_core::MaybeSend;
 #[cfg(feature = "std")]
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -11,11 +12,9 @@ use core::{borrow::Borrow, mem::take, ops::RangeBounds};
 use futures::Stream;
 
 use crate::{
-  BTree, BTreeDefinition, BTreeReadExecutor, BTreeResult, BTreeTransaction, BTreeWriteExecutor,
-  MaybeSend, btree::BTreeFactory,
+  BTree, BTreeDefinition, BTreeFactory, BTreeKey, BTreeReadExecutor, BTreeResult, BTreeTransaction,
+  BTreeValue, BTreeWriteExecutor,
 };
-
-use crate::btree::{BTreeKey, BTreeValue};
 
 #[derive(Debug, Clone)]
 pub struct InMemoryBTree<K, V> {
@@ -393,12 +392,12 @@ impl BTreeFactory for InMemoryBTreeFactory {
 
 #[cfg(test)]
 mod tests {
-  use super::*;
+  #[cfg(not(feature = "std"))]
+  use alloc::vec::Vec;
 
   use futures::{StreamExt, executor::block_on, pin_mut};
 
-  #[cfg(not(feature = "std"))]
-  use alloc::vec::Vec;
+  use super::*;
 
   #[test]
   fn transaction_commit_and_rollback() {

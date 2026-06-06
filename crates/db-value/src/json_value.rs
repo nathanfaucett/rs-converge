@@ -1,6 +1,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::{
   collections::BTreeMap,
+  format,
   string::{String, ToString},
   vec::Vec,
 };
@@ -89,6 +90,7 @@ where
   }
 }
 
+#[cfg(feature = "serde_json")]
 impl From<serde_json::Value> for JsonValue {
   fn from(value: serde_json::Value) -> Self {
     match value {

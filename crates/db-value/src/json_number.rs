@@ -136,6 +136,7 @@ macro_rules! impl_json_number_for_float {
 
 impl_json_number_for_float!(f32, f64);
 
+#[cfg(feature = "serde_json")]
 impl From<serde_json::Number> for JsonNumber {
   fn from(num: serde_json::Number) -> Self {
     if num.is_f64() {

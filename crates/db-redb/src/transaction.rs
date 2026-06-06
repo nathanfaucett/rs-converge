@@ -5,11 +5,13 @@ use core::ops::Bound;
 use futures::Stream;
 
 use async_lock::RwLock;
-use db_engine::{
-  BTreeError, BTreeKey, BTreeReadExecutor, BTreeResult, BTreeTransaction, BTreeValue,
-  BTreeWriteExecutor, MaybeSend,
-};
 use redb::{ReadableDatabase, ReadableTable, TableDefinition};
+
+use db_btree::{
+  BTreeError, BTreeKey, BTreeReadExecutor, BTreeResult, BTreeTransaction, BTreeValue,
+  BTreeWriteExecutor,
+};
+use db_core::MaybeSend;
 
 #[derive(Debug, Clone)]
 pub enum TransactionPatchEntry<V> {
@@ -63,7 +65,7 @@ where
     table_def: TableDefinition<'static, &'static [u8], &'static [u8]>,
   ) -> Result<Self, BTreeError> {
     // validate we can start a write transaction
-    let _ = db.begin_write().map_err(BTreeError::other)?;
+    let _ = db.begin_write().map_err(BTreeError::custom)?;
     Ok(Self {
       db,
       id: id.to_string(),
@@ -103,8 +105,8 @@ where
     let table_def = self.table_def;
     let id = self.id.clone();
 
-    let wt = db.begin_write().map_err(BTreeError::other)?;
-    let mut table = wt.open_table(table_def).map_err(BTreeError::other)?;
+    let wt = db.begin_write().map_err(BTreeError::custom)?;
+    let mut table = wt.open_table(table_def).map_err(BTreeError::custom)?;
 
     for (k, entry) in patch_map {
       let key_bin = k.encode()?;
@@ -117,18 +119,18 @@ where
           let val_bin = v.encode()?;
           table
             .insert(full_key.as_slice(), val_bin.as_slice())
-            .map_err(BTreeError::other)?;
+            .map_err(BTreeError::custom)?;
         }
         TransactionPatchEntry::Deleted => {
           let _ = table
             .remove(full_key.as_slice())
-            .map_err(BTreeError::other)?;
+            .map_err(BTreeError::custom)?;
         }
       }
     }
 
     drop(table);
-    wt.commit().map_err(BTreeError::other)?;
+    wt.commit().map_err(BTreeError::custom)?;
     Ok(())
   }
 
@@ -164,17 +166,17 @@ where
 
     // Fallback to persistent storage
     let key_bin = key.borrow().encode()?;
-    let rt = self.db.begin_read().map_err(BTreeError::other)?;
+    let rt = self.db.begin_read().map_err(BTreeError::custom)?;
     let table = match rt.open_table(self.table_def) {
       Ok(table) => table,
       Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
-      Err(error) => return Err(BTreeError::other(error)),
+      Err(error) => return Err(BTreeError::custom(error)),
     };
     let mut full_key = self.id.as_bytes().to_vec();
     full_key.push(0u8);
     full_key.extend_from_slice(&key_bin);
 
-    match table.get(full_key.as_slice()).map_err(BTreeError::other)? {
+    match table.get(full_key.as_slice()).map_err(BTreeError::custom)? {
       Some(val) => Ok(Some(V::decode(val.value())?)),
       None => Ok(None),
     }
@@ -193,7 +195,7 @@ where
       // Snapshot patch
       let patch_snapshot = self.patch.read().await.clone();
 
-      let rt = db.begin_read().map_err(BTreeError::other)?;
+      let rt = db.begin_read().map_err(BTreeError::custom)?;
       let table = match rt.open_table(table_def) {
         Ok(table) => table,
         Err(redb::TableError::TableDoesNotExist(_)) => {
@@ -222,7 +224,7 @@ where
           return;
         }
         Err(error) => {
-          yield Err(BTreeError::other(error));
+          yield Err(BTreeError::custom(error));
           return;
         }
       };
@@ -230,13 +232,13 @@ where
       let mut prefix = id.as_bytes().to_vec();
       prefix.push(0u8);
 
-      let iter = table.iter().map_err(BTreeError::other)?;
+      let iter = table.iter().map_err(BTreeError::custom)?;
 
       // Base map collects persisted entries within range that are not deleted by the patch
       let mut merged: BTreeMap<K, V> = BTreeMap::new();
 
       for item in iter {
-        let (key_guard, val_guard) = item.map_err(BTreeError::other)?;
+        let (key_guard, val_guard) = item.map_err(BTreeError::custom)?;
         let key_bytes: &[u8] = key_guard.value();
         let val: &[u8] = val_guard.value();
         if !key_bytes.starts_with(&prefix) {
@@ -346,20 +348,20 @@ where
 
       // Not in patch; read from DB to find previous value (if any) and record deletion in patch
       let key_bin = key_owned.encode()?;
-      let rt = self.db.begin_read().map_err(BTreeError::other)?;
+      let rt = self.db.begin_read().map_err(BTreeError::custom)?;
       let table = match rt.open_table(self.table_def) {
         Ok(table) => table,
         Err(redb::TableError::TableDoesNotExist(_)) => {
           guard.0.insert(key_owned, TransactionPatchEntry::Deleted);
           return Ok(None);
         }
-        Err(error) => return Err(BTreeError::other(error)),
+        Err(error) => return Err(BTreeError::custom(error)),
       };
       let mut full_key = self.id.as_bytes().to_vec();
       full_key.push(0u8);
       full_key.extend_from_slice(&key_bin);
 
-      let prev = match table.get(full_key.as_slice()).map_err(BTreeError::other)? {
+      let prev = match table.get(full_key.as_slice()).map_err(BTreeError::custom)? {
         Some(removed_guard) => {
           let v = V::decode(removed_guard.value())?;
           Some(v)

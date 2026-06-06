@@ -1,9 +1,11 @@
 use alloc::vec::Vec;
-use automerge::AutomergeError;
 use core::ops::{Bound, RangeBounds};
-use db_engine::BTreeError;
+
+use automerge::AutomergeError;
 use futures::{Stream, StreamExt, pin_mut};
 use uuid::Uuid;
+
+use db_btree::BTreeError;
 
 use crate::{DocumentChangeKey, DocumentType, automerge_serde::AutoCommit};
 

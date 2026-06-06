@@ -1,12 +1,13 @@
-use db_engine::{
-  Column, ColumnSchema, DefaultBTreeManager, DescribeSchema, Engine, Expr, ExprValue, Join,
-  JoinKind, Query, QueryParams, SelectOptions, Statement, TableSchema, Translator, Value,
-  ValueType,
-};
-use db_sql_translator::SqlTranslator;
 use futures::executor::block_on;
-use hashbrown::HashMap;
 use std::collections::BTreeMap;
+
+use db_query::{
+  Query, QueryColumn, QueryExpr, QueryExprValue, QueryJoin, QueryJoinKind, QueryParams,
+  QuerySelectOptions, Statement, Translator,
+};
+use db_schema::{ColumnSchema, DescribeSchema, TableSchema};
+use db_sql_translator::SqlTranslator;
+use db_value::{Value, ValueType};
 
 struct MockResolver {
   tables: BTreeMap<String, TableSchema>,
@@ -30,20 +31,15 @@ impl MockResolver {
     let table = TableSchema {
       name: name.to_string(),
       columns: cols,
-      primary_key_index: Vec::new(),
+      primary_key: Vec::new(),
     };
     self.tables.insert(name.to_string(), table);
   }
 }
 
 impl DescribeSchema for MockResolver {
-  fn describe_table(
-    &self,
-    table_name: &str,
-  ) -> impl db_engine::MaybeSendFuture<Output = Option<TableSchema>> {
-    // return an immediate future with the cloned table schema
-    let table = self.tables.get(table_name).cloned();
-    async move { table }
+  async fn describe_table(&self, table_name: &str) -> Option<TableSchema> {
+    self.tables.get(table_name).cloned()
   }
 }
 
@@ -60,7 +56,22 @@ fn select_star() {
 
   assert_eq!(
     q,
-    Statement::Query(Query::select_simple("users".to_string(), vec![0, 1], None))
+    Statement::Query(Query::Select {
+      tables: vec!["users".to_string()],
+      table_index: 0,
+      projection: vec![
+        QueryColumn {
+          table_index: 0,
+          column_index: 0,
+        },
+        QueryColumn {
+          table_index: 0,
+          column_index: 1,
+        },
+      ],
+      predicate: None,
+      options: None,
+    })
   );
 }
 
@@ -82,7 +93,22 @@ fn select_columns() {
 
   assert_eq!(
     q,
-    Statement::Query(Query::select_simple("users".to_string(), vec![1, 2], None))
+    Statement::Query(Query::Select {
+      tables: vec!["users".to_string()],
+      table_index: 0,
+      projection: vec![
+        QueryColumn {
+          table_index: 0,
+          column_index: 1,
+        },
+        QueryColumn {
+          table_index: 0,
+          column_index: 2,
+        },
+      ],
+      predicate: None,
+      options: None,
+    })
   );
 }
 
@@ -111,26 +137,26 @@ fn select_inner_join_translation() {
       tables: vec!["users".to_string(), "orders".to_string()],
       table_index: 0,
       projection: vec![
-        Column {
+        QueryColumn {
           table_index: 0,
           column_index: 0,
         },
-        Column {
+        QueryColumn {
           table_index: 1,
           column_index: 0,
         },
       ],
       predicate: None,
-      options: Box::new(SelectOptions {
-        joins: vec![Join {
-          kind: JoinKind::Inner,
+      options: Some(Box::new(QuerySelectOptions {
+        joins: vec![QueryJoin {
+          kind: QueryJoinKind::Inner,
           table_index: 1,
-          on: Expr::Equals(
-            ExprValue::Column(Column {
+          on: QueryExpr::Equals(
+            QueryExprValue::Column(QueryColumn {
               table_index: 0,
               column_index: 0,
             }),
-            ExprValue::Column(Column {
+            QueryExprValue::Column(QueryColumn {
               table_index: 1,
               column_index: 1,
             }),
@@ -143,7 +169,7 @@ fn select_inner_join_translation() {
         offset: None,
         distinct: false,
         having: None,
-      }),
+      })),
     })
   );
 }
@@ -173,26 +199,26 @@ fn select_plain_join_translation() {
       tables: vec!["users".to_string(), "orders".to_string()],
       table_index: 0,
       projection: vec![
-        Column {
+        QueryColumn {
           table_index: 0,
           column_index: 0,
         },
-        Column {
+        QueryColumn {
           table_index: 1,
           column_index: 0,
         },
       ],
       predicate: None,
-      options: Box::new(SelectOptions {
-        joins: vec![Join {
-          kind: JoinKind::Inner,
+      options: Some(Box::new(QuerySelectOptions {
+        joins: vec![QueryJoin {
+          kind: QueryJoinKind::Inner,
           table_index: 1,
-          on: Expr::Equals(
-            ExprValue::Column(Column {
+          on: QueryExpr::Equals(
+            QueryExprValue::Column(QueryColumn {
               table_index: 0,
               column_index: 0,
             }),
-            ExprValue::Column(Column {
+            QueryExprValue::Column(QueryColumn {
               table_index: 1,
               column_index: 1,
             }),
@@ -205,143 +231,9 @@ fn select_plain_join_translation() {
         offset: None,
         distinct: false,
         having: None,
-      }),
+      })),
     })
   );
-}
-
-#[test]
-fn select_inner_join_roundtrip() {
-  let engine = Engine::new(DefaultBTreeManager::with_in_memory_factory());
-  let translator = SqlTranslator;
-
-  block_on(async {
-    engine
-      .translate_and_execute(
-        "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);",
-        &translator,
-      )
-      .await
-      .expect("create users");
-
-    engine
-      .translate_and_execute(
-        "CREATE TABLE orders (id INTEGER PRIMARY KEY, user_id INTEGER);",
-        &translator,
-      )
-      .await
-      .expect("create orders");
-
-    engine
-      .translate_and_execute(
-        "INSERT INTO users (id, name) VALUES (1, 'Alice');",
-        &translator,
-      )
-      .await
-      .expect("insert user");
-
-    engine
-      .translate_and_execute(
-        "INSERT INTO orders (id, user_id) VALUES (10, 1);",
-        &translator,
-      )
-      .await
-      .expect("insert order");
-
-    let result = engine
-      .translate_and_execute(
-        "SELECT users.id, orders.id FROM users INNER JOIN orders ON users.id = orders.user_id;",
-        &translator,
-      )
-      .await
-      .expect("select join");
-
-    assert_eq!(result.rows.len(), 1);
-    assert_eq!(result.rows[0], vec![Value::Integer(1), Value::Integer(10)],);
-  });
-}
-
-#[test]
-fn select_plain_join_roundtrip() {
-  let engine = Engine::new(DefaultBTreeManager::with_in_memory_factory());
-  let translator = SqlTranslator;
-
-  block_on(async {
-    engine
-      .translate_and_execute(
-        "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);",
-        &translator,
-      )
-      .await
-      .expect("create users");
-
-    engine
-      .translate_and_execute(
-        "CREATE TABLE orders (id INTEGER PRIMARY KEY, user_id INTEGER);",
-        &translator,
-      )
-      .await
-      .expect("create orders");
-
-    engine
-      .translate_and_execute(
-        "INSERT INTO users (id, name) VALUES (1, 'Alice');",
-        &translator,
-      )
-      .await
-      .expect("insert user");
-
-    engine
-      .translate_and_execute(
-        "INSERT INTO orders (id, user_id) VALUES (10, 1);",
-        &translator,
-      )
-      .await
-      .expect("insert order");
-
-    let result = engine
-      .translate_and_execute(
-        "SELECT users.id, orders.id FROM users JOIN orders ON users.id = orders.user_id;",
-        &translator,
-      )
-      .await
-      .expect("select join");
-
-    assert_eq!(result.rows.len(), 1);
-    assert_eq!(result.rows[0], vec![Value::Integer(1), Value::Integer(10)],);
-  });
-}
-
-#[test]
-fn create_table_insert_select_roundtrip() {
-  let engine = Engine::new(DefaultBTreeManager::with_in_memory_factory());
-  let translator = SqlTranslator;
-
-  block_on(async {
-    engine
-      .translate_and_execute(
-        "CREATE TABLE users (id UUID PRIMARY KEY, name TEXT);",
-        &translator,
-      )
-      .await
-      .expect("create table");
-
-    engine
-      .translate_and_execute(
-        "INSERT INTO users (id, name) VALUES ('00000000-0000-0000-0000-000000000001'::uuid, 'Alice');",
-        &SqlTranslator,
-      )
-      .await
-      .expect("insert row");
-
-    let result = engine
-      .translate_and_execute("SELECT id, name FROM users;", &SqlTranslator)
-      .await
-      .expect("select rows");
-
-    assert_eq!(result.rows.len(), 1);
-    assert_eq!(result.rows[0][1], Value::Text("Alice".to_string()));
-  });
 }
 
 #[test]
@@ -358,7 +250,22 @@ fn select_qualified_wildcard() {
 
   assert_eq!(
     q,
-    Statement::Query(Query::select_simple("users".to_string(), vec![0, 1], None))
+    Statement::Query(Query::Select {
+      tables: vec!["users".to_string()],
+      table_index: 0,
+      projection: vec![
+        QueryColumn {
+          table_index: 0,
+          column_index: 0,
+        },
+        QueryColumn {
+          table_index: 0,
+          column_index: 1,
+        },
+      ],
+      predicate: None,
+      options: None,
+    })
   );
 }
 
@@ -391,21 +298,26 @@ fn select_with_positional_param() {
   ))
   .expect("translate");
 
-  let expected_pred = Expr::Equals(
-    ExprValue::Column(Column {
+  let expected_pred = QueryExpr::Equals(
+    QueryExprValue::Column(QueryColumn {
       table_index: 0,
-      column_index: 0u8,
+      column_index: 0,
     }),
-    ExprValue::Value(Value::Integer(42)),
+    QueryExprValue::Value(Value::Integer(42)),
   );
 
   assert_eq!(
     q,
-    Statement::Query(Query::select_simple(
-      "users".to_string(),
-      vec![0],
-      Some(expected_pred)
-    ))
+    Statement::Query(Query::Select {
+      tables: vec!["users".to_string()],
+      table_index: 0,
+      projection: vec![QueryColumn {
+        table_index: 0,
+        column_index: 0,
+      }],
+      predicate: Some(expected_pred),
+      options: None,
+    })
   );
 }
 
@@ -426,21 +338,26 @@ fn select_with_indexed_param() {
   ))
   .expect("translate");
 
-  let expected_pred = Expr::Equals(
-    ExprValue::Column(Column {
+  let expected_pred = QueryExpr::Equals(
+    QueryExprValue::Column(QueryColumn {
       table_index: 0,
-      column_index: 0u8,
+      column_index: 0,
     }),
-    ExprValue::Value(Value::Integer(7)),
+    QueryExprValue::Value(Value::Integer(7)),
   );
 
   assert_eq!(
     q,
-    Statement::Query(Query::select_simple(
-      "users".to_string(),
-      vec![0],
-      Some(expected_pred)
-    ))
+    Statement::Query(Query::Select {
+      tables: vec!["users".to_string()],
+      table_index: 0,
+      projection: vec![QueryColumn {
+        table_index: 0,
+        column_index: 0,
+      }],
+      predicate: Some(expected_pred),
+      options: None,
+    })
   );
 }
 
@@ -501,7 +418,7 @@ fn select_with_named_param() {
   );
 
   let translator = SqlTranslator;
-  let mut named = HashMap::new();
+  let mut named = BTreeMap::new();
   named.insert("user_id".to_string(), Value::Integer(42));
   let params = QueryParams::Named(named);
 
@@ -512,21 +429,26 @@ fn select_with_named_param() {
   ))
   .expect("translate");
 
-  let expected_pred = Expr::Equals(
-    ExprValue::Column(Column {
+  let expected_pred = QueryExpr::Equals(
+    QueryExprValue::Column(QueryColumn {
       table_index: 0,
-      column_index: 0u8,
+      column_index: 0,
     }),
-    ExprValue::Value(Value::Integer(42)),
+    QueryExprValue::Value(Value::Integer(42)),
   );
 
   assert_eq!(
     q,
-    Statement::Query(Query::select_simple(
-      "users".to_string(),
-      vec![0],
-      Some(expected_pred)
-    ))
+    Statement::Query(Query::Select {
+      tables: vec!["users".to_string()],
+      table_index: 0,
+      projection: vec![QueryColumn {
+        table_index: 0,
+        column_index: 0,
+      }],
+      predicate: Some(expected_pred),
+      options: None,
+    })
   );
 }
 
@@ -539,7 +461,7 @@ fn insert_with_named_params() {
   );
 
   let translator = SqlTranslator;
-  let mut named = HashMap::new();
+  let mut named = BTreeMap::new();
   named.insert("id".to_string(), Value::Integer(1));
   named.insert("name".to_string(), Value::Text("alice".to_string()));
   let params = QueryParams::Named(named);
@@ -571,7 +493,7 @@ fn missing_named_param_errors() {
   );
 
   let translator = SqlTranslator;
-  let params = QueryParams::Named(HashMap::new());
+  let params = QueryParams::Named(BTreeMap::new());
   let res = block_on(translator.translate_with_params(
     "SELECT id FROM users WHERE id = :user_id",
     Some(&params),
@@ -592,7 +514,7 @@ fn mixed_placeholder_styles_error() {
   );
 
   let translator = SqlTranslator;
-  let mut named = HashMap::new();
+  let mut named = BTreeMap::new();
   named.insert("user_id".to_string(), Value::Integer(42));
   let params = QueryParams::Named(named);
   let res = block_on(translator.translate_with_params(

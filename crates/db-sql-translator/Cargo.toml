@@ -14,25 +14,28 @@ name = "db_sql_translator"
 
 [features]
 default = ["std"]
-std = ["db-engine/std", "sqlparser/std", "thiserror/std"]
+std = ["db-query/std", "db-schema/std", "db-core/std", "db-value/std", "sqlparser/std", "thiserror/std"]
 wasm = [
-  "db-engine/wasm",
   "tsify",
   "serde",
   "serde-wasm-bindgen",
   "wasm-bindgen",
+  "db-query/wasm",
+  "db-schema/wasm",
+  "db-value/wasm",
 ]
 
 [dependencies]
-db-engine = { path = "../db-engine", default-features = false, features = [
-  "in-memory",
-] }
+db-core = { path = "../db-core", default-features = false, features = [] }
+db-query = { path = "../db-query", default-features = false, features = [] }
+db-schema = { path = "../db-schema", default-features = false, features = [] }
+db-value = { path = "../db-value", default-features = false, features = [] }
+
 sqlparser = { version = "0.61", default-features = false, features = [] }
 hashbrown = { version = "0.17", default-features = false, features = [
   "default-hasher",
 ] }
 thiserror = { version = "2.0", default-features = false, features = [] }
-async-trait = { version = "0.1", default-features = false }
 uuid = { version = "1.18", default-features = false }
 serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
 

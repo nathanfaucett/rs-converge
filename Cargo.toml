@@ -49,6 +49,11 @@ members = [
   "crates/db-automerge",
   "crates/db-sql-translator",
   "crates/db-wasm",
+  "crates/db-value",
+  "crates/db-query",
+  "crates/db-btree",
+  "crates/db-schema",
+  "crates/db-core",
   "crates/db-examples-util",
 ]
 resolver = "2"

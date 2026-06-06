@@ -1,15 +1,15 @@
+use std::ops::RangeBounds;
 use std::{borrow::Borrow, marker::PhantomData, sync::Arc};
 
 use async_stream::stream;
-use std::ops::RangeBounds;
+use redb::{ReadTransaction, ReadableDatabase, ReadableTable, TableDefinition};
 
-use db_engine::{
-  BTree, BTreeKey, BTreeReadExecutor, BTreeResult, BTreeValue, BTreeWriteExecutor, MaybeSend,
-  MaybeSendStream,
+use db_btree::{
+  BTree, BTreeError, BTreeKey, BTreeReadExecutor, BTreeResult, BTreeValue, BTreeWriteExecutor,
 };
+use db_core::{MaybeSend, MaybeSendStream};
 
 use crate::transaction::RedbTransaction;
-use redb::{ReadTransaction, ReadableDatabase, ReadableTable, TableDefinition};
 
 fn is_table_missing(error: &redb::TableError) -> bool {
   matches!(error, redb::TableError::TableDoesNotExist(_))
@@ -61,20 +61,17 @@ where
     let key_ref = key.borrow();
     let key_bin = key_ref.encode()?;
 
-    let rt: ReadTransaction = self.db.begin_read().map_err(db_engine::BTreeError::other)?;
+    let rt: ReadTransaction = self.db.begin_read().map_err(BTreeError::custom)?;
     let table = match rt.open_table(self.table_def) {
       Ok(table) => table,
       Err(error) if is_table_missing(&error) => return Ok(None),
-      Err(error) => return Err(db_engine::BTreeError::other(error)),
+      Err(error) => return Err(BTreeError::custom(error)),
     };
     let mut full_key = self.id.as_bytes().to_vec();
     full_key.push(0u8);
     full_key.extend_from_slice(&key_bin);
 
-    match table
-      .get(full_key.as_slice())
-      .map_err(db_engine::BTreeError::other)?
-    {
+    match table.get(full_key.as_slice()).map_err(BTreeError::custom)? {
       Some(val_guard) => {
         let v = V::decode(val_guard.value())?;
         Ok(Some(v))
@@ -93,14 +90,14 @@ where
     let table_def = self.table_def;
 
     stream! {
-      let rt = db.begin_read().map_err(db_engine::BTreeError::other)?;
+      let rt = db.begin_read().map_err(BTreeError::custom)?;
       let table = match rt.open_table(table_def) {
         Ok(table) => table,
         Err(error) if is_table_missing(&error) => {
           return;
         }
         Err(error) => {
-          yield Err(db_engine::BTreeError::other(error));
+          yield Err(BTreeError::custom(error));
           return;
         }
       };
@@ -108,9 +105,9 @@ where
       let mut prefix = id.into_bytes();
       prefix.push(0u8);
 
-      let iter = table.iter().map_err(db_engine::BTreeError::other)?;
+      let iter = table.iter().map_err(BTreeError::custom)?;
       for item in iter {
-        let (key_guard, val_guard) = item.map_err(db_engine::BTreeError::other)?;
+        let (key_guard, val_guard) = item.map_err(BTreeError::custom)?;
         let key_bytes: &[u8] = key_guard.value();
         let val: &[u8] = val_guard.value();
         if !key_bytes.starts_with(&prefix) {
@@ -150,13 +147,8 @@ where
   where
     K: Ord,
   {
-    let wt = self
-      .db
-      .begin_write()
-      .map_err(db_engine::BTreeError::other)?;
-    let mut table = wt
-      .open_table(self.table_def)
-      .map_err(db_engine::BTreeError::other)?;
+    let wt = self.db.begin_write().map_err(BTreeError::custom)?;
+    let mut table = wt.open_table(self.table_def).map_err(BTreeError::custom)?;
 
     let key_bin = key.encode()?;
     let mut full_key = self.id.as_bytes().to_vec();
@@ -166,10 +158,10 @@ where
 
     table
       .insert(full_key.as_slice(), val_bin.as_slice())
-      .map_err(db_engine::BTreeError::other)?;
+      .map_err(BTreeError::custom)?;
 
     drop(table);
-    wt.commit().map_err(db_engine::BTreeError::other)?;
+    wt.commit().map_err(BTreeError::custom)?;
     Ok(())
   }
 
@@ -178,13 +170,8 @@ where
     K: Ord,
     Q: Borrow<K> + MaybeSend + 'a,
   {
-    let wt = self
-      .db
-      .begin_write()
-      .map_err(db_engine::BTreeError::other)?;
-    let mut table = wt
-      .open_table(self.table_def)
-      .map_err(db_engine::BTreeError::other)?;
+    let wt = self.db.begin_write().map_err(BTreeError::custom)?;
+    let mut table = wt.open_table(self.table_def).map_err(BTreeError::custom)?;
 
     let key_bin = key.borrow().encode()?;
     let mut full_key = self.id.as_bytes().to_vec();
@@ -193,7 +180,7 @@ where
 
     let prev = match table
       .remove(full_key.as_slice())
-      .map_err(db_engine::BTreeError::other)?
+      .map_err(BTreeError::custom)?
     {
       Some(removed_guard) => {
         let v = V::decode(removed_guard.value())?;
@@ -203,7 +190,7 @@ where
     };
 
     drop(table);
-    wt.commit().map_err(db_engine::BTreeError::other)?;
+    wt.commit().map_err(BTreeError::custom)?;
     Ok(prev)
   }
 }

@@ -1,8 +1,10 @@
 use alloc::vec::Vec;
-use db_engine::{BTreeError, BTreeResult, BTreeTransaction};
+
 use futures::{StreamExt, pin_mut};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
+
+use db_btree::{BTreeError, BTreeResult, BTreeTransaction};
 
 use crate::{DocumentChangeKey, DocumentType, automerge_serde::AutoCommit};
 
@@ -65,7 +67,7 @@ pub async fn run_compaction<T>(
 where
   T: BTreeTransaction<DocumentChangeKey, Vec<u8>>,
 {
-  let mut compacted_doc = AutoCommit::load(&state).map_err(BTreeError::other)?;
+  let mut compacted_doc = AutoCommit::load(&state).map_err(BTreeError::custom)?;
   let new_hash = hash_heads(&compacted_doc.get_heads());
 
   let to_remove: Vec<DocumentChangeKey> = {
@@ -141,5 +143,5 @@ pub(super) fn build_lifecycle_write(
 }
 
 pub(super) fn load_autocommit(bytes: &[u8]) -> Result<AutoCommit, BTreeError> {
-  AutoCommit::load(bytes).map_err(BTreeError::other)
+  AutoCommit::load(bytes).map_err(BTreeError::custom)
 }

@@ -9,6 +9,7 @@ use core::{
   f64,
   hash::{Hash, Hasher},
 };
+
 use uuid::Uuid;
 
 use crate::JsonValue;
@@ -33,8 +34,8 @@ pub enum Value {
   Integer(i64),
   Float(f64),
   Text(String),
-  Blob(Vec<u8>),
   Json(JsonValue),
+  Blob(Vec<u8>),
 }
 
 impl From<()> for Value {
@@ -97,6 +98,7 @@ impl From<JsonValue> for Value {
   }
 }
 
+#[cfg(feature = "serde_json")]
 impl From<serde_json::Value> for Value {
   fn from(json: serde_json::Value) -> Self {
     Value::Json(JsonValue::from(json))
@@ -271,8 +273,8 @@ pub enum ValueType {
   Integer,
   Float,
   Text,
-  Blob,
   Json,
+  Blob,
 }
 
 impl ValueType {
@@ -285,8 +287,8 @@ impl ValueType {
       ValueType::Integer => 4,
       ValueType::Float => 5,
       ValueType::Text => 6,
-      ValueType::Blob => 7,
-      ValueType::Json => 8,
+      ValueType::Json => 7,
+      ValueType::Blob => 8,
     }
   }
 }

@@ -14,18 +14,20 @@ use std::sync::Arc;
 use futures::{StreamExt, pin_mut};
 use thiserror::Error;
 
-use crate::{
-  BTree, BTreeDefinition, BTreeError, BTreeManager, BTreeReadExecutor, BTreeTransaction,
-  BTreeWriteExecutor, DescribeSchema, IndexSchema, QueryParams, QueryResult, Statement,
-  TableSchema, TranslateError, Translator, Value,
-  btree::BTreeFactory,
-  catalog::{
-    ENGINE_INDEX_FIELDS, ENGINE_INDICES, ENGINE_TABLE_FIELDS, ENGINE_TABLES, IndexFieldRow,
-    TableFieldRow, decode_index_field_row, decode_index_row, decode_table_field_row,
-    decode_table_row, encode_index_field_row, encode_index_row, encode_table_field_row,
-    encode_table_row, index_field_key, index_key, index_schema_from_rows, table_field_key,
-    table_key, table_schema_from_rows,
-  },
+use db_btree::{
+  BTree, BTreeDefinition, BTreeError, BTreeFactory, BTreeManager, BTreeReadExecutor,
+  BTreeTransaction, BTreeWriteExecutor,
+};
+use db_query::{QueryParams, QueryResult, Statement, TranslateError, Translator};
+use db_schema::{DescribeSchema, IndexSchema, TableSchema};
+use db_value::Value;
+
+use crate::catalog::{
+  ENGINE_INDEX_FIELDS, ENGINE_INDICES, ENGINE_TABLE_FIELDS, ENGINE_TABLES, IndexFieldRow,
+  TableFieldRow, decode_index_field_row, decode_index_row, decode_table_field_row,
+  decode_table_row, encode_index_field_row, encode_index_row, encode_table_field_row,
+  encode_table_row, index_field_key, index_key, index_schema_from_rows, table_field_key, table_key,
+  table_schema_from_rows,
 };
 
 #[derive(Error, Debug)]
@@ -218,14 +220,15 @@ where
     }
 
     for (offset, column) in schema.columns.iter().enumerate() {
-      let column_index = u8::try_from(offset)
+      let column_index = u32::try_from(offset)
         .map_err(|_| EngineError::InvalidQuery("table schema has too many columns"))?;
+
       let field_row = TableFieldRow {
         table_name: schema.name.clone(),
         column_index,
         column_name: column.name.clone(),
         value_type: column.r#type,
-        primary_key: schema.primary_key_index.contains(&column_index),
+        primary_key: schema.primary_key.contains(&column_index),
       };
 
       tx.insert(
@@ -270,7 +273,7 @@ where
     }
 
     for (offset, column_index) in schema.column_indices.iter().enumerate() {
-      let field_order = u8::try_from(offset)
+      let field_order = u32::try_from(offset)
         .map_err(|_| EngineError::InvalidQuery("index schema has too many columns"))?;
       let field_row = IndexFieldRow {
         index_name: schema.name.clone(),
@@ -328,7 +331,10 @@ mod tests {
 
   use futures::{StreamExt, executor::block_on, pin_mut};
 
-  use crate::{ColumnSchema, DefaultBTreeManager, ValueType};
+  use db_schema::{ColumnSchema, TableSchema};
+  use db_value::ValueType;
+
+  use crate::DefaultBTreeManager;
 
   #[test]
   fn describe_table_reads_normalized_catalogs() {
@@ -346,7 +352,7 @@ mod tests {
             r#type: ValueType::Text,
           },
         ],
-        primary_key_index: vec![0],
+        primary_key: vec![0],
       };
 
       engine
@@ -403,7 +409,7 @@ mod tests {
             r#type: ValueType::Text,
           },
         ],
-        primary_key_index: vec![0],
+        primary_key: vec![0],
       };
       let index_schema = IndexSchema {
         name: "users_email_idx".to_string(),

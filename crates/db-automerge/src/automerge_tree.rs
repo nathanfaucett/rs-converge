@@ -3,13 +3,15 @@ use core::ops::RangeBounds;
 #[cfg(not(feature = "std"))]
 use alloc::string::ToString;
 use alloc::vec::Vec;
+
 use async_stream::stream;
-use db_engine::{
-  BTree, BTreeError, BTreeReadExecutor, BTreeResult, BTreeTransaction, BTreeWriteExecutor,
-  MaybeSend, MaybeSendStream,
-};
 use futures::{Stream, StreamExt};
 use uuid::Uuid;
+
+use db_btree::{
+  BTree, BTreeError, BTreeReadExecutor, BTreeResult, BTreeTransaction, BTreeWriteExecutor,
+};
+use db_core::{MaybeSend, MaybeSendStream};
 
 use crate::{
   AutomergeBTreeTransaction, CompactionPolicy, DocumentChangeKey, ThresholdPolicy,

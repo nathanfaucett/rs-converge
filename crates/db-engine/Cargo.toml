@@ -19,13 +19,25 @@ std = [
   "uuid/std",
   "async-lock/std",
   "serde/std",
-  "serde_json/std"
+  "serde_json/std",
+  "db-schema/std",
+  "db-btree/std",
+  "db-core/std",
+  "db-value/std",
+  "db-query/std"
 ]
 automerge = ["dep:automerge", "dep:autosurgeon", "std"]
-in-memory = ["dep:async-stream"]
-wasm = ["dep:tsify", "dep:serde-wasm-bindgen", "dep:wasm-bindgen", "automerge/wasm"]
+in-memory = ["dep:async-stream", "db-btree/in-memory"]
+wasm = ["dep:tsify", "dep:serde-wasm-bindgen", "dep:wasm-bindgen", "automerge/wasm", "db-value/wasm", "db-query/wasm", "db-schema/wasm"]
 
 [dependencies]
+# internal dependencies
+db-btree = { path = "../db-btree", default-features = false, features = [] }
+db-core = { path = "../db-core", default-features = false, features = [] }
+db-value = { path = "../db-value", default-features = false, features = [] }
+db-query = { path = "../db-query", default-features = false, features = [] }
+db-schema = { path = "../db-schema", default-features = false, features = [] }
+
 async-stream = { version = "0.3", default-features = false, features = [
 ], optional = true }
 async-lock = { version = "3.4", default-features = false, features = [
@@ -39,9 +51,9 @@ hashbrown = { version = "0.17", default-features = false, features = [
   "default-hasher",
 ] }
 thiserror = { version = "2.0", default-features = false }
-async-trait = { version = "0.1", default-features = false }
 uuid = { version = "1.23", default-features = false, features = ["serde"] }
 
+# automerge
 automerge = { version = "0.10", default-features = false, features = [], optional = true }
 autosurgeon = { version = "0.12", default-features = false, features = ["uuid"], optional = true }
 
@@ -55,5 +67,4 @@ wasm-bindgen = { version = "0.2", default-features = false, features = [
 ], optional = true }
 
 [dev-dependencies]
-async-trait = { version = "0.1", default-features = false }
 futures = { version = "0.3", default-features = false, features = ["executor"] }

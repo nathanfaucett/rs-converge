@@ -2,16 +2,13 @@
 use alloc::{
   boxed::Box,
   string::{String, ToString},
-  vec::Vec,
 };
 
-use core::{any::Any, borrow::Borrow, error::Error, ops::RangeBounds};
+use core::{any::Any, borrow::Borrow, ops::RangeBounds};
 
-use postcard::{from_bytes, to_stdvec};
 use thiserror::Error;
 
-use crate::{MaybeSend, MaybeSendFuture, MaybeSendStream, MaybeSync};
-use serde::{Serialize, de::DeserializeOwned};
+use db_core::{MaybeSend, MaybeSendFuture, MaybeSendStream, MaybeSync};
 
 #[derive(Error, Debug)]
 pub enum BTreeError {
@@ -33,65 +30,28 @@ pub enum BTreeError {
   #[error("Unsupported operation")]
   UnsupportedOperation,
 
-  #[error("Custom error: {0}")]
+  #[error("Error: {0}")]
   Custom(String),
-
-  #[error("Other error: {0}")]
-  Other(#[from] Box<dyn Error + Send + Sync>),
 }
-
-pub type BTreeResult<T> = Result<T, BTreeError>;
 
 impl BTreeError {
   pub fn custom<T>(error: T) -> Self
   where
     T: ToString,
   {
-    BTreeError::Custom(error.to_string())
-  }
-
-  pub fn other<E>(error: E) -> Self
-  where
-    E: Error + Send + Sync + 'static,
-  {
-    BTreeError::Other(Box::new(error))
+    Self::Custom(error.to_string())
   }
 }
 
-pub trait BTreeValue:
-  MaybeSend + MaybeSync + Clone + Serialize + DeserializeOwned + 'static
-{
-  fn encode(&self) -> BTreeResult<Vec<u8>>;
+pub type BTreeResult<T> = Result<T, BTreeError>;
 
-  fn decode(bytes: &[u8]) -> BTreeResult<Self>
-  where
-    Self: Sized;
-}
+pub trait BTreeValue: MaybeSend + MaybeSync + Clone + 'static {}
 
-impl<T> BTreeValue for T
-where
-  T: MaybeSend + MaybeSync + Clone + Serialize + DeserializeOwned + 'static,
-{
-  fn encode(&self) -> BTreeResult<Vec<u8>> {
-    to_stdvec(self).map_err(|e| BTreeError::Custom(format!("postcard value ser error: {}", e)))
-  }
+impl<T> BTreeValue for T where T: MaybeSend + MaybeSync + Clone + 'static {}
 
-  fn decode(bytes: &[u8]) -> BTreeResult<Self>
-  where
-    Self: Sized,
-  {
-    from_bytes(bytes).map_err(|e| BTreeError::Custom(format!("postcard value de error: {}", e)))
-  }
-}
+pub trait BTreeKey: BTreeValue + Ord {}
 
-pub trait BTreeKey:
-  BTreeValue + Ord + MaybeSend + MaybeSync + Clone + Serialize + DeserializeOwned + 'static
-{
-}
-impl<T> BTreeKey for T where
-  T: BTreeValue + Ord + MaybeSend + MaybeSync + Clone + Serialize + DeserializeOwned + 'static
-{
-}
+impl<T> BTreeKey for T where T: BTreeValue + Ord {}
 
 pub trait BTreeReadExecutor<K, V>: MaybeSend + MaybeSync
 where

@@ -6,12 +6,18 @@ use alloc::{
 
 use futures::{StreamExt, pin_mut};
 
-use crate::{
-  BTree, BTreeManager, BTreeReadExecutor, BTreeTransaction, BTreeWriteExecutor, Column,
-  ColumnIndex, DdlOp, DescribeSchema, Engine, EngineError, EngineResult, Expr, ExprValue, Query,
-  QueryResult, QueryResultColumn, Row, Statement, TableIndex, TableSchema, UpdateAssignment, Value,
-  btree::BTreeFactory, engine::EngineBTreeDefinition,
+use db_btree::{
+  BTree, BTreeFactory, BTreeManager, BTreeReadExecutor, BTreeTransaction, BTreeWriteExecutor,
 };
+use db_query::{
+  DataDefinition, Query, QueryColumn, QueryExpr, QueryExprValue, QueryJoin, QueryJoinKind,
+  QueryResult, QueryResultColumn, QuerySelectOptions, QueryTableIndex, QueryUpdateAssignment,
+  Statement,
+};
+use db_schema::{ColumnSchemaIndex, DescribeSchema, TableSchema};
+use db_value::{Row, Value};
+
+use crate::engine::{Engine, EngineBTreeDefinition, EngineError, EngineResult};
 
 pub async fn execute_statement<M, F>(
   engine: &Engine<M, F>,
@@ -23,7 +29,7 @@ where
 {
   match statement {
     Statement::Query(query) => execute_query(engine, query).await,
-    Statement::Ddl(ddl) => execute_ddl(engine, ddl).await,
+    Statement::DataDefinition(ddl) => execute_ddl(engine, ddl).await,
   }
 }
 
@@ -47,7 +53,7 @@ where
         table_index,
         &projection,
         predicate.as_ref(),
-        options.as_ref(),
+        options.as_deref(),
       )
       .await
     }
@@ -86,27 +92,27 @@ where
   }
 }
 
-async fn execute_ddl<M, F>(engine: &Engine<M, F>, ddl: DdlOp) -> EngineResult<QueryResult>
+async fn execute_ddl<M, F>(engine: &Engine<M, F>, ddl: DataDefinition) -> EngineResult<QueryResult>
 where
   M: BTreeManager<F>,
   F: BTreeFactory,
 {
   match ddl {
-    DdlOp::CreateTable {
+    DataDefinition::CreateTable {
       schema,
       if_not_exists: _,
     } => {
       engine.register_table_schema(&schema).await?;
       Ok(QueryResult::new(Vec::new()))
     }
-    DdlOp::CreateIndex {
+    DataDefinition::CreateIndex {
       schema,
       if_not_exists: _,
     } => {
       engine.register_index_schema(&schema).await?;
       Ok(QueryResult::new(Vec::new()))
     }
-    DdlOp::DropTable { .. } | DdlOp::DropIndex { .. } => {
+    DataDefinition::DropTable { .. } | DataDefinition::DropIndex { .. } => {
       Err(EngineError::Unsupported("DDL operation not supported"))
     }
   }
@@ -115,16 +121,16 @@ where
 async fn execute_select<M, F>(
   engine: &Engine<M, F>,
   tables: &[String],
-  table_index: TableIndex,
-  projection: &[Column],
-  predicate: Option<&Expr>,
-  options: &crate::SelectOptions,
+  table_index: QueryTableIndex,
+  projection: &[QueryColumn],
+  predicate: Option<&QueryExpr>,
+  options: Option<&QuerySelectOptions>,
 ) -> EngineResult<QueryResult>
 where
   M: BTreeManager<F>,
   F: BTreeFactory,
 {
-  if options.joins.is_empty() {
+  if options.map(|opts| opts.joins.is_empty()).unwrap_or(true) {
     let table = resolve_table_name(tables, table_index)?;
     let definition = EngineBTreeDefinition::from(table);
     let btree = engine.manager.entry(&definition).await?;
@@ -153,8 +159,10 @@ where
     contexts.push(context);
   }
 
-  for join in &options.joins {
-    contexts = apply_join(&table_rows, contexts, join)?;
+  if let Some(opts) = options {
+    for join in &opts.joins {
+      contexts = apply_join(&table_rows, contexts, join)?;
+    }
   }
 
   let columns = build_query_result_columns_for_query(engine, tables, projection).await?;
@@ -200,10 +208,10 @@ where
 fn apply_join(
   table_rows: &[Vec<Row>],
   contexts: Vec<Vec<Option<Row>>>,
-  join: &crate::Join,
+  join: &QueryJoin,
 ) -> EngineResult<Vec<Vec<Option<Row>>>> {
   let mut next_contexts = Vec::new();
-  let joined_rows = &table_rows[usize::from(join.table_index)];
+  let joined_rows = &table_rows[join.table_index as usize];
   let mut matched_right = vec![false; joined_rows.len()];
 
   for existing_context in contexts.into_iter() {
@@ -211,7 +219,7 @@ fn apply_join(
 
     for (right_index, right_row) in joined_rows.iter().enumerate() {
       let mut candidate = existing_context.clone();
-      candidate[usize::from(join.table_index)] = Some(right_row.clone());
+      candidate[join.table_index as usize] = Some(right_row.clone());
 
       if matches_context_predicate(Some(&join.on), &candidate)? {
         next_contexts.push(candidate);
@@ -220,18 +228,18 @@ fn apply_join(
       }
     }
 
-    if !matched && matches!(join.kind, crate::JoinKind::Left | crate::JoinKind::Full) {
+    if !matched && matches!(join.kind, QueryJoinKind::Left | QueryJoinKind::Full) {
       let mut candidate = existing_context.clone();
-      candidate[usize::from(join.table_index)] = None;
+      candidate[join.table_index as usize] = None;
       next_contexts.push(candidate);
     }
   }
 
-  if matches!(join.kind, crate::JoinKind::Right | crate::JoinKind::Full) {
+  if matches!(join.kind, QueryJoinKind::Right | QueryJoinKind::Full) {
     for (right_index, right_row) in joined_rows.iter().enumerate() {
       if !matched_right[right_index] {
         let mut candidate = vec![None; table_rows.len()];
-        candidate[usize::from(join.table_index)] = Some(right_row.clone());
+        candidate[join.table_index as usize] = Some(right_row.clone());
         next_contexts.push(candidate);
       }
     }
@@ -240,16 +248,16 @@ fn apply_join(
   Ok(next_contexts)
 }
 
-fn project_join_row(context: &[Option<Row>], projection: &[Column]) -> EngineResult<Row> {
+fn project_join_row(context: &[Option<Row>], projection: &[QueryColumn]) -> EngineResult<Row> {
   let mut projected = Vec::with_capacity(projection.len());
 
   for column in projection {
     let row = context
-      .get(usize::from(column.table_index))
+      .get(column.table_index as usize)
       .ok_or(EngineError::InvalidQuery("table index out of bounds"))?;
 
     if let Some(row) = row {
-      let index = usize::from(column.column_index);
+      let index = column.column_index as usize;
       projected.push(
         row
           .get(index)
@@ -265,7 +273,7 @@ fn project_join_row(context: &[Option<Row>], projection: &[Column]) -> EngineRes
 }
 
 fn matches_context_predicate(
-  predicate: Option<&Expr>,
+  predicate: Option<&QueryExpr>,
   context: &[Option<Row>],
 ) -> EngineResult<bool> {
   match predicate {
@@ -274,9 +282,9 @@ fn matches_context_predicate(
   }
 }
 
-fn eval_expr_context(expr: &Expr, context: &[Option<Row>]) -> EngineResult<bool> {
+fn eval_expr_context(expr: &QueryExpr, context: &[Option<Row>]) -> EngineResult<bool> {
   match expr {
-    Expr::Equals(left, right) => {
+    QueryExpr::Equals(left, right) => {
       let left_value = eval_expr_value_for_row_context(left, context)?;
       let right_value = eval_expr_value_for_row_context(right, context)?;
       Ok(
@@ -285,7 +293,7 @@ fn eval_expr_context(expr: &Expr, context: &[Option<Row>]) -> EngineResult<bool>
           && left_value == right_value,
       )
     }
-    Expr::NotEquals(left, right) => {
+    QueryExpr::NotEquals(left, right) => {
       let left_value = eval_expr_value_for_row_context(left, context)?;
       let right_value = eval_expr_value_for_row_context(right, context)?;
       Ok(
@@ -294,7 +302,7 @@ fn eval_expr_context(expr: &Expr, context: &[Option<Row>]) -> EngineResult<bool>
           && left_value != right_value,
       )
     }
-    Expr::LessThan(left, right) => {
+    QueryExpr::LessThan(left, right) => {
       let left_value = eval_expr_value_for_row_context(left, context)?;
       let right_value = eval_expr_value_for_row_context(right, context)?;
       Ok(
@@ -303,7 +311,7 @@ fn eval_expr_context(expr: &Expr, context: &[Option<Row>]) -> EngineResult<bool>
           && left_value < right_value,
       )
     }
-    Expr::LessThanOrEquals(left, right) => {
+    QueryExpr::LessThanOrEquals(left, right) => {
       let left_value = eval_expr_value_for_row_context(left, context)?;
       let right_value = eval_expr_value_for_row_context(right, context)?;
       Ok(
@@ -312,7 +320,7 @@ fn eval_expr_context(expr: &Expr, context: &[Option<Row>]) -> EngineResult<bool>
           && left_value <= right_value,
       )
     }
-    Expr::GreaterThan(left, right) => {
+    QueryExpr::GreaterThan(left, right) => {
       let left_value = eval_expr_value_for_row_context(left, context)?;
       let right_value = eval_expr_value_for_row_context(right, context)?;
       Ok(
@@ -321,7 +329,7 @@ fn eval_expr_context(expr: &Expr, context: &[Option<Row>]) -> EngineResult<bool>
           && left_value > right_value,
       )
     }
-    Expr::GreaterThanOrEquals(left, right) => {
+    QueryExpr::GreaterThanOrEquals(left, right) => {
       let left_value = eval_expr_value_for_row_context(left, context)?;
       let right_value = eval_expr_value_for_row_context(right, context)?;
       Ok(
@@ -330,40 +338,40 @@ fn eval_expr_context(expr: &Expr, context: &[Option<Row>]) -> EngineResult<bool>
           && left_value >= right_value,
       )
     }
-    Expr::IsNull(value) => Ok(matches!(
+    QueryExpr::IsNull(value) => Ok(matches!(
       eval_expr_value_for_row_context(value, context)?,
       Value::Null
     )),
-    Expr::IsNotNull(value) => Ok(!matches!(
+    QueryExpr::IsNotNull(value) => Ok(!matches!(
       eval_expr_value_for_row_context(value, context)?,
       Value::Null
     )),
-    Expr::And(left, right) => {
+    QueryExpr::And(left, right) => {
       Ok(eval_expr_context(left, context)? && eval_expr_context(right, context)?)
     }
-    Expr::Or(left, right) => {
+    QueryExpr::Or(left, right) => {
       Ok(eval_expr_context(left, context)? || eval_expr_context(right, context)?)
     }
-    Expr::Not(inner) => Ok(!eval_expr_context(inner, context)?),
-    Expr::InList { .. } | Expr::InSubquery { .. } | Expr::Like { .. } => Err(
+    QueryExpr::Not(inner) => Ok(!eval_expr_context(inner, context)?),
+    QueryExpr::InList { .. } | QueryExpr::InSubquery { .. } | QueryExpr::Like { .. } => Err(
       EngineError::Unsupported("predicate not supported in join context"),
     ),
   }
 }
 
 fn eval_expr_value_for_row_context(
-  expr: &ExprValue,
+  expr: &QueryExprValue,
   context: &[Option<Row>],
 ) -> EngineResult<Value> {
   match expr {
-    ExprValue::Value(value) => Ok(value.clone()),
-    ExprValue::Column(column) => {
+    QueryExprValue::Value(value) => Ok(value.clone()),
+    QueryExprValue::Column(column) => {
       let row = context
-        .get(usize::from(column.table_index))
+        .get(column.table_index as usize)
         .ok_or(EngineError::InvalidQuery("table index out of bounds"))?;
 
       if let Some(row) = row {
-        let index = usize::from(column.column_index);
+        let index = column.column_index as usize;
         let value = row
           .get(index)
           .ok_or(EngineError::InvalidQuery("expression column out of bounds"))?;
@@ -378,9 +386,9 @@ fn eval_expr_value_for_row_context(
 async fn execute_insert<M, F>(
   engine: &Engine<M, F>,
   tables: &[String],
-  table_index: TableIndex,
+  table_index: QueryTableIndex,
   row: Row,
-  returning: Option<Vec<Column>>,
+  returning: Option<Vec<QueryColumn>>,
 ) -> EngineResult<QueryResult>
 where
   M: BTreeManager<F>,
@@ -417,10 +425,10 @@ where
 async fn execute_update<M, F>(
   engine: &Engine<M, F>,
   tables: &[String],
-  table_index: TableIndex,
-  assignments: &[UpdateAssignment],
-  predicate: Option<&Expr>,
-  returning: Option<Vec<Column>>,
+  table_index: QueryTableIndex,
+  assignments: &[QueryUpdateAssignment],
+  predicate: Option<&QueryExpr>,
+  returning: Option<Vec<QueryColumn>>,
 ) -> EngineResult<QueryResult>
 where
   M: BTreeManager<F>,
@@ -462,7 +470,7 @@ where
         ));
       }
 
-      let index = usize::from(assignment.column.column_index);
+      let index = assignment.column.column_index as usize;
       if index >= new_row.len() {
         tx.rollback().await?;
         return Err(EngineError::InvalidQuery("update assignment out of bounds"));
@@ -496,9 +504,9 @@ where
 async fn execute_delete<M, F>(
   engine: &Engine<M, F>,
   tables: &[String],
-  table_index: TableIndex,
-  predicate: Option<&Expr>,
-  returning: Option<Vec<Column>>,
+  table_index: QueryTableIndex,
+  predicate: Option<&QueryExpr>,
+  returning: Option<Vec<QueryColumn>>,
 ) -> EngineResult<QueryResult>
 where
   M: BTreeManager<F>,
@@ -545,7 +553,7 @@ where
 async fn build_query_result_columns_for_query<M, F>(
   engine: &Engine<M, F>,
   tables: &[String],
-  projection: &[Column],
+  projection: &[QueryColumn],
 ) -> EngineResult<Vec<QueryResultColumn>>
 where
   M: BTreeManager<F>,
@@ -572,8 +580,8 @@ where
 async fn build_query_result_columns<M, F>(
   engine: &Engine<M, F>,
   table: &str,
-  table_index: TableIndex,
-  projection: &[Column],
+  table_index: QueryTableIndex,
+  projection: &[QueryColumn],
 ) -> EngineResult<Vec<QueryResultColumn>>
 where
   M: BTreeManager<F>,
@@ -593,7 +601,7 @@ where
         .map(|(column_index, column_schema)| QueryResultColumn {
           name: column_schema.name.clone(),
           source_table: Some(table.to_string()),
-          source_column_index: Some(column_index as ColumnIndex),
+          source_column_index: Some(column_index as ColumnSchemaIndex),
         })
         .collect(),
     );
@@ -615,8 +623,8 @@ where
 fn build_query_result_column(
   schema: &TableSchema,
   table: &str,
-  table_index: TableIndex,
-  column: &Column,
+  table_index: QueryTableIndex,
+  column: &QueryColumn,
 ) -> EngineResult<QueryResultColumn> {
   if column.table_index != table_index {
     return Err(EngineError::Unsupported(
@@ -624,7 +632,7 @@ fn build_query_result_column(
     ));
   }
 
-  let index = usize::from(column.column_index);
+  let index = column.column_index as usize;
   let column_schema = schema
     .columns
     .get(index)
@@ -640,8 +648,8 @@ fn build_query_result_column(
 async fn execute_returning<M, F>(
   engine: &Engine<M, F>,
   table: &str,
-  table_index: TableIndex,
-  returning: Option<&[Column]>,
+  table_index: QueryTableIndex,
+  returning: Option<&[QueryColumn]>,
   rows: Vec<Row>,
 ) -> EngineResult<QueryResult>
 where
@@ -663,7 +671,11 @@ where
   Ok(QueryResult::new_with_columns(projected_rows, columns))
 }
 
-fn project_row(row: &Row, table_index: TableIndex, projection: &[Column]) -> EngineResult<Row> {
+fn project_row(
+  row: &Row,
+  table_index: QueryTableIndex,
+  projection: &[QueryColumn],
+) -> EngineResult<Row> {
   if projection.is_empty() {
     return Ok(row.clone());
   }
@@ -676,7 +688,7 @@ fn project_row(row: &Row, table_index: TableIndex, projection: &[Column]) -> Eng
       ));
     }
 
-    let index = usize::from(column.column_index);
+    let index = column.column_index as usize;
     let value = row
       .get(index)
       .ok_or(EngineError::InvalidQuery("projection out of bounds"))?;
@@ -687,9 +699,9 @@ fn project_row(row: &Row, table_index: TableIndex, projection: &[Column]) -> Eng
 }
 
 fn matches_predicate(
-  predicate: Option<&Expr>,
+  predicate: Option<&QueryExpr>,
   row: &Row,
-  table_index: TableIndex,
+  table_index: QueryTableIndex,
 ) -> EngineResult<bool> {
   match predicate {
     Some(expr) => eval_expr(expr, row, table_index),
@@ -697,41 +709,41 @@ fn matches_predicate(
   }
 }
 
-fn eval_expr(expr: &Expr, row: &Row, table_index: TableIndex) -> EngineResult<bool> {
+fn eval_expr(expr: &QueryExpr, row: &Row, table_index: QueryTableIndex) -> EngineResult<bool> {
   match expr {
-    Expr::Equals(left, right) => Ok(
+    QueryExpr::Equals(left, right) => Ok(
       eval_expr_value_for_row(left, row, table_index)?
         == eval_expr_value_for_row(right, row, table_index)?,
     ),
-    Expr::NotEquals(left, right) => Ok(
+    QueryExpr::NotEquals(left, right) => Ok(
       eval_expr_value_for_row(left, row, table_index)?
         != eval_expr_value_for_row(right, row, table_index)?,
     ),
-    Expr::LessThan(left, right) => Ok(
+    QueryExpr::LessThan(left, right) => Ok(
       eval_expr_value_for_row(left, row, table_index)?
         < eval_expr_value_for_row(right, row, table_index)?,
     ),
-    Expr::LessThanOrEquals(left, right) => Ok(
+    QueryExpr::LessThanOrEquals(left, right) => Ok(
       eval_expr_value_for_row(left, row, table_index)?
         <= eval_expr_value_for_row(right, row, table_index)?,
     ),
-    Expr::GreaterThan(left, right) => Ok(
+    QueryExpr::GreaterThan(left, right) => Ok(
       eval_expr_value_for_row(left, row, table_index)?
         > eval_expr_value_for_row(right, row, table_index)?,
     ),
-    Expr::GreaterThanOrEquals(left, right) => Ok(
+    QueryExpr::GreaterThanOrEquals(left, right) => Ok(
       eval_expr_value_for_row(left, row, table_index)?
         >= eval_expr_value_for_row(right, row, table_index)?,
     ),
-    Expr::IsNull(value) => Ok(matches!(
+    QueryExpr::IsNull(value) => Ok(matches!(
       eval_expr_value_for_row(value, row, table_index)?,
       Value::Null
     )),
-    Expr::IsNotNull(value) => Ok(!matches!(
+    QueryExpr::IsNotNull(value) => Ok(!matches!(
       eval_expr_value_for_row(value, row, table_index)?,
       Value::Null
     )),
-    Expr::InList {
+    QueryExpr::InList {
       expr,
       list,
       negated,
@@ -740,8 +752,8 @@ fn eval_expr(expr: &Expr, row: &Row, table_index: TableIndex) -> EngineResult<bo
       let contains = list.iter().any(|item| item == &value);
       Ok(if *negated { !contains } else { contains })
     }
-    Expr::InSubquery { .. } => Err(EngineError::Unsupported("in-subquery predicate")),
-    Expr::Like {
+    QueryExpr::InSubquery { .. } => Err(EngineError::Unsupported("in-subquery predicate")),
+    QueryExpr::Like {
       expr,
       pattern,
       negated,
@@ -754,31 +766,31 @@ fn eval_expr(expr: &Expr, row: &Row, table_index: TableIndex) -> EngineResult<bo
       };
       Ok(if *negated { !matches } else { matches })
     }
-    Expr::And(left, right) => {
+    QueryExpr::And(left, right) => {
       Ok(eval_expr(left, row, table_index)? && eval_expr(right, row, table_index)?)
     }
-    Expr::Or(left, right) => {
+    QueryExpr::Or(left, right) => {
       Ok(eval_expr(left, row, table_index)? || eval_expr(right, row, table_index)?)
     }
-    Expr::Not(inner) => Ok(!eval_expr(inner, row, table_index)?),
+    QueryExpr::Not(inner) => Ok(!eval_expr(inner, row, table_index)?),
   }
 }
 
 fn eval_expr_value_for_row(
-  expr: &ExprValue,
+  expr: &QueryExprValue,
   row: &Row,
-  table_index: TableIndex,
+  table_index: QueryTableIndex,
 ) -> EngineResult<Value> {
   match expr {
-    ExprValue::Value(value) => Ok(value.clone()),
-    ExprValue::Column(column) => {
+    QueryExprValue::Value(value) => Ok(value.clone()),
+    QueryExprValue::Column(column) => {
       if column.table_index != table_index {
         return Err(EngineError::Unsupported(
           "expression references another table",
         ));
       }
 
-      let index = usize::from(column.column_index);
+      let index = column.column_index as usize;
       let value = row
         .get(index)
         .ok_or(EngineError::InvalidQuery("expression column out of bounds"))?;
@@ -787,9 +799,9 @@ fn eval_expr_value_for_row(
   }
 }
 
-fn resolve_table_name(tables: &[String], table_index: TableIndex) -> EngineResult<&str> {
+fn resolve_table_name(tables: &[String], table_index: QueryTableIndex) -> EngineResult<&str> {
   tables
-    .get(usize::from(table_index))
+    .get(table_index as usize)
     .map(|name| name.as_str())
     .ok_or(EngineError::InvalidQuery("table index out of bounds"))
 }
