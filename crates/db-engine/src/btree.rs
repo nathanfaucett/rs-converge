@@ -1,15 +1,11 @@
 #[cfg(not(feature = "std"))]
-use alloc::{boxed::Box, string::String};
-#[cfg(not(feature = "std"))]
-use core::any::Any;
-use core::{borrow::Borrow, error::Error, ops::RangeBounds};
-#[cfg(feature = "std")]
-use std::any::Any;
+use alloc::{
+  boxed::Box,
+  string::{String, ToString},
+  vec::Vec,
+};
 
-#[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
-#[cfg(feature = "std")]
-use std::vec::Vec;
+use core::{any::Any, borrow::Borrow, error::Error, ops::RangeBounds};
 
 use postcard::{from_bytes, to_stdvec};
 use thiserror::Error;
@@ -47,6 +43,13 @@ pub enum BTreeError {
 pub type BTreeResult<T> = Result<T, BTreeError>;
 
 impl BTreeError {
+  pub fn custom<T>(error: T) -> Self
+  where
+    T: ToString,
+  {
+    BTreeError::Custom(error.to_string())
+  }
+
   pub fn other<E>(error: E) -> Self
   where
     E: Error + Send + Sync + 'static,

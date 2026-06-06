@@ -1,7 +1,8 @@
 #[cfg(not(feature = "std"))]
-extern crate alloc;
-
 use alloc::vec::Vec;
+
+use core::ops::{Deref, DerefMut};
+
 use serde::{Deserialize, Serialize};
 
 /// Wrapper around `automerge::AutoCommit` that provides `Serialize`/`Deserialize`
@@ -43,14 +44,15 @@ impl From<AutoCommit> for automerge::AutoCommit {
   }
 }
 
-impl core::ops::Deref for AutoCommit {
+impl Deref for AutoCommit {
   type Target = automerge::AutoCommit;
+
   fn deref(&self) -> &Self::Target {
     &self.0
   }
 }
 
-impl core::ops::DerefMut for AutoCommit {
+impl DerefMut for AutoCommit {
   fn deref_mut(&mut self) -> &mut Self::Target {
     &mut self.0
   }

@@ -94,13 +94,17 @@ where
 
 #[cfg(all(test, feature = "in-memory"))]
 mod tests {
-  use super::*;
+
   use futures::executor::block_on;
 
   use crate::btree::{
     BTree, BTreeManager, BTreeReadExecutor, BTreeTransaction, BTreeWriteExecutor,
   };
   use crate::{BTreeDefinition, DefaultBTreeManager};
+  #[cfg(not(feature = "std"))]
+  use alloc::string::{String, ToString};
+  #[cfg(feature = "std")]
+  use std::string::{String, ToString};
 
   #[derive(Clone)]
   struct TestDefinition(String);

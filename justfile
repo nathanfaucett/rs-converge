@@ -35,10 +35,10 @@ clippy:
     cargo clippy --workspace --all-targets -- -D warnings
 
 clippy-fix:
-    cargo clippy --workspace --all-targets --fix --allow-dirty -- -D warnings
+    cargo clippy --workspace --all-targets --fix --allow-dirty --broken-code -- -D warnings
 
 crap *args:
-    RUST_MIN_STACK=67108864 cargo hack llvm-cov --workspace --lcov --output-path /tmp/lcov.info && cargo crap --workspace --lcov /tmp/lcov.info  {{args}}
+    RUST_MIN_STACK=67108864 cargo hack llvm-cov --workspace --lcov --output-path /tmp/lcov.info && cargo crap --workspace --lcov /tmp/lcov.info  {{ args }}
 
 crap-summary:
     just crap --summary

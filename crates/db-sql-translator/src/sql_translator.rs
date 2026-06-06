@@ -1,5 +1,6 @@
 #[cfg(not(feature = "std"))]
 use alloc::{
+  borrow::ToOwned,
   boxed::Box,
   format,
   string::{String, ToString},
@@ -840,7 +841,6 @@ where
 {
   match stmt {
     SQLStatement::Update(update) => {
-      let update = update; // &sqlparser::ast::Update
       let table = &update.table;
       if !table.joins.is_empty() {
         return Err(TranslateError::Custom(

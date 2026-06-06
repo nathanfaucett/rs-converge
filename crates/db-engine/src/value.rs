@@ -23,7 +23,9 @@ use crate::JsonValue;
   derive(tsify::Tsify),
   tsify(into_wasm_abi, from_wasm_abi)
 )]
+#[derive(Default)]
 pub enum Value {
+  #[default]
   Null,
   Type(ValueType),
   Uuid(Uuid),
@@ -33,12 +35,6 @@ pub enum Value {
   Text(String),
   Blob(Vec<u8>),
   Json(JsonValue),
-}
-
-impl Default for Value {
-  fn default() -> Self {
-    Value::Null
-  }
 }
 
 impl From<()> for Value {

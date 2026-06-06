@@ -220,7 +220,7 @@ impl<B> BTreeWriteExecutor<Uuid, AutoCommit> for AutomergeBTreeInner<B>
 where
   B: BTree<DocumentChangeKey, Vec<u8>>,
 {
-  async fn insert<'a>(&'a mut self, key: Uuid, value: AutoCommit) -> BTreeResult<()> {
+  async fn insert(&mut self, key: Uuid, value: AutoCommit) -> BTreeResult<()> {
     let mut tx = self.inner.transaction().await?;
     self.insert_with_tx(&mut tx, key, value).await?;
     tx.commit().await
@@ -304,7 +304,7 @@ impl<B> BTreeWriteExecutor<Uuid, AutoCommit> for AutomergeBTree<B>
 where
   B: BTree<Uuid, AutoCommit>,
 {
-  async fn insert<'a>(&'a mut self, key: Uuid, value: AutoCommit) -> BTreeResult<()>
+  async fn insert(&mut self, key: Uuid, value: AutoCommit) -> BTreeResult<()>
 where {
     let mut tx = self.inner.transaction().await?;
     tx.insert(key, value).await?;

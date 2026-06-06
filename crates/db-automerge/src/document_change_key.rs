@@ -32,12 +32,12 @@ pub(super) fn document_entry_bounds(doc_id: Uuid) -> (DocumentChangeKey, Documen
   (
     DocumentChangeKey {
       doc_id,
-      doc_type: DocumentType::Incremental,
+      doc_type: DocumentType::Snapshot,
       change_hash: [0u8; 32],
     },
     DocumentChangeKey {
       doc_id,
-      doc_type: DocumentType::Snapshot,
+      doc_type: DocumentType::Incremental,
       change_hash: [255u8; 32],
     },
   )
@@ -47,12 +47,12 @@ pub(super) fn all_document_bounds() -> (DocumentChangeKey, DocumentChangeKey) {
   (
     DocumentChangeKey {
       doc_id: Uuid::from_u128(0),
-      doc_type: DocumentType::Incremental,
+      doc_type: DocumentType::Snapshot,
       change_hash: [0u8; 32],
     },
     DocumentChangeKey {
       doc_id: Uuid::from_u128(u128::MAX),
-      doc_type: DocumentType::Snapshot,
+      doc_type: DocumentType::Incremental,
       change_hash: [255u8; 32],
     },
   )

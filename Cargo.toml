@@ -2,7 +2,7 @@
 name = "db"
 description = "Database built on top of a B-Tree implementation."
 repository = "https://github.com/aicacia/rs-db"
-rust-version = "1.95"
+rust-version = "1.96"
 edition = "2024"
 
 [package.version]
@@ -58,8 +58,21 @@ version = "0.1.0"
 edition = "2024"
 authors = ["nathanfaucett@gmail.com"]
 license = "MIT OR Apache-2.0"
-rust-version = "1.95"
+rust-version = "1.96"
 repository = "https://github.com/aicacia/rs-db"
+
+[[example]]
+name = "in_memory"
+required-features = ["in-memory"]
+
+[[example]]
+name = "in_memory_cli"
+required-features = ["in-memory"]
+
+[[example]]
+name = "redb"
+required-features = ["redb"]
+
 
 [workspace.lints.rust]
 ambiguous_negative_literals = "warn"

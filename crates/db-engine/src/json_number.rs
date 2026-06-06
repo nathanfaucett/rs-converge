@@ -50,39 +50,37 @@ impl PartialEq for JsonNumber {
   }
 }
 
-impl PartialOrd for JsonNumber {
-  fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+impl Ord for JsonNumber {
+  fn cmp(&self, other: &Self) -> Ordering {
     match (self, other) {
-      (JsonNumber::I64(i1), JsonNumber::I64(i2)) => i1.partial_cmp(i2),
-      (JsonNumber::U64(u1), JsonNumber::U64(u2)) => u1.partial_cmp(u2),
-      (JsonNumber::F64(f1), JsonNumber::F64(f2)) => f1.partial_cmp(f2),
+      (JsonNumber::I64(i1), JsonNumber::I64(i2)) => i1.cmp(i2),
+      (JsonNumber::U64(u1), JsonNumber::U64(u2)) => u1.cmp(u2),
+      (JsonNumber::F64(f1), JsonNumber::F64(f2)) => f1.to_bits().cmp(&f2.to_bits()),
       (JsonNumber::I64(i), JsonNumber::U64(u)) => {
         if *i < 0 {
-          Some(Ordering::Less)
+          Ordering::Less
         } else {
-          (*i as u64).partial_cmp(u)
+          (*i as u64).cmp(u)
         }
       }
       (JsonNumber::U64(u), JsonNumber::I64(i)) => {
         if *i < 0 {
-          Some(Ordering::Greater)
+          Ordering::Greater
         } else {
-          u.partial_cmp(&(*i as u64))
+          u.cmp(&(*i as u64))
         }
       }
-      (JsonNumber::I64(i), JsonNumber::F64(f)) => (*i as f64).partial_cmp(f),
-      (JsonNumber::F64(f), JsonNumber::I64(i)) => f.partial_cmp(&(*i as f64)),
-      (JsonNumber::U64(u), JsonNumber::F64(f)) => (*u as f64).partial_cmp(f),
-      (JsonNumber::F64(f), JsonNumber::U64(u)) => f.partial_cmp(&(*u as f64)),
+      (JsonNumber::I64(i), JsonNumber::F64(f)) => (*i as f64).to_bits().cmp(&f.to_bits()),
+      (JsonNumber::F64(f), JsonNumber::I64(i)) => f.to_bits().cmp(&(*i as f64).to_bits()),
+      (JsonNumber::U64(u), JsonNumber::F64(f)) => (*u as f64).to_bits().cmp(&f.to_bits()),
+      (JsonNumber::F64(f), JsonNumber::U64(u)) => f.to_bits().cmp(&(*u as f64).to_bits()),
     }
   }
 }
 
-impl Ord for JsonNumber {
-  fn cmp(&self, other: &Self) -> Ordering {
-    self
-      .partial_cmp(other)
-      .expect("invalid comparison between JSON numbers")
+impl PartialOrd for JsonNumber {
+  fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+    Some(self.cmp(other))
   }
 }
 

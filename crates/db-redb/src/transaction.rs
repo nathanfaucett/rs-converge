@@ -81,68 +81,63 @@ where
   K: BTreeKey,
   V: BTreeValue,
 {
-  fn commit(self) -> impl core::future::Future<Output = BTreeResult<()>>
+  async fn commit(self) -> BTreeResult<()>
   where
     Self: Sized,
   {
-    async move {
-      if !self.write {
-        return Ok(());
-      }
+    if !self.write {
+      return Ok(());
+    }
 
-      // take ownership of the patch contents
-      let patch_map = {
-        let mut guard = self.patch.write().await;
-        std::mem::take(&mut guard.0)
-      };
+    // take ownership of the patch contents
+    let patch_map = {
+      let mut guard = self.patch.write().await;
+      std::mem::take(&mut guard.0)
+    };
 
-      if patch_map.is_empty() {
-        return Ok(());
-      }
+    if patch_map.is_empty() {
+      return Ok(());
+    }
 
-      let db = self.db.clone();
-      let table_def = self.table_def;
-      let id = self.id.clone();
+    let db = self.db.clone();
+    let table_def = self.table_def;
+    let id = self.id.clone();
 
-      let wt = db.begin_write().map_err(BTreeError::other)?;
-      let mut table = wt.open_table(table_def).map_err(BTreeError::other)?;
+    let wt = db.begin_write().map_err(BTreeError::other)?;
+    let mut table = wt.open_table(table_def).map_err(BTreeError::other)?;
 
-      for (k, entry) in patch_map {
-        let key_bin = k.encode()?;
-        let mut full_key = id.as_bytes().to_vec();
-        full_key.push(0u8);
-        full_key.extend_from_slice(&key_bin);
+    for (k, entry) in patch_map {
+      let key_bin = k.encode()?;
+      let mut full_key = id.as_bytes().to_vec();
+      full_key.push(0u8);
+      full_key.extend_from_slice(&key_bin);
 
-        match entry {
-          TransactionPatchEntry::Present(v) => {
-            let val_bin = v.encode()?;
-            table
-              .insert(full_key.as_slice(), val_bin.as_slice())
-              .map_err(BTreeError::other)?;
-          }
-          TransactionPatchEntry::Deleted => {
-            let _ = table
-              .remove(full_key.as_slice())
-              .map_err(BTreeError::other)?;
-          }
+      match entry {
+        TransactionPatchEntry::Present(v) => {
+          let val_bin = v.encode()?;
+          table
+            .insert(full_key.as_slice(), val_bin.as_slice())
+            .map_err(BTreeError::other)?;
+        }
+        TransactionPatchEntry::Deleted => {
+          let _ = table
+            .remove(full_key.as_slice())
+            .map_err(BTreeError::other)?;
         }
       }
-
-      drop(table);
-      wt.commit().map_err(BTreeError::other)?;
-      Ok(())
     }
+
+    drop(table);
+    wt.commit().map_err(BTreeError::other)?;
+    Ok(())
   }
 
-  fn rollback(self) -> impl core::future::Future<Output = BTreeResult<()>>
+  async fn rollback(self) -> BTreeResult<()>
   where
     Self: Sized,
   {
-    async move {
-      // discard the patch
-      let _ = self.patch.write().await;
-      Ok(())
-    }
+    let _ = self.patch.write().await;
+    Ok(())
   }
 }
 
@@ -316,7 +311,7 @@ where
   K: BTreeKey,
   V: BTreeValue,
 {
-  async fn insert<'a>(&'a mut self, key: K, value: V) -> BTreeResult<()>
+  async fn insert(&mut self, key: K, value: V) -> BTreeResult<()>
   where
     K: Ord,
   {

@@ -146,7 +146,7 @@ where
   K: BTreeKey,
   V: BTreeValue,
 {
-  async fn insert<'a>(&'a mut self, key: K, value: V) -> BTreeResult<()>
+  async fn insert(&mut self, key: K, value: V) -> BTreeResult<()>
   where
     K: Ord,
   {
@@ -215,7 +215,7 @@ where
 {
   type Transaction = RedbTransaction<K, V>;
 
-  async fn transaction<'a>(&'a self) -> BTreeResult<Self::Transaction> {
+  async fn transaction(&self) -> BTreeResult<Self::Transaction> {
     RedbTransaction::new_write(self.db.clone(), &self.id, self.table_def)
   }
 }

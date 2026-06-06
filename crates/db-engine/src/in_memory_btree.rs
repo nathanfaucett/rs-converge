@@ -1,10 +1,7 @@
 #[cfg(not(feature = "std"))]
-use alloc::{
-  boxed::Box,
-  collections::BTreeMap,
-  string::{String, ToString},
-  sync::Arc,
-};
+use alloc::collections::BTreeMap;
+#[cfg(not(feature = "std"))]
+use alloc::sync::Arc;
 #[cfg(feature = "std")]
 use std::{collections::BTreeMap, sync::Arc};
 
