@@ -8,7 +8,12 @@ use thiserror::Error;
 
 use crate::{DescribeSchema, Statement, Value};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(
+  feature = "wasm",
+  derive(tsify::Tsify),
+  tsify(into_wasm_abi, from_wasm_abi)
+)]
 pub enum QueryParams {
   Positional(Vec<Value>),
   Named(HashMap<String, Value>),

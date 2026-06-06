@@ -10,9 +10,10 @@ mod concurrency;
 mod default_manager;
 mod engine;
 mod executor;
-mod from_row;
 #[cfg(feature = "in-memory")]
 mod in_memory_btree;
+mod json_number;
+mod json_value;
 mod query;
 mod schema;
 mod translator;
@@ -25,9 +26,10 @@ pub use btree::{
 pub use concurrency::{MaybeSend, MaybeSendFuture, MaybeSendStream, MaybeSync};
 pub use default_manager::DefaultBTreeManager;
 pub use engine::{Engine, EngineError, EngineResult};
-pub use from_row::{FromRow, RowDeserializeError};
 #[cfg(feature = "in-memory")]
 pub use in_memory_btree::{InMemoryBTree, InMemoryBTreeFactory};
+pub use json_number::JsonNumber;
+pub use json_value::JsonValue;
 pub use query::{
   Column, DdlOp, Expr, ExprValue, Join, JoinKind, OrderBy, Query, QueryResult, QueryResultColumn,
   SelectOptions, Statement, TableIndex, UpdateAssignment,

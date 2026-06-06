@@ -11,7 +11,18 @@ use core::{
 };
 use uuid::Uuid;
 
+use crate::JsonValue;
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(
+  feature = "automerge",
+  derive(autosurgeon::Hydrate, autosurgeon::Reconcile)
+)]
+#[cfg_attr(
+  feature = "wasm",
+  derive(tsify::Tsify),
+  tsify(into_wasm_abi, from_wasm_abi)
+)]
 pub enum Value {
   Null,
   Type(ValueType),
@@ -21,7 +32,79 @@ pub enum Value {
   Float(f64),
   Text(String),
   Blob(Vec<u8>),
-  Json(serde_json::Value),
+  Json(JsonValue),
+}
+
+impl Default for Value {
+  fn default() -> Self {
+    Value::Null
+  }
+}
+
+impl From<()> for Value {
+  fn from(_: ()) -> Self {
+    Value::Null
+  }
+}
+
+impl From<ValueType> for Value {
+  fn from(value_type: ValueType) -> Self {
+    Value::Type(value_type)
+  }
+}
+
+impl From<Uuid> for Value {
+  fn from(uuid: Uuid) -> Self {
+    Value::Uuid(uuid)
+  }
+}
+
+impl From<bool> for Value {
+  fn from(b: bool) -> Self {
+    Value::Bool(b)
+  }
+}
+
+impl From<i64> for Value {
+  fn from(i: i64) -> Self {
+    Value::Integer(i)
+  }
+}
+
+impl From<f64> for Value {
+  fn from(f: f64) -> Self {
+    Value::Float(f)
+  }
+}
+
+impl From<String> for Value {
+  fn from(s: String) -> Self {
+    Value::Text(s)
+  }
+}
+
+impl From<&str> for Value {
+  fn from(s: &str) -> Self {
+    Value::Text(s.to_string())
+  }
+}
+
+impl From<Vec<u8>> for Value {
+  fn from(bytes: Vec<u8>) -> Self {
+    Value::Blob(bytes)
+  }
+}
+
+impl From<JsonValue> for Value {
+  fn from(json: JsonValue) -> Self {
+    Value::Json(json)
+  }
+}
+
+impl From<serde_json::Value> for Value {
+  fn from(json: serde_json::Value) -> Self {
+    Value::Json(JsonValue::from(json))
+  }
 }
 
 impl Value {
@@ -169,7 +252,7 @@ impl Value {
     }
   }
 
-  pub fn as_json(&self) -> Option<&serde_json::Value> {
+  pub fn as_json(&self) -> Option<&JsonValue> {
     match self {
       Value::Json(j) => Some(j),
       _ => None,
@@ -180,6 +263,10 @@ impl Value {
 pub type Row = Vec<Value>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(
+  feature = "automerge",
+  derive(autosurgeon::Hydrate, autosurgeon::Reconcile)
+)]
 pub enum ValueType {
   Null,
   Type,
@@ -205,5 +292,17 @@ impl ValueType {
       ValueType::Blob => 7,
       ValueType::Json => 8,
     }
+  }
+}
+
+impl Ord for ValueType {
+  fn cmp(&self, other: &Self) -> Ordering {
+    self.rank().cmp(&other.rank())
+  }
+}
+
+impl PartialOrd for ValueType {
+  fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+    Some(self.cmp(other))
   }
 }

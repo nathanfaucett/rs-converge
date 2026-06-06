@@ -94,6 +94,7 @@ where
 
 #[cfg(all(test, feature = "in-memory"))]
 mod tests {
+  use super::*;
   use futures::executor::block_on;
 
   use crate::btree::{

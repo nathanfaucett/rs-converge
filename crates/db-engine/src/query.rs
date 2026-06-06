@@ -1,12 +1,9 @@
 #[cfg(all(not(feature = "std"), feature = "wasm"))]
 use alloc::string::ToString;
 #[cfg(not(feature = "std"))]
-use alloc::{borrow::ToOwned, boxed::Box, string::String, vec, vec::Vec};
+use alloc::{boxed::Box, string::String, vec, vec::Vec};
 
-use crate::{
-  ColumnIndex, FromRow, IndexSchema, Row, TableSchema, Value,
-  from_row::{FromRowResult, RowDeserializeError},
-};
+use crate::{ColumnIndex, IndexSchema, Row, TableSchema, Value};
 
 pub type TableIndex = u16;
 
@@ -247,20 +244,6 @@ impl QueryResult {
 
   pub fn new_with_columns(rows: Vec<Row>, columns: Vec<QueryResultColumn>) -> Self {
     Self { rows, columns }
-  }
-
-  pub fn typed<T: FromRow>(&self) -> FromRowResult<Vec<T>> {
-    if self.columns.is_empty() {
-      return Err(RowDeserializeError::SchemaError(
-        "result has no column metadata".to_owned(),
-      ));
-    }
-
-    self
-      .rows
-      .iter()
-      .map(|row| T::from_named_row(&self.columns, row))
-      .collect()
   }
 }
 

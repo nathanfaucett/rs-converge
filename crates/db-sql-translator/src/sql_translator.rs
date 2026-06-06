@@ -1,6 +1,5 @@
 #[cfg(not(feature = "std"))]
 use alloc::{
-  borrow::ToOwned,
   boxed::Box,
   format,
   string::{String, ToString},
@@ -654,7 +653,7 @@ fn parse_literal_for_type(
     db_engine::ValueType::Json => {
       let candidate = strip_quotes(s);
       serde_json::from_str::<serde_json::Value>(&candidate)
-        .map(db_engine::Value::Json)
+        .map(db_engine::Value::from)
         .map_err(|e| TranslateError::Custom(format!("failed to parse json: {}", e)))
     }
     db_engine::ValueType::Blob => Err(TranslateError::Custom(
@@ -682,7 +681,7 @@ fn expr_to_value_guess(expr: &SQLExpr) -> Result<db_engine::Value, TranslateErro
     }
     // try json
     if let Ok(j) = serde_json::from_str::<serde_json::Value>(&inner) {
-      return Ok(db_engine::Value::Json(j));
+      return Ok(db_engine::Value::from(j));
     }
     return Ok(db_engine::Value::Text(inner));
   }
