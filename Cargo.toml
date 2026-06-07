@@ -74,11 +74,6 @@ required-features = ["in-memory"]
 name = "in_memory_cli"
 required-features = ["in-memory"]
 
-[[example]]
-name = "redb"
-required-features = ["redb"]
-
-
 [workspace.lints.rust]
 ambiguous_negative_literals = "warn"
 missing_debug_implementations = "warn"

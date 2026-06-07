@@ -1,8 +1,12 @@
-use alloc::collections::BTreeMap;
-use alloc::vec::Vec;
-use async_stream::stream;
+#[cfg(not(feature = "std"))]
+use alloc::{collections::BTreeMap, vec::Vec};
+#[cfg(feature = "std")]
+use std::collections::BTreeMap;
+
 use core::{borrow::Borrow, ops::RangeBounds};
 
+use async_stream::stream;
+use automerge::AutoCommit;
 use futures::{Stream, StreamExt, pin_mut};
 use uuid::Uuid;
 
@@ -11,10 +15,8 @@ use db_core::{MaybeSend, MaybeSendStream};
 
 use crate::{
   DocumentChangeKey,
-  automerge_serde::AutoCommit,
-  compaction::build_lifecycle_write,
-  document_change_key::document_entry_bounds,
-  reconstruction::{reconstruct_state, uuid_in_range},
+  compaction::{build_incremental_write, load_autocommit},
+  reconstruction::reconstruct_state,
 };
 
 pub struct AutomergeBTreeTransactionInner<T> {
@@ -36,12 +38,12 @@ where
   T: BTreeTransaction<DocumentChangeKey, Vec<u8>>,
 {
   async fn reconstruct_inner_doc(&self, doc_id: Uuid) -> BTreeResult<Option<Vec<u8>>> {
-    let (start, end) = document_entry_bounds(doc_id);
     let mut latest_snapshot: Option<Vec<u8>> = None;
     let mut deltas: Vec<Vec<u8>> = Vec::new();
 
-    let stream = self.inner_tx.range(start..=end);
+    let stream = self.inner_tx.range(DocumentChangeKey::range_for(doc_id));
     pin_mut!(stream);
+
     let mut has_entries = false;
     while let Some(item) = stream.next().await {
       let (key, entry) = item?;
@@ -61,13 +63,13 @@ where
   }
 
   async fn load_existing_state(inner_tx: &mut T, doc_id: Uuid) -> BTreeResult<Option<Vec<u8>>> {
-    let (start, end) = document_entry_bounds(doc_id);
     let mut latest_snapshot: Option<Vec<u8>> = None;
     let mut deltas: Vec<Vec<u8>> = Vec::new();
     let mut has_entries = false;
 
-    let stream = inner_tx.range(start..=end);
+    let stream = inner_tx.range(DocumentChangeKey::range_for(doc_id));
     pin_mut!(stream);
+
     while let Some(item) = stream.next().await {
       let (key, entry) = item?;
       has_entries = true;
@@ -105,7 +107,8 @@ where
         let existing_state = Self::load_existing_state(inner_tx, doc_id).await?;
 
         if let Some((entry_key, entry_bytes)) =
-          build_lifecycle_write(doc_id, snapshot_doc, existing_state).map_err(BTreeError::custom)?
+          build_incremental_write(doc_id, snapshot_doc, existing_state)
+            .map_err(BTreeError::custom)?
         {
           inner_tx.insert(entry_key, entry_bytes).await?;
         }
@@ -118,10 +121,9 @@ where
   }
 
   async fn remove_doc_entries(inner_tx: &mut T, doc_id: Uuid) -> BTreeResult<()> {
-    let (start, end) = document_entry_bounds(doc_id);
     let keys_to_remove: Vec<DocumentChangeKey> = {
       let mut collected: Vec<DocumentChangeKey> = Vec::new();
-      let stream = inner_tx.range(start.clone()..=end.clone());
+      let stream = inner_tx.range(DocumentChangeKey::range_for(doc_id));
       pin_mut!(stream);
       while let Some(item) = stream.next().await {
         let (k, _v) = item?;
@@ -170,7 +172,7 @@ where
       return Ok(pending.clone());
     }
     match self.reconstruct_inner_doc(doc_id).await? {
-      Some(bytes) => crate::compaction::load_autocommit(&bytes).map(Some),
+      Some(bytes) => load_autocommit(&bytes).map(Some),
       None => Ok(None),
     }
   }
@@ -181,15 +183,13 @@ where
     R: core::ops::RangeBounds<Uuid> + MaybeSend + 'a,
   {
     stream! {
-      let (start_doc, end_doc) = crate::document_change_key::all_document_bounds();
-
       let mut merged: BTreeMap<Uuid, Vec<u8>> = BTreeMap::new();
 
       let mut current_doc: Option<Uuid> = None;
       let mut latest_snapshot: Option<Vec<u8>> = None;
       let mut deltas_after_snapshot: Vec<Vec<u8>> = Vec::new();
 
-      let stream = self.inner_tx.range(start_doc.clone()..=end_doc.clone());
+      let stream = self.inner_tx.range(DocumentChangeKey::map_uuid_range(range));
       pin_mut!(stream);
 
       while let Some(item) = stream.next().await {
@@ -222,13 +222,10 @@ where
         &mut deltas_after_snapshot,
       );
 
-      apply_pending_overrides(&range, &self.pending, &mut merged);
+      apply_pending_overrides(&self.pending, &mut merged);
 
       for (doc_id, state) in merged.into_iter() {
-        if !uuid_in_range(&range, &doc_id) {
-          continue;
-        }
-        match crate::compaction::load_autocommit(&state) {
+        match load_autocommit(&state) {
           Ok(doc) => yield Ok((doc_id, doc)),
           Err(e) => yield Err(e),
         }
@@ -266,7 +263,7 @@ where
       self.pending.insert(doc_id, None);
     }
     match existing_bytes {
-      Some(bytes) => crate::compaction::load_autocommit(&bytes).map(Some),
+      Some(bytes) => load_autocommit(&bytes).map(Some),
       None => Ok(None),
     }
   }
@@ -285,18 +282,11 @@ fn flush_current_doc(
   }
 }
 
-fn apply_pending_overrides<R>(
-  range: &R,
+fn apply_pending_overrides(
   pending: &BTreeMap<Uuid, Option<AutoCommit>>,
   merged: &mut BTreeMap<Uuid, Vec<u8>>,
-) where
-  R: RangeBounds<Uuid>,
-{
+) {
   for (doc_id, op) in pending {
-    if !uuid_in_range(range, doc_id) {
-      continue;
-    }
-
     if let Some(doc) = op {
       merged.insert(*doc_id, doc.clone().save());
     } else {

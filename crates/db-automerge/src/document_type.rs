@@ -10,4 +10,8 @@ impl DocumentType {
   pub fn is_snapshot(self) -> bool {
     matches!(self, DocumentType::Snapshot)
   }
+
+  pub fn is_incremental(self) -> bool {
+    matches!(self, DocumentType::Incremental)
+  }
 }

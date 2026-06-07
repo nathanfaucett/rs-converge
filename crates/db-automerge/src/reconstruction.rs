@@ -1,20 +1,20 @@
+#[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-use core::ops::{Bound, RangeBounds};
 
-use automerge::AutomergeError;
+use automerge::{AutoCommit, AutomergeError};
 use futures::{Stream, StreamExt, pin_mut};
 use uuid::Uuid;
 
 use db_btree::BTreeError;
 
-use crate::{DocumentChangeKey, DocumentType, automerge_serde::AutoCommit};
+use crate::{DocumentChangeKey, DocumentType};
 
-pub(super) struct ReconstructionAccumulator {
+pub struct ReconstructionAccumulator {
   latest_snapshot: Option<Vec<u8>>,
   deltas_after_snapshot: Vec<Vec<u8>>,
 }
 
-pub(super) struct ScannedDocumentState {
+pub struct ScannedDocumentState {
   pub accumulator: ReconstructionAccumulator,
   pub delta_count: usize,
   pub delta_bytes: usize,
@@ -22,14 +22,14 @@ pub(super) struct ScannedDocumentState {
 }
 
 impl ReconstructionAccumulator {
-  pub(super) fn new() -> Self {
+  pub fn new() -> Self {
     Self {
       latest_snapshot: None,
       deltas_after_snapshot: Vec::new(),
     }
   }
 
-  pub(super) fn apply(&mut self, doc_type: DocumentType, entry: Vec<u8>) {
+  pub fn apply(&mut self, doc_type: DocumentType, entry: Vec<u8>) {
     if doc_type.is_snapshot() {
       self.latest_snapshot = Some(entry);
     } else {
@@ -37,13 +37,13 @@ impl ReconstructionAccumulator {
     }
   }
 
-  pub(super) fn finish(self) -> Vec<u8> {
+  pub fn finish(self) -> Vec<u8> {
     let state = self.latest_snapshot.unwrap_or_default();
     reconstruct_state(Some(state), &self.deltas_after_snapshot)
   }
 }
 
-pub(super) async fn scan_document_entries<S>(stream: S) -> ScannedDocumentState
+pub async fn scan_document_entries<S>(stream: S) -> ScannedDocumentState
 where
   S: Stream<Item = Result<(DocumentChangeKey, Vec<u8>), BTreeError>>,
 {
@@ -53,6 +53,7 @@ where
   let mut has_entries = false;
 
   pin_mut!(stream);
+
   while let Some(item) = stream.next().await {
     let (key, entry) = match item {
       Ok(pair) => pair,
@@ -77,7 +78,7 @@ where
   }
 }
 
-pub(super) async fn collect_range_keys<S, K, V>(stream: S) -> Result<Vec<K>, BTreeError>
+pub async fn collect_range_keys<S, K, V>(stream: S) -> Result<Vec<K>, BTreeError>
 where
   S: Stream<Item = Result<(K, V), BTreeError>>,
 {
@@ -90,24 +91,7 @@ where
   Ok(keys)
 }
 
-pub(super) fn uuid_in_range<R>(range: &R, doc_id: &Uuid) -> bool
-where
-  R: RangeBounds<Uuid>,
-{
-  let start_ok = match range.start_bound() {
-    Bound::Included(lower) => doc_id >= lower,
-    Bound::Excluded(lower) => doc_id > lower,
-    Bound::Unbounded => true,
-  };
-  let end_ok = match range.end_bound() {
-    Bound::Included(upper) => doc_id <= upper,
-    Bound::Excluded(upper) => doc_id < upper,
-    Bound::Unbounded => true,
-  };
-  start_ok && end_ok
-}
-
-pub(super) fn flush_reconstructed_doc(
+pub fn flush_reconstructed_doc(
   current_doc: &mut Option<Uuid>,
   accumulator: &mut ReconstructionAccumulator,
 ) -> Result<Option<(Uuid, AutoCommit)>, AutomergeError> {
@@ -119,7 +103,7 @@ pub(super) fn flush_reconstructed_doc(
   }
 }
 
-pub(super) fn reconstruct_state(
+pub fn reconstruct_state(
   latest_snapshot: Option<Vec<u8>>,
   deltas_after_snapshot: &[Vec<u8>],
 ) -> Vec<u8> {

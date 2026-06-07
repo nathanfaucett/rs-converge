@@ -22,7 +22,6 @@ db-engine = { path = "../db-engine", default-features = false, features = [
 db-btree = { path = "../db-btree", default-features = false, features = ["std"] }
 db-core = { path = "../db-core", default-features = false, features = ["std"] }
 
-
 # Concurrency / streams
 async-stream = { version = "0.3", default-features = false, features = [] }
 futures = { version = "0.3", default-features = false, features = [

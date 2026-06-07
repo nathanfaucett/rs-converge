@@ -1,8 +1,8 @@
-use core::ops::RangeBounds;
-
 #[cfg(not(feature = "std"))]
-use alloc::string::ToString;
-use alloc::vec::Vec;
+use alloc::{string::ToString, vec::Vec};
+use automerge::AutoCommit;
+
+use core::{borrow::Borrow, ops::RangeBounds};
 
 use async_stream::stream;
 use futures::{Stream, StreamExt};
@@ -15,12 +15,9 @@ use db_core::{MaybeSend, MaybeSendStream};
 
 use crate::{
   AutomergeBTreeTransaction, CompactionPolicy, DocumentChangeKey, ThresholdPolicy,
-  automerge_serde::AutoCommit,
-  compaction::build_lifecycle_write,
-  document_change_key::{all_document_bounds, document_entry_bounds},
+  compaction::build_incremental_write,
   reconstruction::{
     ReconstructionAccumulator, collect_range_keys, flush_reconstructed_doc, scan_document_entries,
-    uuid_in_range,
   },
   run_compaction,
   transaction::AutomergeBTreeTransactionInner,
@@ -55,14 +52,14 @@ impl<B> AutomergeBTreeInner<B>
 where
   B: BTree<DocumentChangeKey, Vec<u8>>,
 {
-  async fn get_document(
+  async fn tx_get_document(
     &self,
     tx: &mut B::Transaction,
     doc_id: Uuid,
   ) -> BTreeResult<Option<(Vec<u8>, bool)>> {
-    let (start, end) = document_entry_bounds(doc_id);
+    let inner_range = DocumentChangeKey::range_for(doc_id);
 
-    let scan = scan_document_entries(tx.range(start.clone()..=end.clone())).await;
+    let scan = scan_document_entries(tx.range(inner_range)).await;
 
     if !scan.has_entries {
       return Ok(None);
@@ -74,7 +71,7 @@ where
       .policy
       .should_compact(scan.delta_count, scan.delta_bytes)
     {
-      run_compaction(tx, start.clone(), end.clone(), doc_id, state.clone()).await?;
+      run_compaction(tx, doc_id, state.clone()).await?;
       true
     } else {
       false
@@ -83,29 +80,25 @@ where
     Ok(Some((state, compacted)))
   }
 
-  async fn remove_document_keys(
-    &self,
-    tx: &mut B::Transaction,
-    start: DocumentChangeKey,
-    end: DocumentChangeKey,
-  ) -> BTreeResult<()> {
-    let keys_to_remove = collect_range_keys(tx.range(start.clone()..=end.clone())).await?;
+  async fn tx_remove_document(&self, tx: &mut B::Transaction, doc_id: Uuid) -> BTreeResult<()> {
+    let keys_to_remove = collect_range_keys(tx.range(DocumentChangeKey::range_for(doc_id))).await?;
+
     for key in keys_to_remove {
       tx.remove(&key).await?;
     }
     Ok(())
   }
 
-  async fn get_with_tx<'a, Q>(
+  async fn tx_get<'a, Q>(
     &'a self,
     tx: &'a mut B::Transaction,
     key: Q,
   ) -> BTreeResult<(Option<AutoCommit>, bool)>
   where
-    Q: core::borrow::Borrow<Uuid> + MaybeSend + 'a,
+    Q: Borrow<Uuid> + MaybeSend + 'a,
   {
     let doc_id = *key.borrow();
-    match self.get_document(tx, doc_id).await? {
+    match self.tx_get_document(tx, doc_id).await? {
       None => Ok((None, false)),
       Some((bytes, compacted)) => {
         let doc = AutoCommit::load(&bytes).map_err(|e| BTreeError::Custom(e.to_string()))?;
@@ -114,19 +107,19 @@ where
     }
   }
 
-  async fn insert_with_tx(
+  async fn tx_insert(
     &self,
     tx: &mut B::Transaction,
     key: Uuid,
     value: AutoCommit,
   ) -> BTreeResult<()> {
     let existing = self
-      .get_document(tx, key)
+      .tx_get_document(tx, key)
       .await?
       .map(|(bytes, _compacted)| bytes);
 
-    if let Some((internal_key, bytes)) =
-      build_lifecycle_write(key, value, existing).map_err(|e| BTreeError::Custom(e.to_string()))?
+    if let Some((internal_key, bytes)) = build_incremental_write(key, value, existing)
+      .map_err(|e| BTreeError::Custom(e.to_string()))?
     {
       tx.insert(internal_key, bytes).await?;
     }
@@ -134,21 +127,18 @@ where
     Ok(())
   }
 
-  async fn remove_with_tx<'a, Q>(
+  async fn tx_remove<'a, Q>(
     &self,
     tx: &'a mut B::Transaction,
     key: Q,
   ) -> BTreeResult<Option<AutoCommit>>
   where
-    Q: core::borrow::Borrow<Uuid> + MaybeSend + 'a,
+    Q: Borrow<Uuid> + MaybeSend + 'a,
   {
     let doc_id = *key.borrow();
-    let prev = self.get_document(tx, doc_id).await?;
-    let (start, end) = document_entry_bounds(doc_id);
+    let prev = self.tx_get_document(tx, doc_id).await?;
 
-    self
-      .remove_document_keys(tx, start.clone(), end.clone())
-      .await?;
+    self.tx_remove_document(tx, doc_id).await?;
 
     match prev {
       None => Ok(None),
@@ -166,10 +156,10 @@ where
 {
   async fn get<'a, Q>(&'a self, key: Q) -> BTreeResult<Option<AutoCommit>>
   where
-    Q: core::borrow::Borrow<Uuid> + MaybeSend + 'a,
+    Q: Borrow<Uuid> + MaybeSend + 'a,
   {
     let mut tx = self.inner.transaction().await?;
-    let (result, compacted) = self.get_with_tx(&mut tx, key).await?;
+    let (result, compacted) = self.tx_get(&mut tx, key).await?;
     if compacted {
       tx.commit().await?;
     }
@@ -178,12 +168,12 @@ where
 
   fn range<'a, R>(&'a self, range: R) -> impl Stream<Item = BTreeResult<(Uuid, AutoCommit)>> + 'a
   where
-    R: core::ops::RangeBounds<Uuid> + MaybeSend + 'a,
+    R: RangeBounds<Uuid> + MaybeSend + 'a,
   {
     stream! {
-      let (start_doc, end_doc) = all_document_bounds();
+      let inner_range = DocumentChangeKey::map_uuid_range(range);
 
-      let inner_stream = self.inner.range(start_doc.clone()..=end_doc.clone());
+      let inner_stream = self.inner.range(inner_range);
       futures::pin_mut!(inner_stream);
 
       let mut current_doc: Option<Uuid> = None;
@@ -191,9 +181,6 @@ where
 
       while let Some(item) = inner_stream.next().await {
         let (k, v) = item?;
-        if !uuid_in_range(&range, &k.doc_id) {
-          continue;
-        }
 
         if current_doc.is_none() {
           current_doc = Some(k.doc_id);
@@ -224,16 +211,16 @@ where
 {
   async fn insert(&mut self, key: Uuid, value: AutoCommit) -> BTreeResult<()> {
     let mut tx = self.inner.transaction().await?;
-    self.insert_with_tx(&mut tx, key, value).await?;
+    self.tx_insert(&mut tx, key, value).await?;
     tx.commit().await
   }
 
   async fn remove<'a, Q>(&'a mut self, key: Q) -> BTreeResult<Option<AutoCommit>>
   where
-    Q: core::borrow::Borrow<Uuid> + MaybeSend + 'a,
+    Q: Borrow<Uuid> + MaybeSend + 'a,
   {
     let mut tx = self.inner.transaction().await?;
-    let result = self.remove_with_tx(&mut tx, key).await?;
+    let result = self.tx_remove(&mut tx, key).await?;
     tx.commit().await?;
     Ok(result)
   }
@@ -286,7 +273,7 @@ where
 {
   async fn get<'a, Q>(&'a self, key: Q) -> BTreeResult<Option<AutoCommit>>
   where
-    Q: core::borrow::Borrow<Uuid> + MaybeSend + 'a,
+    Q: Borrow<Uuid> + MaybeSend + 'a,
   {
     self.inner.get(key).await
   }
@@ -315,7 +302,7 @@ where {
 
   async fn remove<'a, Q>(&'a mut self, key: Q) -> BTreeResult<Option<AutoCommit>>
   where
-    Q: core::borrow::Borrow<Uuid> + MaybeSend + 'a,
+    Q: Borrow<Uuid> + MaybeSend + 'a,
   {
     let mut tx = self.inner.transaction().await?;
     let value = tx.remove(key).await?;
