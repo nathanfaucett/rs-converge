@@ -10,13 +10,12 @@ use automerge::AutoCommit;
 use futures::{Stream, StreamExt, pin_mut};
 use uuid::Uuid;
 
-use db_btree::{BTreeError, BTreeReadExecutor, BTreeResult, BTreeTransaction, BTreeWriteExecutor};
+use db_btree::{BTreeReadExecutor, BTreeResult, BTreeTransaction, BTreeWriteExecutor};
 use db_core::{MaybeSend, MaybeSendStream};
 
 use crate::{
-  DocumentChangeKey,
-  compaction::{build_incremental_write, load_autocommit},
-  reconstruction::reconstruct_state,
+  DocumentChangeKey, DocumentType, hash_heads,
+  reconstruction::{ReconstructedDocument, reconstruct_document},
 };
 
 pub struct AutomergeBTreeTransactionInner<T> {
@@ -37,56 +36,6 @@ impl<T> AutomergeBTreeTransactionInner<T>
 where
   T: BTreeTransaction<DocumentChangeKey, Vec<u8>>,
 {
-  async fn reconstruct_inner_doc(&self, doc_id: Uuid) -> BTreeResult<Option<Vec<u8>>> {
-    let mut latest_snapshot: Option<Vec<u8>> = None;
-    let mut deltas: Vec<Vec<u8>> = Vec::new();
-
-    let stream = self.inner_tx.range(DocumentChangeKey::range_for(doc_id));
-    pin_mut!(stream);
-
-    let mut has_entries = false;
-    while let Some(item) = stream.next().await {
-      let (key, entry) = item?;
-      has_entries = true;
-      if key.doc_type.is_snapshot() {
-        latest_snapshot = Some(entry);
-      } else {
-        deltas.push(entry);
-      }
-    }
-
-    if !has_entries {
-      return Ok(None);
-    }
-
-    Ok(Some(reconstruct_state(latest_snapshot, &deltas)))
-  }
-
-  async fn load_existing_state(inner_tx: &mut T, doc_id: Uuid) -> BTreeResult<Option<Vec<u8>>> {
-    let mut latest_snapshot: Option<Vec<u8>> = None;
-    let mut deltas: Vec<Vec<u8>> = Vec::new();
-    let mut has_entries = false;
-
-    let stream = inner_tx.range(DocumentChangeKey::range_for(doc_id));
-    pin_mut!(stream);
-
-    while let Some(item) = stream.next().await {
-      let (key, entry) = item?;
-      has_entries = true;
-      if key.doc_type.is_snapshot() {
-        latest_snapshot = Some(entry);
-      } else {
-        deltas.push(entry);
-      }
-    }
-
-    if has_entries {
-      Ok(Some(reconstruct_state(latest_snapshot, &deltas)))
-    } else {
-      Ok(None)
-    }
-  }
-
   async fn commit_pending_changes(
     inner_tx: &mut T,
     pending: BTreeMap<Uuid, Option<AutoCommit>>,
@@ -103,15 +52,13 @@ where
     op: Option<AutoCommit>,
   ) -> BTreeResult<()> {
     match op {
-      Some(snapshot_doc) => {
-        let existing_state = Self::load_existing_state(inner_tx, doc_id).await?;
-
-        if let Some((entry_key, entry_bytes)) =
-          build_incremental_write(doc_id, snapshot_doc, existing_state)
-            .map_err(BTreeError::custom)?
-        {
-          inner_tx.insert(entry_key, entry_bytes).await?;
-        }
+      Some(mut snapshot_doc) => {
+        let key = DocumentChangeKey {
+          doc_id,
+          doc_type: DocumentType::Snapshot,
+          change_hash: hash_heads(snapshot_doc.get_heads()),
+        };
+        inner_tx.insert(key, snapshot_doc.save()).await?;
       }
       None => {
         Self::remove_doc_entries(inner_tx, doc_id).await?;
@@ -171,10 +118,7 @@ where
     if let Some(pending) = self.pending.get(&doc_id) {
       return Ok(pending.clone());
     }
-    match self.reconstruct_inner_doc(doc_id).await? {
-      Some(bytes) => load_autocommit(&bytes).map(Some),
-      None => Ok(None),
-    }
+    Ok(reconstruct_document(&self.inner_tx, doc_id).await?.doc)
   }
 
   fn range<'a, R>(&'a self, range: R) -> impl Stream<Item = BTreeResult<(Uuid, AutoCommit)>> + 'a
@@ -183,52 +127,49 @@ where
     R: core::ops::RangeBounds<Uuid> + MaybeSend + 'a,
   {
     stream! {
-      let mut merged: BTreeMap<Uuid, Vec<u8>> = BTreeMap::new();
+      let mut merged: BTreeMap<Uuid, AutoCommit> = BTreeMap::new();
 
-      let mut current_doc: Option<Uuid> = None;
-      let mut latest_snapshot: Option<Vec<u8>> = None;
-      let mut deltas_after_snapshot: Vec<Vec<u8>> = Vec::new();
+      let inner_stream = self.inner_tx.range(DocumentChangeKey::map_uuid_range(range));
+      pin_mut!(inner_stream);
 
-      let stream = self.inner_tx.range(DocumentChangeKey::map_uuid_range(range));
-      pin_mut!(stream);
+      let mut reconstructed_document_option: Option<ReconstructedDocument> = None;
 
-      while let Some(item) = stream.next().await {
+      while let Some(item) = inner_stream.next().await {
         let (k, v) = item?;
-        if current_doc.is_none() {
-          current_doc = Some(k.doc_id);
+
+        if let Some(mut doc) = reconstructed_document_option.take() {
+          if doc.matches(&k) {
+            reconstructed_document_option = Some(doc);
+          } else if let Some(completed_doc) = doc.doc.take() {
+            merged.insert(doc.id, completed_doc);
+          }
         }
 
-        if current_doc.unwrap() != k.doc_id {
-          flush_current_doc(
-            &mut merged,
-            &mut current_doc,
-            &mut latest_snapshot,
-            &mut deltas_after_snapshot,
-          );
-          current_doc = Some(k.doc_id);
-        }
+        let reconstructed_document = reconstructed_document_option
+          .get_or_insert_with(|| ReconstructedDocument::new(k.doc_id));
 
-        if k.doc_type.is_snapshot() {
-          latest_snapshot = Some(v);
-        } else {
-          deltas_after_snapshot.push(v);
+        reconstructed_document.apply(&k, &v)?;
+      }
+
+      if let Some(mut doc) = reconstructed_document_option {
+        if let Some(completed_doc) = doc.doc.take() {
+          merged.insert(doc.id, completed_doc);
         }
       }
 
-      flush_current_doc(
-        &mut merged,
-        &mut current_doc,
-        &mut latest_snapshot,
-        &mut deltas_after_snapshot,
-      );
-
-      apply_pending_overrides(&self.pending, &mut merged);
-
-      for (doc_id, state) in merged.into_iter() {
-        match load_autocommit(&state) {
-          Ok(doc) => yield Ok((doc_id, doc)),
-          Err(e) => yield Err(e),
+      for (doc_id, op) in &self.pending {
+        match op {
+          Some(doc) => {
+            merged.insert(*doc_id, doc.clone());
+          }
+          None => {
+            merged.remove(doc_id);
+          }
         }
+      }
+
+      for (doc_id, doc) in merged {
+        yield Ok((doc_id, doc));
       }
     }
   }
@@ -258,40 +199,11 @@ where
       return Ok(existing);
     }
 
-    let existing_bytes = self.reconstruct_inner_doc(doc_id).await?;
-    if existing_bytes.is_some() {
+    let existing = reconstruct_document(&self.inner_tx, doc_id).await?;
+    if existing.doc.is_some() {
       self.pending.insert(doc_id, None);
     }
-    match existing_bytes {
-      Some(bytes) => load_autocommit(&bytes).map(Some),
-      None => Ok(None),
-    }
-  }
-}
-
-fn flush_current_doc(
-  merged: &mut BTreeMap<Uuid, Vec<u8>>,
-  current_doc: &mut Option<Uuid>,
-  latest_snapshot: &mut Option<Vec<u8>>,
-  deltas_after_snapshot: &mut Vec<Vec<u8>>,
-) {
-  if let Some(doc_id) = current_doc.take() {
-    let state = reconstruct_state(latest_snapshot.take(), deltas_after_snapshot);
-    deltas_after_snapshot.clear();
-    merged.insert(doc_id, state);
-  }
-}
-
-fn apply_pending_overrides(
-  pending: &BTreeMap<Uuid, Option<AutoCommit>>,
-  merged: &mut BTreeMap<Uuid, Vec<u8>>,
-) {
-  for (doc_id, op) in pending {
-    if let Some(doc) = op {
-      merged.insert(*doc_id, doc.clone().save());
-    } else {
-      merged.remove(doc_id);
-    }
+    Ok(existing.doc)
   }
 }
 

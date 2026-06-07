@@ -1,12 +1,12 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-use automerge::{AutoCommit, AutomergeError, ChangeHash};
+use automerge::{AutoCommit, ChangeHash};
 use futures::{StreamExt, pin_mut};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use db_btree::{BTreeError, BTreeResult, BTreeTransaction};
+use db_btree::{BTreeResult, BTreeTransaction};
 
 use crate::{DocumentChangeKey, DocumentType};
 
@@ -62,87 +62,40 @@ impl CompactionPolicy for ThresholdPolicy {
   }
 }
 
-pub async fn run_compaction<T>(tx: &mut T, doc_id: Uuid, state: Vec<u8>) -> BTreeResult<()>
+pub async fn run_compaction<T>(
+  tx: &mut T,
+  doc_id: Uuid,
+  compacted_doc: &mut AutoCommit,
+) -> BTreeResult<()>
 where
   T: BTreeTransaction<DocumentChangeKey, Vec<u8>>,
 {
-  let mut compacted_doc = AutoCommit::load(&state).map_err(BTreeError::custom)?;
-  let new_hash = hash_heads(compacted_doc.get_heads());
-
   let to_remove: Vec<DocumentChangeKey> = {
     let range_stream = tx.range(DocumentChangeKey::range_for(doc_id));
-
     pin_mut!(range_stream);
 
-    let mut collected: Vec<DocumentChangeKey> = Vec::new();
+    let mut results: Vec<DocumentChangeKey> = Vec::new();
+
     while let Some(item) = range_stream.next().await {
       let (k, _v) = match item {
         Ok(pair) => pair,
         Err(err) => return Err(err),
       };
-      if k.doc_type.is_snapshot() && k.change_hash == new_hash {
-        continue;
-      }
-      collected.push(k);
+      results.push(k);
     }
-    collected
+    results
   };
-
   let new_key = DocumentChangeKey {
     doc_id,
     doc_type: DocumentType::Snapshot,
-    change_hash: new_hash,
+    change_hash: hash_heads(compacted_doc.get_heads()),
   };
 
-  tx.insert(new_key.clone(), state).await?;
+  tx.insert(new_key, compacted_doc.save()).await?;
 
   for k in to_remove {
     tx.remove(k).await?;
   }
 
   Ok(())
-}
-
-pub fn build_incremental_write(
-  doc_id: Uuid,
-  mut desired_doc: AutoCommit,
-  existing_doc_bytes: Option<Vec<u8>>,
-) -> Result<Option<(DocumentChangeKey, Vec<u8>)>, AutomergeError> {
-  if let Some(current_doc_bytes) = existing_doc_bytes {
-    let mut current_doc = AutoCommit::load(&current_doc_bytes)?;
-
-    let changes = desired_doc.get_changes(&current_doc.get_heads());
-    if changes.is_empty() {
-      return Ok(None);
-    }
-
-    let mut delta_bytes = Vec::new();
-    let mut change_hashes = Vec::with_capacity(changes.len());
-    for change in &changes {
-      delta_bytes.extend_from_slice(change.raw_bytes());
-      change_hashes.push(change.hash().0);
-    }
-
-    let change_hash = hash_hashes(change_hashes);
-    let key = DocumentChangeKey {
-      doc_id,
-      doc_type: DocumentType::Incremental,
-      change_hash,
-    };
-
-    return Ok(Some((key, delta_bytes)));
-  }
-
-  let change_hash = hash_heads(desired_doc.get_heads());
-  let key = DocumentChangeKey {
-    doc_id,
-    doc_type: DocumentType::Snapshot,
-    change_hash,
-  };
-  let bytes = desired_doc.save();
-  Ok(Some((key, bytes)))
-}
-
-pub fn load_autocommit(bytes: &[u8]) -> Result<AutoCommit, BTreeError> {
-  AutoCommit::load(bytes).map_err(BTreeError::custom)
 }

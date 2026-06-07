@@ -12,8 +12,8 @@ use db_core::{MaybeSend, MaybeSendFuture, MaybeSendStream, MaybeSync};
 
 #[derive(Error, Debug)]
 pub enum BTreeError {
-  #[error("Not found")]
-  NotFound,
+  #[error("Invalid document")]
+  InvalidDocument,
 
   #[error("Type mismatch")]
   TypeMismatch,

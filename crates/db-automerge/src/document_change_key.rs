@@ -3,6 +3,7 @@ use core::{
   ops::{Bound, RangeBounds},
 };
 
+use automerge::ActorId;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -35,6 +36,10 @@ impl PartialOrd for DocumentChangeKey {
 }
 
 impl DocumentChangeKey {
+  pub fn actor_id(&self) -> ActorId {
+    ActorId::from(self.doc_id.as_bytes())
+  }
+
   pub fn as_bytes(&self) -> &[u8] {
     unsafe {
       core::slice::from_raw_parts(
