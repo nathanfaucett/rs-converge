@@ -128,7 +128,7 @@ where
     Q: Borrow<Uuid> + MaybeSend + 'a,
   {
     let mut tx = self.inner.transaction().await?;
-    if let Some((result, compacted)) = self.tx_get_document(&mut tx, key.borrow().clone()).await? {
+    if let Some((result, compacted)) = self.tx_get_document(&mut tx, *key.borrow()).await? {
       if compacted {
         tx.commit().await?;
       }
@@ -172,11 +172,10 @@ where
         }
       }
 
-      if let Some(mut doc) = reconstructed_document_option {
-          if let Some(completed_doc) = doc.doc.take() {
+      if let Some(mut doc) = reconstructed_document_option
+          && let Some(completed_doc) = doc.doc.take() {
               yield Ok((doc.id, completed_doc));
           }
-      }
     }
   }
 }
@@ -196,9 +195,7 @@ where
     Q: Borrow<Uuid> + MaybeSend + 'a,
   {
     let mut tx = self.inner.transaction().await?;
-    let result = self
-      .tx_remove_document(&mut tx, key.borrow().clone())
-      .await?;
+    let result = self.tx_remove_document(&mut tx, *key.borrow()).await?;
     tx.commit().await?;
     Ok(result)
   }

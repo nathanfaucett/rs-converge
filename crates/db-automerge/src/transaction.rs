@@ -151,11 +151,10 @@ where
         reconstructed_document.apply(&k, &v)?;
       }
 
-      if let Some(mut doc) = reconstructed_document_option {
-        if let Some(completed_doc) = doc.doc.take() {
+      if let Some(mut doc) = reconstructed_document_option
+        && let Some(completed_doc) = doc.doc.take() {
           merged.insert(doc.id, completed_doc);
         }
-      }
 
       for (doc_id, op) in &self.pending {
         match op {
