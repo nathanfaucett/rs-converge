@@ -1,5 +1,11 @@
+#[cfg(all(not(feature = "std"), feature = "wasm"))]
+use alloc::{boxed::Box, format};
 #[cfg(not(feature = "std"))]
-use alloc::{boxed::Box, collections::BTreeMap, string::String, vec::Vec};
+use alloc::{
+  collections::BTreeMap,
+  string::{String, ToString},
+  vec::Vec,
+};
 use db_core::{MaybeSend, MaybeSendFuture, MaybeSync};
 #[cfg(feature = "std")]
 use std::collections::BTreeMap;

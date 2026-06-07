@@ -1,3 +1,5 @@
+#[cfg(all(not(feature = "std"), feature = "wasm"))]
+use alloc::{boxed::Box, format, string::ToString};
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, vec::Vec};
 

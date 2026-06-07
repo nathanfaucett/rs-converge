@@ -26,7 +26,7 @@ serde_json = ["dep:serde_json"]
 
 [dependencies]
 uuid = { version = "1.23", default-features = false, features = ["serde"] }
-serde = { version = "1.0", default-features = false, features = ["derive"] }
+serde = { version = "1.0", default-features = false, features = ["alloc", "derive"] }
 serde_json = { version = "1.0", default-features = false, features = ["alloc"], optional = true }
 
 # automerge
@@ -34,7 +34,7 @@ automerge = { version = "0.10", default-features = false, features = [], optiona
 autosurgeon = { version = "0.12", default-features = false, features = ["uuid"], optional = true }
 
 # Optional TS generation + serde for tsify
-tsify = { version = "0.5", default-features = false, features = [], optional = true }
+tsify = { version = "0.5", default-features = false, features = ["js"], optional = true }
 serde-wasm-bindgen = { version = "0.6", default-features = false, features=[], optional = true }
 wasm-bindgen = { version = "0.2", default-features = false, features = [
 ], optional = true }

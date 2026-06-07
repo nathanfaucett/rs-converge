@@ -1,7 +1,7 @@
-#[cfg(all(not(feature = "std"), feature = "wasm"))]
-use alloc::string::ToString;
 #[cfg(not(feature = "std"))]
-use alloc::{boxed::Box, string::String, vec, vec::Vec};
+use alloc::{boxed::Box, string::String, vec::Vec};
+#[cfg(all(not(feature = "std"), feature = "wasm"))]
+use alloc::{format, string::ToString};
 
 use db_schema::{ColumnSchemaIndex, IndexSchema, TableSchema};
 use db_value::{Row, Value};
@@ -335,6 +335,8 @@ impl Statement {
 #[cfg(test)]
 mod tests {
   use super::*;
+  #[cfg(not(feature = "std"))]
+  use alloc::vec;
 
   #[test]
   fn build_select_ex_shape() {

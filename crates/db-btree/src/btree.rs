@@ -1,8 +1,5 @@
 #[cfg(not(feature = "std"))]
-use alloc::{
-  boxed::Box,
-  string::{String, ToString},
-};
+use alloc::string::{String, ToString};
 
 use core::{any::Any, borrow::Borrow, ops::RangeBounds};
 

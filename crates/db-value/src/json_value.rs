@@ -1,3 +1,5 @@
+#[cfg(all(not(feature = "std"), feature = "wasm"))]
+use alloc::boxed::Box;
 #[cfg(not(feature = "std"))]
 use alloc::{
   collections::BTreeMap,

@@ -29,7 +29,7 @@ wasm = [
 db-core = { path = "../db-core", default-features = false, features = [] }
 db-query = { path = "../db-query", default-features = false, features = [] }
 db-schema = { path = "../db-schema", default-features = false, features = [] }
-db-value = { path = "../db-value", default-features = false, features = [] }
+db-value = { path = "../db-value", default-features = false, features = ["serde_json"] }
 
 sqlparser = { version = "0.61", default-features = false, features = [] }
 hashbrown = { version = "0.17", default-features = false, features = [

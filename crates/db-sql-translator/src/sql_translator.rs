@@ -565,21 +565,27 @@ where
     projection.append(&mut resolved);
   }
 
+  let options = QuerySelectOptions {
+    joins,
+    aggregates: Vec::new(),
+    group_by: Vec::new(),
+    order_by: Vec::new(),
+    limit: None,
+    offset: None,
+    distinct: false,
+    having: None,
+  };
+
   Ok(Query::Select {
     tables,
     table_index: 0,
     projection,
     predicate,
-    options: Some(Box::new(QuerySelectOptions {
-      joins,
-      aggregates: Vec::new(),
-      group_by: Vec::new(),
-      order_by: Vec::new(),
-      limit: None,
-      offset: None,
-      distinct: false,
-      having: None,
-    })),
+    options: if options.is_simple() {
+      None
+    } else {
+      Some(Box::new(options))
+    },
   })
 }
 
