@@ -1,5 +1,5 @@
 #[cfg(not(feature = "std"))]
-use alloc::{collections::BTreeMap, vec::Vec};
+use alloc::{collections::BTreeMap, format, vec::Vec};
 #[cfg(feature = "std")]
 use std::collections::BTreeMap;
 
@@ -10,7 +10,7 @@ use automerge::AutoCommit;
 use futures::{Stream, StreamExt, pin_mut};
 use uuid::Uuid;
 
-use db_btree::{BTreeReadExecutor, BTreeResult, BTreeTransaction, BTreeWriteExecutor};
+use db_btree::{BTreeError, BTreeReadExecutor, BTreeResult, BTreeTransaction, BTreeWriteExecutor};
 use db_core::{MaybeSend, MaybeSendStream};
 
 use crate::{
@@ -186,6 +186,32 @@ where
     Ok(())
   }
 
+  async fn update<'a, F>(&'a mut self, key: Uuid, update_fn: F) -> BTreeResult<Option<()>>
+  where
+    F: FnOnce(&mut AutoCommit) -> BTreeResult<()> + MaybeSend + 'a,
+  {
+    let doc_id = key;
+
+    let pending_doc_option = self.pending.get(&doc_id).cloned().flatten();
+
+    let mut doc = if let Some(pending_doc) = pending_doc_option {
+      pending_doc
+    } else {
+      reconstruct_document(&self.inner_tx, doc_id)
+        .await?
+        .doc
+        .ok_or_else(|| {
+          BTreeError::Custom(format!("Document with id {} not found for update", doc_id))
+        })?
+    };
+
+    update_fn(&mut doc)?;
+
+    self.pending.insert(doc_id, Some(doc));
+
+    Ok(Some(()))
+  }
+
   async fn remove<'a, Q>(&'a mut self, key: Q) -> BTreeResult<Option<AutoCommit>>
   where
     Uuid: Ord,
@@ -242,6 +268,13 @@ where
 {
   async fn insert(&mut self, key: Uuid, value: AutoCommit) -> BTreeResult<()> {
     self.0.insert(key, value).await
+  }
+
+  async fn update<'a, F>(&'a mut self, key: Uuid, update_fn: F) -> BTreeResult<Option<()>>
+  where
+    F: FnOnce(&mut AutoCommit) -> BTreeResult<()> + MaybeSend + 'a,
+  {
+    self.0.update(key, update_fn).await
   }
 
   async fn remove<'a, Q>(&'a mut self, key: Q) -> BTreeResult<Option<AutoCommit>>

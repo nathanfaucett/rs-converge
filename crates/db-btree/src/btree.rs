@@ -75,6 +75,14 @@ where
     value: V,
   ) -> impl MaybeSendFuture<Output = BTreeResult<()>> + 'a;
 
+  fn update<'a, F>(
+    &'a mut self,
+    key: K,
+    update_fn: F,
+  ) -> impl MaybeSendFuture<Output = BTreeResult<Option<()>>> + 'a
+  where
+    F: FnOnce(&mut V) -> BTreeResult<()> + MaybeSend + 'a;
+
   fn remove<'a, Q>(
     &'a mut self,
     key: Q,

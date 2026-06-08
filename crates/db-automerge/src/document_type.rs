@@ -1,9 +1,20 @@
+use core::fmt;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum DocumentType {
   Snapshot = 0,
   Incremental = 1,
+}
+
+impl fmt::Display for DocumentType {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match self {
+      DocumentType::Snapshot => write!(f, "Snapshot"),
+      DocumentType::Incremental => write!(f, "Incremental"),
+    }
+  }
 }
 
 impl DocumentType {

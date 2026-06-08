@@ -87,6 +87,20 @@ where
     Ok(())
   }
 
+  async fn update<'a, F>(&'a mut self, key: K, update_fn: F) -> BTreeResult<Option<()>>
+  where
+    K: Ord,
+    F: FnOnce(&mut V) -> BTreeResult<()> + MaybeSend + 'a,
+  {
+    let mut guard = self.inner.write().await;
+    if let Some(value) = guard.get_mut(&key) {
+      update_fn(value)?;
+      Ok(Some(()))
+    } else {
+      Ok(None)
+    }
+  }
+
   async fn remove<'a, Q>(&'a mut self, key: Q) -> BTreeResult<Option<V>>
   where
     K: Ord,
@@ -334,6 +348,26 @@ where
     let patch = self.patch.clone();
     patch.write().await.insert(key, value);
     Ok(())
+  }
+
+  async fn update<'a, F>(&'a mut self, key: K, update_fn: F) -> BTreeResult<Option<()>>
+  where
+    F: FnOnce(&mut V) -> BTreeResult<()> + MaybeSend + 'a,
+  {
+    let inner = self.inner.clone();
+    let patch = self.patch.clone();
+
+    let guard = inner.read().await;
+    let mut patch_guard = patch.write().await;
+
+    if let Some(value) = patch_guard.get(&*guard, &key) {
+      let mut value_clone = value.clone();
+      update_fn(&mut value_clone)?;
+      patch_guard.insert(key, value_clone);
+      Ok(Some(()))
+    } else {
+      Ok(None)
+    }
   }
 
   async fn remove<'a, Q>(&'a mut self, key: Q) -> BTreeResult<Option<V>>

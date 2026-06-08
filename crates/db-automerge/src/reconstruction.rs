@@ -1,5 +1,5 @@
 #[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
+use alloc::{format, vec::Vec};
 
 use automerge::AutoCommit;
 use db_btree::{BTreeError, BTreeReadExecutor, BTreeResult};
@@ -31,31 +31,25 @@ impl ReconstructedDocument {
   }
 
   pub fn apply(&mut self, key: &DocumentChangeKey, data: &[u8]) -> BTreeResult<()> {
-    if key.doc_type.is_snapshot() {
-      self.deltas = 0;
-      self.bytes_size = 0;
+    if let Some(doc) = self.doc.as_mut() {
+      doc.load_incremental(data).map_err(BTreeError::custom)?;
     } else {
-      self.deltas += 1;
-      self.bytes_size += data.len();
-    }
-
-    if key.doc_type.is_snapshot() {
-      if let Some(doc) = self.doc.as_mut() {
-        doc.load_incremental(data).map_err(BTreeError::custom)?;
-      } else {
+      if key.doc_type.is_snapshot() {
         self.doc.replace(
           AutoCommit::load(data)
             .map_err(BTreeError::custom)?
             .with_actor(key.actor_id()),
         );
+      } else {
+        return Err(BTreeError::custom(format!(
+          "Expected delta for document {}, but found snapshot",
+          key.doc_id
+        )));
       }
-    } else if let Some(doc) = self.doc.as_mut() {
-      doc.load_incremental(data).map_err(BTreeError::custom)?;
-    } else {
-      let mut doc = AutoCommit::new().with_actor(key.actor_id());
-      doc.load_incremental(data).map_err(BTreeError::custom)?;
-      self.doc.replace(doc);
     }
+
+    self.deltas += 1;
+    self.bytes_size += data.len();
 
     Ok(())
   }

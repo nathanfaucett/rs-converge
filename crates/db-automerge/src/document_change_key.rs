@@ -1,5 +1,6 @@
 use core::{
   cmp::Ordering,
+  fmt,
   ops::{Bound, RangeBounds},
 };
 
@@ -32,6 +33,16 @@ impl Ord for DocumentChangeKey {
 impl PartialOrd for DocumentChangeKey {
   fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
     Some(self.cmp(other))
+  }
+}
+
+impl fmt::Display for DocumentChangeKey {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(
+      f,
+      "{}|{}|{:?}",
+      self.doc_id, self.doc_type, self.change_hash
+    )
   }
 }
 
