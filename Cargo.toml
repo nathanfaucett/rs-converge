@@ -16,7 +16,7 @@ workspace = true
 
 [features]
 default = ["std", "automerge", "redb", "in-memory"]
-std = ["db-automerge/std", "db-sql-translator/std"]
+std = ["db-sql-translator/std"]
 redb = ["std"]
 automerge = ["std"]
 in-memory = ["db-engine/in-memory"]
@@ -29,7 +29,6 @@ db-engine = { path = "crates/db-engine", default-features = false, features = [
   "std",
 ] }
 db-automerge = { path = "crates/db-automerge", default-features = false, features = [
-  "std",
 ] }
 db-redb = { path = "crates/db-redb", default-features = false, features = [
 ] }

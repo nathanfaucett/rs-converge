@@ -16,27 +16,19 @@ default = []
 
 [dependencies]
 # internal dependencies
-db-engine = { path = "../db-engine", default-features = false, features = [
-  "std",
-] }
 db-btree = { path = "../db-btree", default-features = false, features = ["std"] }
 db-core = { path = "../db-core", default-features = false, features = ["std"] }
 
-# Concurrency / streams
 async-stream = { version = "0.3", default-features = false, features = [] }
+automerge = { version = "0.9", default-features = false, features = [] }
 futures = { version = "0.3", default-features = false, features = [
   "std",
   "executor",
 ] }
 async-lock = { version = "3.4", default-features = false, features = ["std"] }
-
-# Storage backend
 redb = { version = "4.1", default-features = false, features = ["uuid"] }
-
-# Concurrent map used by manager
 dashmap = { version = "6.2", default-features = false, features = [] }
-
-# Serialization
 serde = { version = "1.0", default-features = false, features = ["std"] }
+uuid = { version = "1.4", default-features = false, features = ["v7", "serde", "std"] }
 
 [dev-dependencies]

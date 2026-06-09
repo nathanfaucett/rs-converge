@@ -4,7 +4,7 @@ use futures::{StreamExt, executor::block_on};
 use std::fs;
 use uuid::Uuid;
 
-use db_automerge::{AutomergeBTree, DocumentChangeKey};
+use db_automerge::{AutomergeBTree, DocumentChangeKey, DocumentId};
 
 fn tmp_path(name: &str) -> std::path::PathBuf {
   let mut path = std::env::temp_dir();
@@ -19,11 +19,11 @@ fn insert_and_get_latest() {
   let underlying = InMemoryBTree::<DocumentChangeKey, Vec<u8>>::new();
   let mut store = AutomergeBTree::new_automerge(underlying);
 
-  let doc_id = Uuid::new_v4();
+  let doc_id = Uuid::now_v7().as_bytes().to_vec();
   let doc = AutoCommit::new();
   let mut expected = doc.clone();
 
-  block_on(store.insert(doc_id, doc)).expect("insert");
+  block_on(store.insert(doc_id.clone(), doc)).expect("insert");
   let mut got: AutoCommit = block_on(store.get(&doc_id)).expect("get").expect("missing");
   let expected_bytes = expected.save();
   let got_bytes = got.save();
@@ -35,10 +35,10 @@ fn range_ordering() {
   let underlying = InMemoryBTree::<DocumentChangeKey, Vec<u8>>::new();
   let mut store = AutomergeBTree::new_automerge(underlying);
 
-  let mut ids: Vec<Uuid> = Vec::new();
+  let mut ids: Vec<DocumentId> = Vec::new();
   for i in 0..3 {
-    let id = Uuid::new_v4();
-    ids.push(id);
+    let id = Uuid::now_v7().as_bytes().to_vec();
+    ids.push(id.clone());
     let mut doc = AutoCommit::new();
     doc
       .put(&automerge::ROOT, "v", format!("v{}", i))
@@ -47,12 +47,12 @@ fn range_ordering() {
     std::thread::sleep(std::time::Duration::from_millis(1));
   }
 
-  let start = &Uuid::nil();
-  let end = &Uuid::from_u128(u128::MAX);
+  let start = &Uuid::nil().as_bytes().to_vec();
+  let end = &Uuid::from_u128(u128::MAX).as_bytes().to_vec();
 
   let s = store.range(start..=end);
-  let items: Vec<(Uuid, AutoCommit)> = block_on(async move {
-    let mut collected: Vec<(Uuid, AutoCommit)> = Vec::new();
+  let items: Vec<(DocumentId, AutoCommit)> = block_on(async move {
+    let mut collected: Vec<(DocumentId, AutoCommit)> = Vec::new();
     futures::pin_mut!(s);
     while let Some(item) = s.next().await {
       let (k, v) = item.expect("range failed");
@@ -70,16 +70,22 @@ fn encoded_remove_only_deletes_target_document() {
     let underlying = InMemoryBTree::<DocumentChangeKey, Vec<u8>>::new();
     let mut store = AutomergeBTree::new_automerge(underlying);
 
-    let doc_a = Uuid::from_u128(1);
-    let doc_b = Uuid::from_u128(2);
+    let doc_a = Uuid::from_u128(1).as_bytes().to_vec();
+    let doc_b = Uuid::from_u128(2).as_bytes().to_vec();
 
     let mut first = AutoCommit::new();
     first.put(&automerge::ROOT, "v", "a").expect("put a");
     let mut second = AutoCommit::new();
     second.put(&automerge::ROOT, "v", "b").expect("put b");
 
-    store.insert(doc_a, first.clone()).await.expect("insert a");
-    store.insert(doc_b, second.clone()).await.expect("insert b");
+    store
+      .insert(doc_a.clone(), first.clone())
+      .await
+      .expect("insert a");
+    store
+      .insert(doc_b.clone(), second.clone())
+      .await
+      .expect("insert b");
 
     let mut removed: AutoCommit = store
       .remove(&doc_a)

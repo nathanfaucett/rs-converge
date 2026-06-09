@@ -1,23 +1,19 @@
-#[cfg(not(feature = "std"))]
-use alloc::{format, vec::Vec};
-
 use automerge::AutoCommit;
 use db_btree::{BTreeError, BTreeReadExecutor, BTreeResult};
 use futures::{StreamExt, pin_mut};
-use uuid::Uuid;
 
-use crate::DocumentChangeKey;
+use crate::{DocumentChangeKey, document_change_key::DocumentId};
 
 #[derive(Debug, Clone)]
 pub struct ReconstructedDocument {
-  pub id: Uuid,
+  pub id: DocumentId,
   pub doc: Option<AutoCommit>,
   pub deltas: usize,
   pub bytes_size: usize,
 }
 
 impl ReconstructedDocument {
-  pub fn new(id: Uuid) -> Self {
+  pub fn new(id: DocumentId) -> Self {
     Self {
       id,
       doc: None,
@@ -42,7 +38,7 @@ impl ReconstructedDocument {
         );
       } else {
         return Err(BTreeError::custom(format!(
-          "Expected delta for document {}, but found snapshot",
+          "Expected delta for document {:x?}, but found snapshot",
           key.doc_id
         )));
       }
@@ -55,11 +51,14 @@ impl ReconstructedDocument {
   }
 }
 
-pub async fn reconstruct_document<T>(tx: &T, doc_id: Uuid) -> BTreeResult<ReconstructedDocument>
+pub async fn reconstruct_document<T>(
+  tx: &T,
+  doc_id: DocumentId,
+) -> BTreeResult<ReconstructedDocument>
 where
   T: BTreeReadExecutor<DocumentChangeKey, Vec<u8>>,
 {
-  let stream = tx.range(DocumentChangeKey::range_for(doc_id));
+  let stream = tx.range(DocumentChangeKey::range_for(doc_id.clone()));
   pin_mut!(stream);
 
   let mut reconstructed_document = ReconstructedDocument::new(doc_id);

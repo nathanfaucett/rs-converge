@@ -1,14 +1,10 @@
-#[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
-
 use automerge::{AutoCommit, ChangeHash};
 use futures::{StreamExt, pin_mut};
 use sha2::{Digest, Sha256};
-use uuid::Uuid;
 
 use db_btree::{BTreeResult, BTreeTransaction};
 
-use crate::{DocumentChangeKey, DocumentType};
+use crate::{DocumentChangeKey, DocumentType, document_change_key::DocumentId};
 
 pub fn hash_hashes<I>(hashes: I) -> [u8; 32]
 where
@@ -64,14 +60,14 @@ impl CompactionPolicy for ThresholdPolicy {
 
 pub async fn run_compaction<T>(
   tx: &mut T,
-  doc_id: Uuid,
+  doc_id: DocumentId,
   compacted_doc: &mut AutoCommit,
 ) -> BTreeResult<()>
 where
   T: BTreeTransaction<DocumentChangeKey, Vec<u8>>,
 {
   let to_remove: Vec<DocumentChangeKey> = {
-    let range_stream = tx.range(DocumentChangeKey::range_for(doc_id));
+    let range_stream = tx.range(DocumentChangeKey::range_for(doc_id.clone()));
     pin_mut!(range_stream);
 
     let mut results: Vec<DocumentChangeKey> = Vec::new();

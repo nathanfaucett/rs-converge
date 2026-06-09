@@ -10,12 +10,15 @@ use uuid::Uuid;
 
 use crate::document_type::DocumentType;
 
+pub type DocumentId = Vec<u8>;
+pub type DocumentChangeHash = [u8; 32];
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(C)]
 pub struct DocumentChangeKey {
-  pub doc_id: Uuid,
+  pub doc_id: DocumentId,
   pub doc_type: DocumentType,
-  pub change_hash: [u8; 32],
+  pub change_hash: DocumentChangeHash,
 }
 
 impl Ord for DocumentChangeKey {
@@ -40,15 +43,29 @@ impl fmt::Display for DocumentChangeKey {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     write!(
       f,
-      "{}|{}|{:?}",
+      "{:x?}|{}|{:x?}",
       self.doc_id, self.doc_type, self.change_hash
     )
   }
 }
 
 impl DocumentChangeKey {
+  pub fn doc_id_to_uuid(doc_id: &[u8]) -> Uuid {
+    if doc_id.len() == 16 {
+      if let Some(uuid) = Uuid::from_slice(&doc_id).ok() {
+        return uuid;
+      }
+    }
+
+    Uuid::new_v5(&Uuid::NAMESPACE_DNS, &doc_id)
+  }
+
+  pub fn uuid(&self) -> Uuid {
+    Self::doc_id_to_uuid(&self.doc_id)
+  }
+
   pub fn actor_id(&self) -> ActorId {
-    ActorId::from(self.doc_id.as_bytes())
+    ActorId::from(self.uuid().as_bytes())
   }
 
   pub fn as_bytes(&self) -> &[u8] {
@@ -60,7 +77,7 @@ impl DocumentChangeKey {
     }
   }
 
-  pub fn min_for_id(doc_id: Uuid) -> Self {
+  pub fn min_for_id(doc_id: DocumentId) -> Self {
     Self {
       doc_id,
       doc_type: DocumentType::Snapshot,
@@ -68,7 +85,7 @@ impl DocumentChangeKey {
     }
   }
 
-  pub fn max_for_id(doc_id: Uuid) -> Self {
+  pub fn max_for_id(doc_id: DocumentId) -> Self {
     Self {
       doc_id,
       doc_type: DocumentType::Incremental,
@@ -76,23 +93,25 @@ impl DocumentChangeKey {
     }
   }
 
-  pub fn range_for(doc_id: Uuid) -> impl RangeBounds<DocumentChangeKey> {
-    let start = Bound::Included(Self::min_for_id(doc_id));
+  pub fn range_for(doc_id: DocumentId) -> impl RangeBounds<DocumentChangeKey> {
+    let start = Bound::Included(Self::min_for_id(doc_id.clone()));
     let end = Bound::Included(Self::max_for_id(doc_id));
 
     (start, end)
   }
 
-  pub fn map_uuid_range(uuid_range: impl RangeBounds<Uuid>) -> impl RangeBounds<DocumentChangeKey> {
-    let start = match uuid_range.start_bound() {
-      Bound::Included(&uuid) => Bound::Included(DocumentChangeKey::min_for_id(uuid)),
-      Bound::Excluded(&uuid) => Bound::Excluded(DocumentChangeKey::max_for_id(uuid)),
+  pub fn map_doc_id_range(
+    range: impl RangeBounds<DocumentId>,
+  ) -> impl RangeBounds<DocumentChangeKey> {
+    let start = match range.start_bound() {
+      Bound::Included(doc_id) => Bound::Included(DocumentChangeKey::min_for_id(doc_id.clone())),
+      Bound::Excluded(doc_id) => Bound::Excluded(DocumentChangeKey::max_for_id(doc_id.clone())),
       Bound::Unbounded => Bound::Unbounded,
     };
 
-    let end = match uuid_range.end_bound() {
-      Bound::Included(&uuid) => Bound::Included(DocumentChangeKey::max_for_id(uuid)),
-      Bound::Excluded(&uuid) => Bound::Excluded(DocumentChangeKey::min_for_id(uuid)),
+    let end = match range.end_bound() {
+      Bound::Included(doc_id) => Bound::Included(DocumentChangeKey::max_for_id(doc_id.clone())),
+      Bound::Excluded(doc_id) => Bound::Excluded(DocumentChangeKey::min_for_id(doc_id.clone())),
       Bound::Unbounded => Bound::Unbounded,
     };
 
