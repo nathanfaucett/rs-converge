@@ -25,10 +25,12 @@ futures = { version = "0.3", default-features = false, features = [
   "std",
   "executor",
 ] }
+thiserror = { version = "2.0", default-features = false, features = ["std"] }
 async-lock = { version = "3.4", default-features = false, features = ["std"] }
 redb = { version = "4.1", default-features = false, features = ["uuid"] }
 dashmap = { version = "6.2", default-features = false, features = [] }
 serde = { version = "1.0", default-features = false, features = ["std"] }
+postcard = { version = "1.1", default-features = false, features = ["heapless-cas", "use-std"] }
 uuid = { version = "1.4", default-features = false, features = ["v7", "serde", "std"] }
 
 [dev-dependencies]

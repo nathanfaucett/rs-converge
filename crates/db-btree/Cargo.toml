@@ -16,7 +16,8 @@ name = "db_btree"
 default = ["std", "in-memory"]
 std = [
   "futures/std",
-  "async-lock?/std"
+  "async-lock?/std",
+  "thiserror/std"
 ]
 in-memory = ["dep:async-stream", "dep:async-lock"]
 
@@ -29,7 +30,7 @@ async-stream = { version = "0.3", default-features = false, features = [
 async-lock = { version = "3.4", default-features = false, features = [
 ], optional = true }
 futures = { version = "0.3", default-features = false, features = [] }
-thiserror = { version = "2.0", default-features = false }
+thiserror = { version = "2.0", default-features = false, features = [] }
 
 [dev-dependencies]
 futures = { version = "0.3", default-features = false, features = ["executor"] }

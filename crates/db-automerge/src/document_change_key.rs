@@ -51,13 +51,13 @@ impl fmt::Display for DocumentChangeKey {
 
 impl DocumentChangeKey {
   pub fn doc_id_to_uuid(doc_id: &[u8]) -> Uuid {
-    if doc_id.len() == 16 {
-      if let Some(uuid) = Uuid::from_slice(&doc_id).ok() {
-        return uuid;
-      }
+    if doc_id.len() == 16
+      && let Some(uuid) = Uuid::from_slice(doc_id).ok()
+    {
+      return uuid;
     }
 
-    Uuid::new_v5(&Uuid::NAMESPACE_DNS, &doc_id)
+    Uuid::new_v5(&Uuid::NAMESPACE_DNS, doc_id)
   }
 
   pub fn uuid(&self) -> Uuid {
