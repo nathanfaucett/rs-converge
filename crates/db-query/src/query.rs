@@ -3,10 +3,8 @@ use alloc::{boxed::Box, string::String, vec::Vec};
 #[cfg(all(not(feature = "std"), feature = "wasm"))]
 use alloc::{format, string::ToString};
 
-use db_schema::{ColumnSchemaIndex, IndexSchema, TableSchema};
+use db_schema::{ColumnSchema, IndexSchema, TableSchema};
 use db_value::{Row, Value};
-
-pub type QueryTableIndex = u32;
 
 #[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(
@@ -15,16 +13,13 @@ pub type QueryTableIndex = u32;
   tsify(into_wasm_abi, from_wasm_abi)
 )]
 pub struct QueryColumn {
-  pub table_index: QueryTableIndex,
-  pub column_index: ColumnSchemaIndex,
+  pub table: String,
+  pub column: String,
 }
 
 impl QueryColumn {
-  pub fn new(table_index: QueryTableIndex, column_index: ColumnSchemaIndex) -> Self {
-    Self {
-      table_index,
-      column_index,
-    }
+  pub fn new(table: String, column: String) -> Self {
+    Self { table, column }
   }
 }
 
@@ -49,7 +44,7 @@ pub enum QueryJoinKind {
 )]
 pub struct QueryJoin {
   pub kind: QueryJoinKind,
-  pub table_index: QueryTableIndex,
+  pub table: String,
   pub on: QueryExpr,
 }
 
@@ -93,32 +88,32 @@ pub enum QueryExprValue {
   tsify(into_wasm_abi, from_wasm_abi)
 )]
 pub enum QueryExpr {
-  Equals(QueryExprValue, QueryExprValue),
-  NotEquals(QueryExprValue, QueryExprValue),
-  LessThan(QueryExprValue, QueryExprValue),
-  LessThanOrEquals(QueryExprValue, QueryExprValue),
-  GreaterThan(QueryExprValue, QueryExprValue),
-  GreaterThanOrEquals(QueryExprValue, QueryExprValue),
-  IsNull(QueryExprValue),
-  IsNotNull(QueryExprValue),
+  Value(QueryExprValue),
+  Not(Box<QueryExpr>),
+  Exists(Box<QueryExpr>),
+  IsNull(Box<QueryExpr>),
+  IsNotNull(Box<QueryExpr>),
+  Equals(Box<QueryExpr>, Box<QueryExpr>),
+  NotEquals(Box<QueryExpr>, Box<QueryExpr>),
+  LessThan(Box<QueryExpr>, Box<QueryExpr>),
+  LessThanOrEquals(Box<QueryExpr>, Box<QueryExpr>),
+  GreaterThan(Box<QueryExpr>, Box<QueryExpr>),
+  GreaterThanOrEquals(Box<QueryExpr>, Box<QueryExpr>),
   InList {
-    expr: QueryExprValue,
-    list: Vec<Value>,
+    expr: Box<QueryExpr>,
+    list: Vec<QueryExpr>,
     negated: bool,
   },
   InSubquery {
-    expr: QueryExprValue,
-    subquery: Box<Query>,
-    negated: bool,
+    expr: Box<QueryExpr>,
+    subquery: Box<QuerySelect>,
   },
   Like {
-    expr: QueryExprValue,
-    pattern: QueryExprValue,
-    negated: bool,
+    expr: Box<QueryExpr>,
+    pattern: Box<QueryExpr>,
   },
   And(Box<QueryExpr>, Box<QueryExpr>),
   Or(Box<QueryExpr>, Box<QueryExpr>),
-  Not(Box<QueryExpr>),
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -154,28 +149,9 @@ pub enum QueryAggregate {
   derive(tsify::Tsify),
   tsify(into_wasm_abi, from_wasm_abi)
 )]
-pub struct QuerySelectOptions {
+pub struct QueryFrom {
+  pub table: String,
   pub joins: Vec<QueryJoin>,
-  pub aggregates: Vec<QueryAggregate>,
-  pub group_by: Vec<QueryColumn>,
-  pub order_by: Vec<QueryOrderBy>,
-  pub limit: Option<usize>,
-  pub offset: Option<usize>,
-  pub distinct: bool,
-  pub having: Option<QueryExpr>,
-}
-
-impl QuerySelectOptions {
-  pub fn is_simple(&self) -> bool {
-    self.joins.is_empty()
-      && self.aggregates.is_empty()
-      && self.group_by.is_empty()
-      && self.order_by.is_empty()
-      && self.limit.is_none()
-      && self.offset.is_none()
-      && !self.distinct
-      && self.having.is_none()
-  }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -198,7 +174,7 @@ pub struct QueryUpdateAssignment {
 pub struct QueryResultColumn {
   pub name: String,
   pub source_table: Option<String>,
-  pub source_column_index: Option<ColumnSchemaIndex>,
+  pub source_column: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -231,53 +207,89 @@ impl QueryResult {
   derive(tsify::Tsify),
   tsify(into_wasm_abi, from_wasm_abi)
 )]
-pub enum Query {
-  Select {
-    tables: Vec<String>,
-    table_index: QueryTableIndex,
-    projection: Vec<QueryColumn>,
-    predicate: Option<QueryExpr>,
-    options: Option<Box<QuerySelectOptions>>,
-  },
-  Insert {
-    tables: Vec<String>,
-    table_index: QueryTableIndex,
-    row: Row,
-    returning: Option<Vec<QueryColumn>>,
-  },
-  Update {
-    tables: Vec<String>,
-    table_index: QueryTableIndex,
-    assignments: Vec<QueryUpdateAssignment>,
-    predicate: Option<QueryExpr>,
-    joins: Vec<QueryJoin>,
-    from_table_indexes: Vec<QueryTableIndex>,
-    returning: Option<Vec<QueryColumn>>,
-  },
-  Delete {
-    tables: Vec<String>,
-    table_index: QueryTableIndex,
-    predicate: Option<QueryExpr>,
-    returning: Option<Vec<QueryColumn>>,
-  },
+pub struct QuerySelect {
+  pub from: QueryFrom,
+  pub projection: Vec<QueryColumn>,
+  pub predicate: Option<QueryExpr>,
+  pub aggregates: Vec<QueryAggregate>,
+  pub group_by: Vec<QueryColumn>,
+  pub order_by: Vec<QueryOrderBy>,
+  pub limit: Option<usize>,
+  pub offset: Option<usize>,
+  pub having: Option<QueryExpr>,
+}
+#[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(
+  feature = "wasm",
+  derive(tsify::Tsify),
+  tsify(into_wasm_abi, from_wasm_abi)
+)]
+pub struct QueryInsert {
+  pub table: String,
+  pub row: Row,
+  pub returning: Option<Vec<String>>,
+}
+#[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(
+  feature = "wasm",
+  derive(tsify::Tsify),
+  tsify(into_wasm_abi, from_wasm_abi)
+)]
+pub struct QueryUpdate {
+  pub from: QueryFrom,
+  pub assignments: Vec<QueryUpdateAssignment>,
+  pub predicate: Option<QueryExpr>,
+  pub returning: Option<Vec<QueryColumn>>,
+}
+#[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(
+  feature = "wasm",
+  derive(tsify::Tsify),
+  tsify(into_wasm_abi, from_wasm_abi)
+)]
+pub struct QueryDelete {
+  pub from: QueryFrom,
+  pub predicate: Option<QueryExpr>,
+  pub returning: Option<Vec<QueryColumn>>,
 }
 
-impl Query {
-  pub fn table_name(&self, table_index: QueryTableIndex) -> Option<&str> {
-    self
-      .tables()
-      .get(table_index as usize)
-      .map(|name| name.as_str())
-  }
+#[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(
+  feature = "wasm",
+  derive(tsify::Tsify),
+  tsify(into_wasm_abi, from_wasm_abi)
+)]
+pub enum Query {
+  Select(QuerySelect),
+  Insert(QueryInsert),
+  Update(QueryUpdate),
+  Delete(QueryDelete),
+}
 
-  pub fn tables(&self) -> &[String] {
-    match self {
-      Query::Select { tables, .. }
-      | Query::Insert { tables, .. }
-      | Query::Update { tables, .. }
-      | Query::Delete { tables, .. } => tables,
-    }
-  }
+#[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(
+  feature = "wasm",
+  derive(tsify::Tsify),
+  tsify(into_wasm_abi, from_wasm_abi)
+)]
+pub enum AlterTableOperation {
+  AddColumn(ColumnSchema),
+  DropColumn(String),
+  RenameColumn { old_name: String, new_name: String },
+  RenameTable { new_name: String },
+  AddIndex(IndexSchema),
+  RenameIndex { old_name: String, new_name: String },
+  DropIndex(String),
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(
+  feature = "wasm",
+  derive(tsify::Tsify),
+  tsify(into_wasm_abi, from_wasm_abi)
+)]
+pub enum AlterIndexOperation {
+  Rename { new_name: String },
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -291,6 +303,11 @@ pub enum DataDefinition {
     schema: TableSchema,
     if_not_exists: bool,
   },
+  AlterTable {
+    table_name: String,
+    operations: Vec<AlterTableOperation>,
+    if_exists: bool,
+  },
   DropTable {
     table_name: String,
     if_exists: bool,
@@ -298,6 +315,11 @@ pub enum DataDefinition {
   CreateIndex {
     schema: IndexSchema,
     if_not_exists: bool,
+  },
+  AlterIndex {
+    index_name: String,
+    operation: AlterIndexOperation,
+    if_exists: bool,
   },
   DropIndex {
     index_name: String,
@@ -329,75 +351,5 @@ impl Statement {
       Statement::Query(_) => None,
       Statement::DataDefinition(def) => Some(def),
     }
-  }
-}
-
-#[cfg(test)]
-mod tests {
-  use super::*;
-  #[cfg(not(feature = "std"))]
-  use alloc::vec;
-
-  #[test]
-  fn build_select_ex_shape() {
-    let left_col = QueryColumn {
-      table_index: 0,
-      column_index: 0,
-    };
-    let right_col = QueryColumn {
-      table_index: 1,
-      column_index: 0,
-    };
-
-    let join = QueryJoin {
-      kind: QueryJoinKind::Inner,
-      table_index: 1,
-      on: QueryExpr::Equals(
-        QueryExprValue::Column(left_col.clone()),
-        QueryExprValue::Column(right_col.clone()),
-      ),
-    };
-
-    let options = QuerySelectOptions {
-      joins: vec![join],
-      aggregates: vec![QueryAggregate::Count(QueryCountTarget::AllRows)],
-      group_by: vec![left_col.clone()],
-      order_by: vec![QueryOrderBy {
-        expr: left_col.clone(),
-        direction: QuerySortDirection::Asc,
-      }],
-      limit: Some(10),
-      offset: Some(0),
-      distinct: false,
-      having: None,
-    };
-
-    let q = Query::Select {
-      tables: vec!["users".into(), "orders".into()],
-      table_index: 0,
-      projection: vec![left_col],
-      predicate: None,
-      options: Some(Box::new(options)),
-    };
-
-    match q {
-      Query::Select { .. } => {}
-      _ => panic!("expected Select variant"),
-    }
-  }
-
-  #[test]
-  fn select_options_is_simple_and_non_simple() {
-    let mut options = QuerySelectOptions::default();
-    assert!(options.is_simple());
-
-    options.order_by.push(QueryOrderBy {
-      expr: QueryColumn {
-        table_index: 0,
-        column_index: 0,
-      },
-      direction: QuerySortDirection::Asc,
-    });
-    assert!(!options.is_simple());
   }
 }

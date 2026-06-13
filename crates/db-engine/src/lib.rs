@@ -5,9 +5,8 @@
 extern crate alloc;
 
 mod catalog;
-mod default_manager;
 mod engine;
 mod executor;
+mod kernel;
 
-pub use default_manager::DefaultBTreeManager;
 pub use engine::{Engine, EngineError, EngineResult};

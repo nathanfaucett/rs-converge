@@ -14,7 +14,7 @@ name = "db_sql_translator"
 
 [features]
 default = ["std"]
-std = ["db-query/std", "db-schema/std", "db-core/std", "db-value/std", "sqlparser/std", "thiserror/std"]
+std = ["db-query/std", "db-schema/std", "db-value/std", "sqlparser/std", "thiserror/std"]
 wasm = [
   "tsify",
   "serde",
@@ -26,15 +26,11 @@ wasm = [
 ]
 
 [dependencies]
-db-core = { path = "../db-core", default-features = false, features = [] }
 db-query = { path = "../db-query", default-features = false, features = [] }
 db-schema = { path = "../db-schema", default-features = false, features = [] }
 db-value = { path = "../db-value", default-features = false, features = ["serde_json"] }
 
-sqlparser = { version = "0.61", default-features = false, features = [] }
-hashbrown = { version = "0.17", default-features = false, features = [
-  "default-hasher",
-] }
+sqlparser = { version = "0.62", default-features = false, features = [] }
 thiserror = { version = "2.0", default-features = false, features = [] }
 uuid = { version = "1.18", default-features = false }
 serde_json = { version = "1.0", default-features = false, features = ["alloc"] }

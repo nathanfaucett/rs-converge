@@ -1,11 +1,8 @@
-#[cfg(not(feature = "std"))]
-use alloc::string::{String, ToString};
+use futures::Stream;
 
-use core::{any::Any, borrow::Borrow, ops::RangeBounds};
+use core::ops::RangeBounds;
 
 use thiserror::Error;
-
-use db_core::{MaybeSend, MaybeSendFuture, MaybeSendStream, MaybeSync};
 
 #[derive(Error, Debug)]
 pub enum BTreeError {
@@ -42,26 +39,23 @@ impl BTreeError {
 
 pub type BTreeResult<T> = Result<T, BTreeError>;
 
-pub trait BTreeValue: MaybeSend + MaybeSync + Clone + 'static {}
+pub trait BTreeValue {}
 
-impl<T> BTreeValue for T where T: MaybeSend + MaybeSync + Clone + 'static {}
+impl<T> BTreeValue for T where T: {}
 
 pub trait BTreeKey: BTreeValue + Ord {}
 
 impl<T> BTreeKey for T where T: BTreeValue + Ord {}
 
-pub trait BTreeReadExecutor<K, V>: MaybeSend + MaybeSync
+pub trait BTreeReadExecutor<K, V>
 where
   K: BTreeKey,
   V: BTreeValue,
 {
-  fn get<'a, Q>(&'a self, key: Q) -> impl MaybeSendFuture<Output = BTreeResult<Option<V>>> + 'a
+  fn get(&self, key: &K) -> impl Future<Output = BTreeResult<Option<V>>>;
+  fn range<R>(&self, range: R) -> impl Stream<Item = BTreeResult<(K, V)>>
   where
-    Q: Borrow<K> + MaybeSend + 'a;
-
-  fn range<'a, R>(&'a self, range: R) -> impl MaybeSendStream<Item = BTreeResult<(K, V)>> + 'a
-  where
-    R: RangeBounds<K> + MaybeSend + 'a;
+    R: RangeBounds<K>;
 }
 
 pub trait BTreeWriteExecutor<K, V>: BTreeReadExecutor<K, V>
@@ -69,26 +63,13 @@ where
   K: BTreeKey,
   V: BTreeValue,
 {
-  fn insert<'a>(
-    &'a mut self,
-    key: K,
-    value: V,
-  ) -> impl MaybeSendFuture<Output = BTreeResult<()>> + 'a;
+  fn insert(&mut self, key: K, value: V) -> impl Future<Output = BTreeResult<()>>;
 
-  fn update<'a, F>(
-    &'a mut self,
-    key: K,
-    update_fn: F,
-  ) -> impl MaybeSendFuture<Output = BTreeResult<Option<()>>> + 'a
+  fn update<F>(&mut self, key: K, update_fn: F) -> impl Future<Output = BTreeResult<Option<()>>>
   where
-    F: FnOnce(&mut V) -> BTreeResult<()> + MaybeSend + 'a;
+    F: FnOnce(&mut V) -> BTreeResult<()>;
 
-  fn remove<'a, Q>(
-    &'a mut self,
-    key: Q,
-  ) -> impl MaybeSendFuture<Output = BTreeResult<Option<V>>> + 'a
-  where
-    Q: Borrow<K> + MaybeSend + 'a;
+  fn remove(&mut self, key: &K) -> impl Future<Output = BTreeResult<Option<V>>>;
 }
 
 pub trait BTreeTransaction<K, V>: BTreeWriteExecutor<K, V>
@@ -96,64 +77,16 @@ where
   K: BTreeKey,
   V: BTreeValue,
 {
-  fn commit(self) -> impl MaybeSendFuture<Output = BTreeResult<()>>
-  where
-    Self: Sized;
-
-  fn rollback(self) -> impl MaybeSendFuture<Output = BTreeResult<()>>
-  where
-    Self: Sized;
+  fn commit(self) -> impl Future<Output = BTreeResult<()>>;
+  fn rollback(self) -> impl Future<Output = BTreeResult<()>>;
 }
 
-pub trait BTree<K, V>: Clone + BTreeReadExecutor<K, V> + 'static
+pub trait BTree<K, V>: BTreeReadExecutor<K, V>
 where
   K: BTreeKey,
   V: BTreeValue,
 {
   type Transaction: BTreeTransaction<K, V>;
 
-  fn transaction<'a>(
-    &'a self,
-  ) -> impl MaybeSendFuture<Output = BTreeResult<Self::Transaction>> + 'a;
-}
-
-pub trait BTreeDefinition: Clone + MaybeSend + MaybeSync + 'static {
-  type Key: BTreeKey;
-  type Value: BTreeValue;
-
-  fn id(&self) -> &str;
-}
-
-pub trait BTreeFactory: MaybeSend + MaybeSync {
-  type BTree<K, V>: BTree<K, V>
-  where
-    K: BTreeKey,
-    V: BTreeValue;
-
-  fn create<D>(
-    &self,
-    definition: &D,
-  ) -> impl MaybeSendFuture<Output = BTreeResult<Self::BTree<D::Key, D::Value>>>
-  where
-    D: BTreeDefinition;
-}
-
-pub trait BTreeManagerAnyBTree: Any + MaybeSend + MaybeSync + 'static {}
-
-impl<T> BTreeManagerAnyBTree for T where T: Any + MaybeSend + MaybeSync + 'static {}
-
-pub trait BTreeManager<F>: MaybeSend + MaybeSync
-where
-  F: BTreeFactory,
-{
-  fn entry<D>(
-    &self,
-    definition: &D,
-  ) -> impl MaybeSendFuture<Output = BTreeResult<F::BTree<D::Key, D::Value>>>
-  where
-    D: BTreeDefinition;
-
-  fn remove<D>(&self, definition: &D) -> impl MaybeSendFuture<Output = BTreeResult<()>>
-  where
-    D: BTreeDefinition;
+  fn transaction(&self) -> impl Future<Output = BTreeResult<Self::Transaction>>;
 }

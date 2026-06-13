@@ -16,52 +16,52 @@ pub type DocumentChangeHash = [u8; 32];
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(C)]
 pub struct DocumentChangeKey {
-  pub doc_id: DocumentId,
-  pub doc_type: DocumentType,
-  pub change_hash: DocumentChangeHash,
-}
-
-impl Ord for DocumentChangeKey {
-  fn cmp(&self, other: &Self) -> Ordering {
-    match self.doc_id.cmp(&other.doc_id) {
-      Ordering::Equal => match self.doc_type.cmp(&other.doc_type) {
-        Ordering::Equal => self.change_hash.cmp(&other.change_hash),
-        ord => ord,
-      },
-      ord => ord,
-    }
-  }
-}
-
-impl PartialOrd for DocumentChangeKey {
-  fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-    Some(self.cmp(other))
-  }
-}
-
-impl fmt::Display for DocumentChangeKey {
-  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    write!(
-      f,
-      "{:x?}|{}|{:x?}",
-      self.doc_id, self.doc_type, self.change_hash
-    )
-  }
+  id: DocumentId,
+  r#type: DocumentType,
+  change_hash: DocumentChangeHash,
 }
 
 impl DocumentChangeKey {
-  pub fn doc_id_to_uuid(doc_id: &[u8]) -> Uuid {
-    if doc_id.len() == 16
-      && let Some(uuid) = Uuid::from_slice(doc_id).ok()
+  pub fn new(id: DocumentId, r#type: DocumentType, change_hash: DocumentChangeHash) -> Self {
+    Self {
+      id,
+      r#type,
+      change_hash,
+    }
+  }
+
+  pub fn new_snapshot(id: DocumentId, change_hash: DocumentChangeHash) -> Self {
+    Self::new(id, DocumentType::Snapshot, change_hash)
+  }
+
+  pub fn new_incremental(id: DocumentId, change_hash: DocumentChangeHash) -> Self {
+    Self::new(id, DocumentType::Incremental, change_hash)
+  }
+
+  pub fn id_to_uuid(id: &[u8]) -> Uuid {
+    if id.len() == 16
+      && let Some(uuid) = Uuid::from_slice(id).ok()
     {
       return uuid;
     }
 
-    Uuid::new_v5(&Uuid::NAMESPACE_DNS, doc_id)
+    Uuid::new_v5(&Uuid::NAMESPACE_DNS, id)
+  }
+
+  pub fn id(&self) -> &[u8] {
+    &self.id
+  }
+
+  pub fn r#type(&self) -> DocumentType {
+    self.r#type
+  }
+
+  pub fn change_hash(&self) -> &DocumentChangeHash {
+    &self.change_hash
   }
 
   pub fn uuid(&self) -> Uuid {
-    Self::doc_id_to_uuid(&self.doc_id)
+    Self::id_to_uuid(&self.id)
   }
 
   pub fn actor_id(&self) -> ActorId {
@@ -77,44 +77,67 @@ impl DocumentChangeKey {
     }
   }
 
-  pub fn min_for_id(doc_id: DocumentId) -> Self {
+  pub fn min_for_id(id: &[u8]) -> Self {
     Self {
-      doc_id,
-      doc_type: DocumentType::Snapshot,
+      id: id.to_vec(),
+      r#type: DocumentType::Snapshot,
       change_hash: [0u8; 32],
     }
   }
 
-  pub fn max_for_id(doc_id: DocumentId) -> Self {
+  pub fn max_for_id(id: &[u8]) -> Self {
     Self {
-      doc_id,
-      doc_type: DocumentType::Incremental,
+      id: id.to_vec(),
+      r#type: DocumentType::Incremental,
       change_hash: [255u8; 32],
     }
   }
 
-  pub fn range_for(doc_id: DocumentId) -> impl RangeBounds<DocumentChangeKey> {
-    let start = Bound::Included(Self::min_for_id(doc_id.clone()));
-    let end = Bound::Included(Self::max_for_id(doc_id));
+  pub fn range_for(id: &[u8]) -> impl RangeBounds<Self> {
+    let start = Bound::Included(Self::min_for_id(id));
+    let end = Bound::Included(Self::max_for_id(id));
 
     (start, end)
   }
 
-  pub fn map_doc_id_range(
-    range: impl RangeBounds<DocumentId>,
-  ) -> impl RangeBounds<DocumentChangeKey> {
+  pub fn map_document_id_range<R>(range: R) -> impl RangeBounds<Self>
+  where
+    R: RangeBounds<DocumentId>,
+  {
     let start = match range.start_bound() {
-      Bound::Included(doc_id) => Bound::Included(DocumentChangeKey::min_for_id(doc_id.clone())),
-      Bound::Excluded(doc_id) => Bound::Excluded(DocumentChangeKey::max_for_id(doc_id.clone())),
+      Bound::Included(id) => Bound::Included(Self::min_for_id(id)),
+      Bound::Excluded(id) => Bound::Excluded(Self::max_for_id(id)),
       Bound::Unbounded => Bound::Unbounded,
     };
 
     let end = match range.end_bound() {
-      Bound::Included(doc_id) => Bound::Included(DocumentChangeKey::max_for_id(doc_id.clone())),
-      Bound::Excluded(doc_id) => Bound::Excluded(DocumentChangeKey::min_for_id(doc_id.clone())),
+      Bound::Included(id) => Bound::Included(Self::max_for_id(id)),
+      Bound::Excluded(id) => Bound::Excluded(Self::min_for_id(id)),
       Bound::Unbounded => Bound::Unbounded,
     };
 
     (start, end)
+  }
+}
+
+impl Ord for DocumentChangeKey {
+  fn cmp(&self, other: &Self) -> Ordering {
+    self
+      .id
+      .cmp(&other.id)
+      .then_with(|| self.r#type.cmp(&other.r#type))
+      .then_with(|| self.change_hash.cmp(&other.change_hash))
+  }
+}
+
+impl PartialOrd for DocumentChangeKey {
+  fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+    Some(self.cmp(other))
+  }
+}
+
+impl fmt::Display for DocumentChangeKey {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(f, "{:x?}|{}|{:x?}", self.id, self.r#type, self.change_hash)
   }
 }

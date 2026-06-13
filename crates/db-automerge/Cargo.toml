@@ -19,7 +19,6 @@ default = []
 [dependencies]
 # internal dependencies
 db-btree = { path = "../db-btree", default-features = false, features = ["std"] }
-db-core = { path = "../db-core", default-features = false, features = ["std"] }
 
 async-stream = { version = "0.3", default-features = false, features = [] }
 futures = { version = "0.3", default-features = false, features = [

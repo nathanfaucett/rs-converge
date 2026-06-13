@@ -48,14 +48,10 @@ members = [
   "crates/db-automerge",
   "crates/db-sql-translator",
   "crates/db-wasm",
+  "crates/db-btree",
   "crates/db-value",
   "crates/db-query",
-  "crates/db-btree",
-  "crates/db-schema",
-  "crates/db-core",
-  "crates/db-examples-util",
 ]
-resolver = "2"
 
 [workspace.package]
 version = "0.1.0"

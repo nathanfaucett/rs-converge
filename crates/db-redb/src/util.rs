@@ -1,19 +1,21 @@
-use std::ops::{Bound, RangeBounds};
+use std::{
+  borrow::Borrow,
+  ops::{Bound, RangeBounds},
+};
 
 use redb::{ReadableTable, Table, TableDefinition};
 
 use db_btree::{BTreeError, BTreeResult};
-
-use crate::{CodecResult, codec::Codec};
 
 #[allow(mismatched_lifetime_syntaxes)]
 pub fn table_definition(name: &str) -> TableDefinition<&'static [u8], &'static [u8]> {
   TableDefinition::new(name)
 }
 
-pub fn tx_read<K, V, T>(table: &T, key: &K) -> BTreeResult<Option<V>>
+pub fn tx_read<K, V, T>(table: &T, key: &Q) -> BTreeResult<Option<V>>
 where
-  K: Codec,
+  K: Borrow<Q> + Codec,
+  Q: Codex + ?Sized,
   V: Codec,
   T: ReadableTable<&'static [u8], &'static [u8]>,
 {
@@ -29,7 +31,7 @@ where
   }
 }
 
-pub fn rx_range<K, V, R, T>(table: &T, range: R) -> BTreeResult<Vec<(K, V)>>
+pub fn tx_range<K, V, R, T>(table: &T, range: R) -> BTreeResult<Vec<(K, V)>>
 where
   K: Codec,
   V: Codec,
@@ -104,9 +106,10 @@ where
   Ok(())
 }
 
-pub fn tx_remove<K, V>(tx: &mut Table<&[u8], &[u8]>, key: &K) -> BTreeResult<Option<V>>
+pub fn tx_remove<K, V>(tx: &mut Table<&[u8], &[u8]>, key: &Q) -> BTreeResult<Option<V>>
 where
-  K: Codec,
+  K: Borrow<Q> + Codec,
+  Q: Codex + ?Sized,
   V: Codec,
 {
   let key_bytes = key.to_bytes().map_err(BTreeError::custom)?;

@@ -13,24 +13,24 @@ pub struct ReconstructedDocument {
 }
 
 impl ReconstructedDocument {
-  pub fn new(id: DocumentId) -> Self {
+  pub fn new(id: &[u8]) -> Self {
     Self {
-      id,
+      id: id.to_vec(),
       doc: None,
       deltas: 0,
       bytes_size: 0,
     }
   }
 
-  pub fn matches(&self, key: &DocumentChangeKey) -> bool {
-    self.id == key.doc_id
+  pub fn same_id(&self, key: &DocumentChangeKey) -> bool {
+    self.id == key.id()
   }
 
   pub fn apply(&mut self, key: &DocumentChangeKey, data: &[u8]) -> BTreeResult<()> {
     if let Some(doc) = self.doc.as_mut() {
       doc.load_incremental(data).map_err(BTreeError::custom)?;
     } else {
-      if key.doc_type.is_snapshot() {
+      if key.r#type().is_snapshot() {
         self.doc.replace(
           AutoCommit::load(data)
             .map_err(BTreeError::custom)?
@@ -39,7 +39,7 @@ impl ReconstructedDocument {
       } else {
         return Err(BTreeError::custom(format!(
           "Expected delta for document {:x?}, but found snapshot",
-          key.doc_id
+          key.id()
         )));
       }
     }
@@ -51,23 +51,24 @@ impl ReconstructedDocument {
   }
 }
 
-pub async fn reconstruct_document<T>(
-  tx: &T,
-  doc_id: DocumentId,
-) -> BTreeResult<ReconstructedDocument>
+pub async fn reconstruct_document<T>(tx: &T, key: &DocumentId) -> BTreeResult<ReconstructedDocument>
 where
   T: BTreeReadExecutor<DocumentChangeKey, Vec<u8>>,
 {
-  let stream = tx.range(DocumentChangeKey::range_for(doc_id.clone()));
+  let range = DocumentChangeKey::range_for(key);
+  let stream = tx.range(range);
   pin_mut!(stream);
 
-  let mut reconstructed_document = ReconstructedDocument::new(doc_id);
+  let mut reconstructed_document_option = None;
 
   while let Some(item) = stream.next().await {
     let (key, data) = item?;
 
+    let reconstructed_document =
+      reconstructed_document_option.get_or_insert_with(|| ReconstructedDocument::new(key.id()));
+
     reconstructed_document.apply(&key, &data)?;
   }
 
-  Ok(reconstructed_document)
+  reconstructed_document_option.ok_or_else(|| BTreeError::custom("Document not found".to_string()))
 }

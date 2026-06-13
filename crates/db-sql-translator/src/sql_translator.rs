@@ -1,1147 +1,582 @@
-#[cfg(not(feature = "std"))]
-use alloc::{
-  borrow::ToOwned,
-  boxed::Box,
-  format,
-  string::{String, ToString},
-  vec,
-  vec::Vec,
-};
-
 use db_query::{
-  DataDefinition, Query, QueryColumn, QueryExpr, QueryExprValue, QueryJoin, QueryJoinKind,
-  QueryParams, QuerySelectOptions, QueryTableIndex, QueryUpdateAssignment, Statement,
-  TranslateError, Translator,
+  AlterIndexOperation, DataDefinition, Query, QueryColumn, QueryDelete, QueryExpr, QueryExprValue,
+  QueryFrom, QueryInsert, QueryJoin, QueryJoinKind, QueryParams, QuerySelect, QueryUpdate,
+  Statement, TranslateError, TranslateResult, Translator,
 };
-use db_schema::{ColumnSchema, ColumnSchemaIndex, DescribeSchema, TableSchema};
-use sqlparser::ast::{
-  BinaryOperator, ColumnOption, DataType, Expr as SQLExpr, JoinConstraint, JoinOperator,
-  ObjectName, ObjectNamePart, SelectItem, Statement as SQLStatement, TableConstraint, TableFactor,
-};
-use sqlparser::dialect::GenericDialect;
-use sqlparser::parser::Parser;
 
+use db_schema::{IndexSchema, TableSchema};
 use db_value::{Value, ValueType};
+use sqlparser::{
+  ast::{
+    self, Expr, Join, JoinConstraint, JoinOperator, ObjectName, ObjectNamePart, SelectItem,
+    TableFactor, TableObject, TableWithJoins,
+  },
+  dialect::PostgreSqlDialect,
+  parser::Parser,
+};
 
 #[derive(Debug, Clone, Copy)]
 pub struct SqlTranslator;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PlaceholderStyle {
-  PositionalOrIndexed,
-  Named,
-}
+impl Translator for SqlTranslator {
+  async fn translate_with_params(
+    &self,
+    query: &str,
+    params: Option<&QueryParams>,
+  ) -> TranslateResult<Vec<Statement>> {
+    let stmts = Parser::parse_sql(&PostgreSqlDialect {}, query).map_err(TranslateError::custom)?;
 
-enum ParsedPlaceholder {
-  Positional,
-  Indexed(usize),
-  Named(String),
-}
-
-struct ParamState<'a> {
-  params: Option<&'a QueryParams>,
-  next: usize,
-  style: Option<PlaceholderStyle>,
-}
-
-impl<'a> ParamState<'a> {
-  fn new(params: Option<&'a QueryParams>) -> Self {
-    Self {
-      params,
-      next: 0,
-      style: None,
+    let mut results = Vec::with_capacity(stmts.len());
+    for stmt in stmts {
+      results.push(translate_stmt(stmt, params)?);
     }
+    Ok(results)
   }
+}
 
-  fn ensure_style(&mut self, style: PlaceholderStyle) -> Result<(), TranslateError> {
-    match self.style {
-      Some(existing) if existing != style => Err(TranslateError::MixedPlaceholderStyles),
-      _ => {
-        self.style = Some(style);
-        Ok(())
+fn table_name_to_string(name: &TableObject) -> TranslateResult<String> {
+  match name {
+    TableObject::TableName(object_name) => {
+      if object_name.0.len() == 1 {
+        object_name_part_to_string(&object_name.0[0])
+      } else {
+        Err(TranslateError::custom(format!(
+          "Unsupported table name with {} parts: {:?}",
+          object_name.0.len(),
+          object_name
+        )))
       }
     }
-  }
-
-  fn positional_params(&self) -> Result<&[Value], TranslateError> {
-    match self.params {
-      Some(QueryParams::Positional(values)) => Ok(values),
-      Some(QueryParams::Named(_)) => Err(TranslateError::Custom(
-        "named parameters provided for positional/indexed placeholder".into(),
-      )),
-      None => Err(TranslateError::Custom(
-        "no parameters provided for positional/indexed placeholder".into(),
-      )),
-    }
-  }
-
-  fn take_next(&mut self) -> Result<Value, TranslateError> {
-    self.ensure_style(PlaceholderStyle::PositionalOrIndexed)?;
-
-    let values = self.positional_params()?;
-    if self.next >= values.len() {
-      return Err(TranslateError::Custom(format!(
-        "missing parameter at position {}",
-        self.next + 1
-      )));
-    }
-
-    let v = values[self.next].clone();
-    self.next += 1;
-    Ok(v)
-  }
-
-  fn get_indexed(&mut self, idx0: usize) -> Result<Value, TranslateError> {
-    self.ensure_style(PlaceholderStyle::PositionalOrIndexed)?;
-
-    self
-      .positional_params()?
-      .get(idx0)
-      .cloned()
-      .ok_or_else(|| TranslateError::Custom(format!("missing parameter ${}", idx0 + 1)))
-  }
-
-  fn get_named(&mut self, name: &str) -> Result<Value, TranslateError> {
-    self.ensure_style(PlaceholderStyle::Named)?;
-
-    match self.params {
-      Some(QueryParams::Named(values)) => values
-        .get(name)
-        .cloned()
-        .ok_or_else(|| TranslateError::MissingNamedParameter(name.to_string())),
-      Some(QueryParams::Positional(_)) => Err(TranslateError::Custom(
-        "positional parameters provided for named placeholder".into(),
-      )),
-      None => Err(TranslateError::Custom(
-        "no parameters provided for named placeholder".into(),
-      )),
-    }
-  }
-
-  fn resolve_placeholder(
-    &mut self,
-    placeholder: ParsedPlaceholder,
-  ) -> Result<Value, TranslateError> {
-    match placeholder {
-      ParsedPlaceholder::Positional => self.take_next(),
-      ParsedPlaceholder::Indexed(idx0) => self.get_indexed(idx0),
-      ParsedPlaceholder::Named(name) => self.get_named(&name),
-    }
+    _ => Err(TranslateError::custom(format!(
+      "Unsupported table object: {:?}",
+      name
+    ))),
   }
 }
 
-fn trim_cast_suffix(raw: &str) -> &str {
-  let s = raw.trim();
-  if let Some(idx) = s.find("::") {
-    s[..idx].trim()
+fn object_name_to_string(name: &ObjectName) -> TranslateResult<String> {
+  if name.0.len() == 1 {
+    object_name_part_to_string(&name.0[0])
   } else {
-    s
+    Err(TranslateError::custom(format!(
+      "Unsupported object name with {} parts: {:?}",
+      name.0.len(),
+      name
+    )))
   }
 }
 
-fn is_valid_named_param(name: &str) -> bool {
-  let mut chars = name.chars();
-  match chars.next() {
-    Some(c) if c == '_' || c.is_ascii_alphabetic() => {}
-    _ => return false,
+fn object_name_to_table_column_string(
+  name: &ObjectName,
+) -> TranslateResult<(Option<String>, String)> {
+  if name.0.len() == 1 {
+    let column_name = object_name_part_to_string(&name.0[0])?;
+    Ok((None, column_name))
+  } else if name.0.len() == 2 {
+    let table_name = object_name_part_to_string(&name.0[0])?;
+    let column_name = object_name_part_to_string(&name.0[1])?;
+    Ok((Some(table_name), column_name))
+  } else {
+    Err(TranslateError::custom(format!(
+      "Unsupported object name with {} parts: {:?}",
+      name.0.len(),
+      name
+    )))
   }
-
-  chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
 }
 
-fn parse_placeholder(expr: &SQLExpr) -> Result<Option<ParsedPlaceholder>, TranslateError> {
-  let raw = expr.to_string();
-  let token = trim_cast_suffix(&raw);
-
-  if token == "?" {
-    return Ok(Some(ParsedPlaceholder::Positional));
-  }
-
-  if let Some(digits) = token.strip_prefix('$')
-    && !digits.is_empty()
-    && digits.chars().all(|c| c.is_ascii_digit())
-  {
-    let idx1 = digits
-      .parse::<usize>()
-      .map_err(|e| TranslateError::Custom(format!("invalid parameter index: {}", e)))?;
-    if idx1 == 0 {
-      return Err(TranslateError::Custom(
-        "parameter index must be >= 1".into(),
-      ));
-    }
-
-    return Ok(Some(ParsedPlaceholder::Indexed(idx1 - 1)));
-  }
-
-  if let Some(name) = token.strip_prefix(':')
-    && is_valid_named_param(name)
-  {
-    return Ok(Some(ParsedPlaceholder::Named(name.to_string())));
-  }
-
-  Ok(None)
-}
-
-fn object_name_to_string(name: &ObjectName) -> String {
-  name
-    .0
-    .iter()
-    .map(|p| match p {
-      ObjectNamePart::Identifier(ident) => ident.value.to_owned(),
-      ObjectNamePart::Function(_func) => todo!("handle function calls if needed"),
-    })
-    .collect::<Vec<_>>()
-    .join(".")
-}
-
-fn parse_table_factor_name_and_alias(
-  table_factor: &TableFactor,
-) -> Result<(String, Option<String>), TranslateError> {
-  match table_factor {
-    TableFactor::Table { name, alias, .. } => {
-      let table_name = object_name_to_string(name);
-      let alias_name = alias.as_ref().map(|alias| alias.name.value.clone());
-      Ok((table_name, alias_name))
-    }
-    _ => Err(TranslateError::Custom(
-      "unsupported table factor in FROM clause".into(),
+fn object_name_part_to_string(part: &ObjectNamePart) -> TranslateResult<String> {
+  match part {
+    ObjectNamePart::Identifier(ident) => Ok(ident.value.clone()),
+    ObjectNamePart::Function(_) => Err(TranslateError::custom(
+      "Function names not supported in object names",
     )),
   }
 }
 
-fn decode_join_operator(
-  join_operator: &JoinOperator,
-) -> Result<(QueryJoinKind, &JoinConstraint), TranslateError> {
-  match join_operator {
-    JoinOperator::Join(constraint) | JoinOperator::Inner(constraint) => {
-      Ok((QueryJoinKind::Inner, constraint))
-    }
-    JoinOperator::Left(constraint) | JoinOperator::LeftOuter(constraint) => {
-      Ok((QueryJoinKind::Left, constraint))
-    }
-    JoinOperator::Right(constraint) | JoinOperator::RightOuter(constraint) => {
-      Ok((QueryJoinKind::Right, constraint))
-    }
-    JoinOperator::FullOuter(constraint) => Ok((QueryJoinKind::Full, constraint)),
-    _ => Err(TranslateError::Custom("unsupported JOIN type".into())),
-  }
-}
-
-struct TableEntry {
-  name: String,
-  alias: Option<String>,
-  schema: TableSchema,
-}
-
-impl TableEntry {
-  fn matches_name(&self, name: &str) -> bool {
-    self.name == name || self.alias.as_deref() == Some(name)
-  }
-
-  fn column_index(&self, col_name: &str) -> Option<usize> {
-    self
-      .schema
-      .columns
-      .iter()
-      .position(|col| col.name == col_name)
-  }
-}
-
-fn find_column_in_tables(
-  tables: &[TableEntry],
-  col_name: &str,
-) -> Result<(usize, usize), TranslateError> {
-  let mut matches = Vec::new();
-
-  for (table_index, table) in tables.iter().enumerate() {
-    if let Some(column_index) = table.column_index(col_name) {
-      matches.push((table_index, column_index));
-    }
-  }
-
-  match matches.len() {
-    0 => Err(TranslateError::Custom(format!(
-      "unknown column '{}' in any table",
-      col_name
-    ))),
-    1 => Ok(matches.into_iter().next().unwrap()),
-    _ => Err(TranslateError::Custom(format!(
-      "ambiguous column reference: {}",
-      col_name
+fn translate_stmt(
+  stmt: ast::Statement,
+  params: Option<&QueryParams>,
+) -> TranslateResult<Statement> {
+  match stmt {
+    ast::Statement::Query(query) => translate_query(*query, params),
+    ast::Statement::Insert(insert) => translate_insert(insert, params),
+    ast::Statement::Update(update) => translate_update(update, params),
+    ast::Statement::Delete(delete) => translate_delete(delete, params),
+    ast::Statement::CreateTable(create_table) => translate_create_table(create_table),
+    ast::Statement::Drop {
+      object_type,
+      if_exists,
+      names,
+      ..
+    } => translate_drop(object_type, if_exists, names),
+    ast::Statement::AlterTable(alter_table) => translate_alter_table(alter_table),
+    ast::Statement::CreateIndex(create_index) => translate_create_index(create_index),
+    ast::Statement::AlterIndex { name, operation } => translate_alter_index(name, operation),
+    _ => Err(TranslateError::custom(format!(
+      "Unsupported SQL statement: {:?}",
+      stmt
     ))),
   }
 }
 
-fn resolve_column_from_compound_identifier(
-  idents: &[sqlparser::ast::Ident],
-  tables: &[TableEntry],
-) -> Result<(usize, usize), TranslateError> {
-  if idents.is_empty() {
-    return Err(TranslateError::Custom("empty identifier".into()));
+fn translate_query(query: ast::Query, _params: Option<&QueryParams>) -> TranslateResult<Statement> {
+  if query.with.is_some() {
+    return Err(TranslateError::custom("CTEs not yet supported"));
   }
-
-  let col_name = &idents.last().unwrap().value;
-  if idents.len() >= 2 {
-    let qual = idents[..idents.len() - 1]
-      .iter()
-      .map(|id| id.value.clone())
-      .collect::<Vec<_>>()
-      .join(".");
-
-    for (table_index, table) in tables.iter().enumerate() {
-      if table.matches_name(&qual) {
-        return table
-          .column_index(col_name)
-          .map(|column_index| (table_index, column_index))
-          .ok_or_else(|| {
-            TranslateError::Custom(format!(
-              "unknown column '{}' in table '{}'",
-              col_name, table.name
-            ))
-          });
-      }
-    }
-
-    return Err(TranslateError::Custom(format!(
-      "qualified column refers to unknown table: {}",
-      qual
-    )));
-  }
-
-  find_column_in_tables(tables, col_name)
-}
-
-fn resolve_column_reference(
-  expr: &SQLExpr,
-  tables: &[TableEntry],
-) -> Result<QueryColumn, TranslateError> {
-  let (table_index, column_index) = match expr {
-    SQLExpr::Identifier(ident) => find_column_in_tables(tables, &ident.value)?,
-    SQLExpr::CompoundIdentifier(idents) => resolve_column_from_compound_identifier(idents, tables)?,
-    _ => {
-      return Err(TranslateError::Custom(format!(
-        "unsupported select expression: {}",
-        expr
-      )));
-    }
-  };
-
-  Ok(QueryColumn {
-    table_index: table_index as QueryTableIndex,
-    column_index: column_index as ColumnSchemaIndex,
-  })
-}
-
-fn resolve_projection_item(
-  item: &SelectItem,
-  tables: &[TableEntry],
-) -> Result<Vec<QueryColumn>, TranslateError> {
-  match item {
-    SelectItem::Wildcard(_) => {
-      let mut cols = Vec::new();
-      for (table_index, table) in tables.iter().enumerate() {
-        for column_index in 0..table.schema.columns.len() {
-          cols.push(QueryColumn {
-            table_index: table_index as QueryTableIndex,
-            column_index: column_index as ColumnSchemaIndex,
-          });
-        }
-      }
-      Ok(cols)
-    }
-    SelectItem::QualifiedWildcard(kind, _) => {
-      let qual = match kind {
-        sqlparser::ast::SelectItemQualifiedWildcardKind::ObjectName(name) => {
-          object_name_to_string(name)
-        }
-        _ => {
-          return Err(TranslateError::Custom(
-            "unsupported qualified wildcard expression".into(),
-          ));
-        }
-      };
-      let table_index = tables
-        .iter()
-        .position(|table| table.matches_name(&qual))
-        .ok_or_else(|| {
-          TranslateError::Custom(format!(
-            "qualified wildcard refers to unknown table: {}",
-            qual
-          ))
-        })?;
-
-      let mut cols = Vec::new();
-      for column_index in 0..tables[table_index].schema.columns.len() {
-        cols.push(QueryColumn {
-          table_index: table_index as QueryTableIndex,
-          column_index: column_index as ColumnSchemaIndex,
-        });
-      }
-      Ok(cols)
-    }
-    SelectItem::UnnamedExpr(expr) => Ok(vec![resolve_column_reference(expr, tables)?]),
-    SelectItem::ExprWithAlias { expr, .. } => Ok(vec![resolve_column_reference(expr, tables)?]),
-  }
-}
-
-fn parse_single_statement(query: &str) -> Result<SQLStatement, TranslateError> {
-  let dialect = GenericDialect {};
-  let stmts = Parser::parse_sql(&dialect, query)
-    .map_err(|e| TranslateError::Custom(format!("failed to parse SQL: {}", e)))?;
-
-  if stmts.is_empty() {
-    return Err(TranslateError::Custom("no SQL statement found".into()));
-  }
-
-  if stmts.len() > 1 {
-    return Err(TranslateError::Custom(
-      "only a single SQL statement is supported".into(),
+  if !matches!(*query.body, ast::SetExpr::Select(_)) {
+    return Err(TranslateError::custom(
+      "Only plain SELECT queries supported",
     ));
   }
 
-  Ok(stmts.into_iter().next().unwrap())
+  let select = match *query.body {
+    ast::SetExpr::Select(select) => select,
+    _ => unreachable!(),
+  };
+
+  let from = translate_from(&select.from)?;
+  let projection = translate_projection(&select.projection)?;
+  let predicate = select.selection.map(translate_expr).transpose()?;
+  let having = select.having.map(translate_expr).transpose()?;
+
+  // TODO: Expand these as needed
+  let aggregates = vec![];
+  let group_by = vec![];
+  let order_by = vec![];
+
+  let limit = None; // TODO: implement properly
+  let offset = None; // TODO: implement properly
+
+  Ok(Statement::Query(Query::Select(QuerySelect {
+    from,
+    projection,
+    predicate,
+    aggregates,
+    group_by,
+    order_by,
+    limit,
+    offset,
+    having,
+  })))
 }
 
-fn find_column_index(table_schema: &TableSchema, col_name: &str) -> Result<usize, TranslateError> {
-  for (i, col) in table_schema.columns.iter().enumerate() {
-    if col.name == col_name {
-      return Ok(i);
+fn translate_from(from: &[TableWithJoins]) -> TranslateResult<QueryFrom> {
+  if from.is_empty() {
+    return Err(TranslateError::custom("Missing FROM clause"));
+  }
+
+  let twj = &from[0];
+  let table = match &twj.relation {
+    TableFactor::Table { name, .. } => object_name_to_string(name)?,
+    _ => {
+      return Err(TranslateError::custom(
+        "Only simple table references supported in FROM",
+      ));
     }
+  };
+
+  let mut joins = Vec::new();
+  for join in &twj.joins {
+    joins.push(translate_join(join)?);
   }
-  Err(TranslateError::Custom(format!(
-    "unknown column '{}' in table '{}'",
-    col_name, table_schema.name
-  )))
+
+  Ok(QueryFrom { table, joins })
 }
 
-fn translate_join_constraint(
-  constraint: &sqlparser::ast::JoinConstraint,
-  tables: &[TableEntry],
-  params: &mut ParamState<'_>,
-) -> Result<QueryExpr, TranslateError> {
+fn translate_join(join: &Join) -> TranslateResult<QueryJoin> {
+  let table = match &join.relation {
+    TableFactor::Table { name, .. } => object_name_to_string(name)?,
+    _ => {
+      return Err(TranslateError::custom(
+        "Complex table in JOIN not supported",
+      ));
+    }
+  };
+
+  let (kind, on) = match &join.join_operator {
+    JoinOperator::Inner(join_constraint) => (
+      QueryJoinKind::Inner,
+      parse_join_constraint(join_constraint)?,
+    ),
+    JoinOperator::Left(join_constraint) => {
+      (QueryJoinKind::Left, parse_join_constraint(join_constraint)?)
+    }
+    JoinOperator::Right(join_constraint) => (
+      QueryJoinKind::Right,
+      parse_join_constraint(join_constraint)?,
+    ),
+    JoinOperator::FullOuter(join_constraint) => {
+      (QueryJoinKind::Full, parse_join_constraint(join_constraint)?)
+    }
+    _ => return Err(TranslateError::custom("Unsupported JOIN type")),
+  };
+
+  Ok(QueryJoin { kind, table, on })
+}
+
+fn parse_join_constraint(constraint: &JoinConstraint) -> TranslateResult<QueryExpr> {
   match constraint {
-    JoinConstraint::On(expr) => translate_predicate(expr, tables, params),
-    JoinConstraint::Using(_) => Err(TranslateError::Custom("JOIN USING is not supported".into())),
-    sqlparser::ast::JoinConstraint::Natural => Err(TranslateError::Custom(
-      "NATURAL JOIN is not supported".into(),
-    )),
-    sqlparser::ast::JoinConstraint::None => Err(TranslateError::Custom(
-      "JOIN without ON is not supported".into(),
-    )),
+    JoinConstraint::On(expr) => translate_expr(expr.clone()),
+    JoinConstraint::Using(_) => Err(TranslateError::custom("USING joins not yet supported")),
+    JoinConstraint::Natural => Err(TranslateError::custom("NATURAL joins not yet supported")),
+    JoinConstraint::None => Err(TranslateError::custom("JOIN without ON condition")),
   }
 }
 
-fn translate_predicate(
-  expr: &SQLExpr,
-  tables: &[TableEntry],
-  params: &mut ParamState<'_>,
-) -> Result<QueryExpr, TranslateError> {
-  match expr {
-    SQLExpr::BinaryOp { left, op, right } => match op {
-      BinaryOperator::And => Ok(QueryExpr::And(
-        Box::new(translate_predicate(left.as_ref(), tables, params)?),
-        Box::new(translate_predicate(right.as_ref(), tables, params)?),
-      )),
-      BinaryOperator::Or => Ok(QueryExpr::Or(
-        Box::new(translate_predicate(left.as_ref(), tables, params)?),
-        Box::new(translate_predicate(right.as_ref(), tables, params)?),
-      )),
-      BinaryOperator::Eq
-      | BinaryOperator::NotEq
-      | BinaryOperator::Lt
-      | BinaryOperator::LtEq
-      | BinaryOperator::Gt
-      | BinaryOperator::GtEq => {
-        let left_val = expr_to_expr_value(left.as_ref(), tables, params)?;
-        let right_val = expr_to_expr_value(right.as_ref(), tables, params)?;
-
-        match op {
-          BinaryOperator::Eq => Ok(QueryExpr::Equals(left_val, right_val)),
-          BinaryOperator::NotEq => Ok(QueryExpr::NotEquals(left_val, right_val)),
-          BinaryOperator::Lt => Ok(QueryExpr::LessThan(left_val, right_val)),
-          BinaryOperator::LtEq => Ok(QueryExpr::LessThanOrEquals(left_val, right_val)),
-          BinaryOperator::Gt => Ok(QueryExpr::GreaterThan(left_val, right_val)),
-          BinaryOperator::GtEq => Ok(QueryExpr::GreaterThanOrEquals(left_val, right_val)),
-          _ => unreachable!(),
+fn translate_projection(projection: &[SelectItem]) -> TranslateResult<Vec<QueryColumn>> {
+  let mut cols = Vec::new();
+  for item in projection {
+    match item {
+      SelectItem::UnnamedExpr(expr) => {
+        if let Expr::Identifier(ident) = expr {
+          cols.push(QueryColumn::new("".to_string(), ident.value.clone()));
+        } else if let Expr::CompoundIdentifier(idents) = expr {
+          if idents.len() == 2 {
+            let table = idents[0].value.clone();
+            let column = idents[1].value.clone();
+            cols.push(QueryColumn::new(table, column));
+          } else {
+            cols.push(QueryColumn::new("".to_string(), format!("{:?}", expr)));
+          }
+        } else {
+          cols.push(QueryColumn::new("".to_string(), format!("expr:{:?}", expr)));
         }
       }
-      _ => Err(TranslateError::Custom(format!(
-        "unsupported binary operator in WHERE: {}",
-        op
-      ))),
-    },
-    SQLExpr::UnaryOp { op, expr } => {
-      let inner = translate_predicate(expr.as_ref(), tables, params)?;
-      match op.to_string().as_str() {
-        "NOT" => Ok(QueryExpr::Not(Box::new(inner))),
-        _ => Err(TranslateError::Custom(format!(
-          "unsupported unary operator in WHERE: {}",
+      SelectItem::Wildcard(_) => {
+        cols.push(QueryColumn::new("".to_string(), "*".to_string()));
+      }
+      _ => return Err(TranslateError::custom("Unsupported projection item")),
+    }
+  }
+  Ok(cols)
+}
+
+fn translate_expr(expr: Expr) -> TranslateResult<QueryExpr> {
+  match expr {
+    Expr::BinaryOp { left, op, right } => {
+      let left_val = Box::new(translate_expr(*left)?);
+      let right_val = Box::new(translate_expr(*right)?);
+
+      match op {
+        ast::BinaryOperator::Eq => Ok(QueryExpr::Equals(left_val, right_val)),
+        ast::BinaryOperator::NotEq => Ok(QueryExpr::NotEquals(left_val, right_val)),
+        ast::BinaryOperator::Lt => Ok(QueryExpr::LessThan(left_val, right_val)),
+        ast::BinaryOperator::LtEq => Ok(QueryExpr::LessThanOrEquals(left_val, right_val)),
+        ast::BinaryOperator::Gt => Ok(QueryExpr::GreaterThan(left_val, right_val)),
+        ast::BinaryOperator::GtEq => Ok(QueryExpr::GreaterThanOrEquals(left_val, right_val)),
+        ast::BinaryOperator::And => Ok(QueryExpr::And(left_val, right_val)),
+        ast::BinaryOperator::Or => Ok(QueryExpr::Or(left_val, right_val)),
+        _ => Err(TranslateError::custom(format!(
+          "Unsupported binary operator: {:?}",
           op
         ))),
       }
     }
-    SQLExpr::IsNull(expr) => Ok(QueryExpr::IsNull(expr_to_expr_value(expr, tables, params)?)),
-    SQLExpr::IsNotNull(expr) => Ok(QueryExpr::IsNotNull(expr_to_expr_value(
-      expr, tables, params,
-    )?)),
-    other => Err(TranslateError::Custom(format!(
-      "unsupported WHERE expression: {}",
-      other
-    ))),
-  }
-}
-
-async fn translate_select<S>(
-  select: &sqlparser::ast::Select,
-  resolver: &S,
-  params: &mut ParamState<'_>,
-) -> Result<Query, TranslateError>
-where
-  S: DescribeSchema,
-{
-  if select.from.is_empty() {
-    return Err(TranslateError::Custom(
-      "SELECT must have a FROM clause (unsupported)".into(),
-    ));
-  }
-
-  if select.from.len() != 1 {
-    return Err(TranslateError::Custom(
-      "SELECT with multiple FROM tables is not supported".into(),
-    ));
-  }
-
-  let table_with_joins = &select.from[0];
-  let mut table_entries: Vec<TableEntry> = Vec::new();
-  let mut tables: Vec<String> = Vec::new();
-
-  let (base_name, base_alias) = parse_table_factor_name_and_alias(&table_with_joins.relation)?;
-  let base_schema = resolver
-    .describe_table(&base_name)
-    .await
-    .ok_or_else(|| TranslateError::Custom(format!("unknown table: {}", base_name)))?;
-
-  table_entries.push(TableEntry {
-    name: base_name.clone(),
-    alias: base_alias,
-    schema: base_schema,
-  });
-  tables.push(base_name);
-
-  let mut joins: Vec<QueryJoin> = Vec::new();
-  for join in &table_with_joins.joins {
-    let (join_name, join_alias) = parse_table_factor_name_and_alias(&join.relation)?;
-    let join_schema = resolver
-      .describe_table(&join_name)
-      .await
-      .ok_or_else(|| TranslateError::Custom(format!("unknown table: {}", join_name)))?;
-
-    let table_index = table_entries.len() as QueryTableIndex;
-    table_entries.push(TableEntry {
-      name: join_name.clone(),
-      alias: join_alias,
-      schema: join_schema,
-    });
-    tables.push(join_name);
-
-    let (join_kind, join_constraint) = decode_join_operator(&join.join_operator)?;
-    let on = translate_join_constraint(join_constraint, &table_entries, params)?;
-
-    joins.push(QueryJoin {
-      kind: join_kind,
-      table_index,
-      on,
-    });
-  }
-
-  let predicate = match &select.selection {
-    Some(expr) => Some(translate_predicate(expr, &table_entries, params)?),
-    None => None,
-  };
-
-  let mut projection: Vec<QueryColumn> = Vec::new();
-  for item in &select.projection {
-    let mut resolved = resolve_projection_item(item, &table_entries)?;
-    projection.append(&mut resolved);
-  }
-
-  let options = QuerySelectOptions {
-    joins,
-    aggregates: Vec::new(),
-    group_by: Vec::new(),
-    order_by: Vec::new(),
-    limit: None,
-    offset: None,
-    distinct: false,
-    having: None,
-  };
-
-  Ok(Query::Select {
-    tables,
-    table_index: 0,
-    projection,
-    predicate,
-    options: if options.is_simple() {
-      None
-    } else {
-      Some(Box::new(options))
-    },
-  })
-}
-
-fn parse_literal_for_type(raw: &str, target_type: &ValueType) -> Result<Value, TranslateError> {
-  let s = trim_cast_suffix(raw);
-
-  if s.eq_ignore_ascii_case("NULL") {
-    return Ok(Value::Null);
-  }
-
-  let strip_quotes = |v: &str| {
-    let v = v.trim();
-    if v.starts_with('\'') && v.ends_with('\'') && v.len() >= 2 {
-      v[1..v.len() - 1].to_string()
-    } else {
-      v.to_string()
+    Expr::Identifier(ident) => {
+      let col = QueryColumn::new("".into(), ident.value);
+      Ok(QueryExpr::Value(QueryExprValue::Column(col)))
     }
-  };
-
-  match target_type {
-    ValueType::Null => Ok(Value::Null),
-    ValueType::Type => Err(TranslateError::Custom(
-      "type literals are not supported by the minimal translator".into(),
-    )),
-    ValueType::Bool => {
-      let s_lower = s.to_ascii_lowercase();
-      match s_lower.as_str() {
-        "true" => Ok(Value::Bool(true)),
-        "false" => Ok(Value::Bool(false)),
-        _ => Err(TranslateError::Custom(format!(
-          "failed to parse boolean literal: {}",
-          s
-        ))),
-      }
+    Expr::CompoundIdentifier(idents) if idents.len() == 2 => {
+      let col = QueryColumn::new(idents[0].value.clone(), idents[1].value.clone());
+      Ok(QueryExpr::Value(QueryExprValue::Column(col)))
     }
-    ValueType::Uuid => {
-      let inner = strip_quotes(s);
-      match uuid::Uuid::parse_str(&inner) {
-        Ok(u) => Ok(Value::Uuid(u)),
-        Err(_) => Err(TranslateError::Custom(format!(
-          "failed to parse UUID literal: {}",
-          inner
-        ))),
-      }
-    }
-    ValueType::Integer => {
-      let candidate = strip_quotes(s);
-      candidate
-        .parse::<i64>()
-        .map(Value::Integer)
-        .map_err(|e| TranslateError::Custom(format!("failed to parse integer: {}", e)))
-    }
-    ValueType::Float => {
-      let candidate = strip_quotes(s);
-      candidate
-        .parse::<f64>()
-        .map(Value::Float)
-        .map_err(|e| TranslateError::Custom(format!("failed to parse float: {}", e)))
-    }
-    ValueType::Text => Ok(Value::Text(strip_quotes(s))),
-    ValueType::Json => {
-      let candidate = strip_quotes(s);
-      serde_json::from_str::<serde_json::Value>(&candidate)
-        .map(Value::from)
-        .map_err(|e| TranslateError::Custom(format!("failed to parse json: {}", e)))
-    }
-    ValueType::Blob => Err(TranslateError::Custom(
-      "blob literals are not supported by the minimal translator".into(),
-    )),
-  }
-}
-
-fn expr_to_value_guess(expr: &SQLExpr) -> Result<Value, TranslateError> {
-  let raw = expr.to_string();
-  let s = trim_cast_suffix(&raw);
-
-  if s.eq_ignore_ascii_case("NULL") {
-    return Ok(Value::Null);
-  }
-
-  if s.starts_with('\'') && s.ends_with('\'') && s.len() >= 2 {
-    let inner = s[1..s.len() - 1].to_string();
-
-    if let Ok(u) = uuid::Uuid::parse_str(&inner) {
-      return Ok(Value::Uuid(u));
-    }
-
-    if let Ok(j) = serde_json::from_str::<serde_json::Value>(&inner) {
-      return Ok(Value::from(j));
-    }
-    return Ok(Value::Text(inner));
-  }
-
-  if let Ok(i) = s.parse::<i64>() {
-    return Ok(Value::Integer(i));
-  }
-
-  if let Ok(f) = s.parse::<f64>() {
-    return Ok(Value::Float(f));
-  }
-
-  Err(TranslateError::Custom(format!(
-    "unsupported literal expression for INSERT: {}",
-    expr
-  )))
-}
-
-fn expr_to_expr_value(
-  expr: &SQLExpr,
-  tables: &[TableEntry],
-  params: &mut ParamState<'_>,
-) -> Result<QueryExprValue, TranslateError> {
-  if let Some(placeholder) = parse_placeholder(expr)? {
-    return Ok(QueryExprValue::Value(
-      params.resolve_placeholder(placeholder)?,
-    ));
-  }
-
-  match expr {
-    SQLExpr::Identifier(_) | SQLExpr::CompoundIdentifier(_) => Ok(QueryExprValue::Column(
-      resolve_column_reference(expr, tables)?,
-    )),
-    SQLExpr::Value(_) | SQLExpr::Nested(_) | SQLExpr::Cast { .. } | SQLExpr::TypedString { .. } => {
-      Ok(QueryExprValue::Value(expr_to_value_guess(expr)?))
-    }
-    other => Err(TranslateError::Custom(format!(
-      "unsupported expression in assignment/predicate: {}",
-      other
-    ))),
-  }
-}
-
-async fn translate_insert<S>(
-  stmt: &SQLStatement,
-  resolver: &S,
-  params: &mut ParamState<'_>,
-) -> Result<Query, TranslateError>
-where
-  S: DescribeSchema,
-{
-  match stmt {
-    SQLStatement::Insert(insert) => {
-      let table = insert.table.to_string();
-      let table_index = 0;
-      let table_schema = resolver
-        .describe_table(&table)
-        .await
-        .ok_or_else(|| TranslateError::Custom(format!("unknown table: {}", table)))?;
-
-      if let Some(source) = &insert.source {
-        match &*source.body {
-          sqlparser::ast::SetExpr::Values(values) => {
-            if values.rows.len() != 1 {
-              return Err(TranslateError::Custom(
-                "only single-row VALUES INSERT is supported".into(),
-              ));
-            }
-
-            let row_exprs = &values.rows[0];
-            let mut row: Vec<Value> = vec![Value::Null; table_schema.columns.len()];
-
-            if insert.columns.is_empty() {
-              if row_exprs.len() != table_schema.columns.len() {
-                return Err(TranslateError::Custom(format!(
-                  "VALUES count ({}) does not match table column count ({})",
-                  row_exprs.len(),
-                  table_schema.columns.len()
-                )));
-              }
-
-              for (i, expr) in row_exprs.iter().enumerate() {
-                let col_schema = &table_schema.columns[i];
-                row[i] = if let Some(placeholder) = parse_placeholder(expr)? {
-                  params.resolve_placeholder(placeholder)?
-                } else {
-                  parse_literal_for_type(&expr.to_string(), &col_schema.r#type)?
-                };
-              }
-            } else {
-              if insert.columns.len() != row_exprs.len() {
-                return Err(TranslateError::Custom(
-                  "number of columns does not match number of VALUES expressions".into(),
-                ));
-              }
-
-              for (col_ident, expr) in insert.columns.iter().zip(row_exprs.iter()) {
-                let idx = find_column_index(&table_schema, &col_ident.to_string())?;
-                let col_schema = &table_schema.columns[idx];
-
-                let v = if let Some(placeholder) = parse_placeholder(expr)? {
-                  params.resolve_placeholder(placeholder)?
-                } else {
-                  parse_literal_for_type(&expr.to_string(), &col_schema.r#type)?
-                };
-
-                row[idx] = v;
-              }
-            }
-
-            Ok(Query::Insert {
-              tables: vec![table],
-              table_index,
-              row,
-              returning: None,
-            })
-          }
-          _ => Err(TranslateError::Custom(
-            "only INSERT ... VALUES (...) is supported by the minimal translator".into(),
-          )),
-        }
-      } else if !insert.assignments.is_empty() {
-        Err(TranslateError::Custom(
-          "INSERT ... SET not implemented".into(),
-        ))
-      } else {
-        Err(TranslateError::Custom(
-          "only INSERT with VALUES source is supported by the minimal translator".into(),
-        ))
-      }
-    }
-    other => Err(TranslateError::Custom(format!(
-      "expected INSERT statement, got {}",
-      other
-    ))),
-  }
-}
-
-async fn translate_update<S>(
-  stmt: &SQLStatement,
-  resolver: &S,
-  params: &mut ParamState<'_>,
-) -> Result<Query, TranslateError>
-where
-  S: DescribeSchema,
-{
-  match stmt {
-    SQLStatement::Update(update) => {
-      let table = &update.table;
-      if !table.joins.is_empty() {
-        return Err(TranslateError::Custom(
-          "UPDATE with JOINs is not supported".into(),
-        ));
-      }
-
-      let table_name = match &table.relation {
-        TableFactor::Table { name, .. } => object_name_to_string(name),
-        _ => {
-          return Err(TranslateError::Custom(
-            "unsupported table factor in UPDATE".into(),
-          ));
-        }
+    Expr::IsNull(inner) => Ok(QueryExpr::IsNull(Box::new(translate_expr(*inner)?))),
+    Expr::IsNotNull(inner) => Ok(QueryExpr::IsNotNull(Box::new(translate_expr(*inner)?))),
+    Expr::Value(ast::ValueWithSpan { value, .. }) => {
+      let db_value = match value {
+        ast::Value::Number(n, _) => Value::Text(n),
+        ast::Value::SingleQuotedString(s) => Value::Text(s),
+        ast::Value::Boolean(b) => Value::Bool(b),
+        _ => Value::Text(format!("{:?}", value)),
       };
+      Ok(QueryExpr::Value(QueryExprValue::Value(db_value)))
+    }
+    _ => Err(TranslateError::custom(format!(
+      "Unsupported expression: {:?}",
+      expr
+    ))),
+  }
+}
 
-      let table_schema = resolver
-        .describe_table(&table_name)
-        .await
-        .ok_or_else(|| TranslateError::Custom(format!("unknown table: {}", table_name)))?;
-      let table_index = 0;
+fn translate_insert(
+  insert: ast::Insert,
+  _params: Option<&QueryParams>,
+) -> TranslateResult<Statement> {
+  let table = table_name_to_string(&insert.table)?;
 
-      let mut assigns: Vec<QueryUpdateAssignment> = Vec::new();
-      for assign in update.assignments.iter() {
-        match &assign.target {
-          sqlparser::ast::AssignmentTarget::ColumnName(obj_name) => {
-            let full = object_name_to_string(obj_name);
-            let parts: Vec<&str> = full.split('.').collect();
-            let (qual, col_name) = if parts.len() >= 2 {
-              (
-                Some(parts[..parts.len() - 1].join(".")),
-                parts[parts.len() - 1].to_string(),
-              )
+  let row = if let Some(source) = insert.source {
+    if let ast::SetExpr::Values(values) = *source.body {
+      if let Some(row_exprs) = values.rows.first() {
+        row_exprs
+          .iter()
+          .map(|e| {
+            translate_expr_value(e.clone()).map(|v| match v {
+              QueryExprValue::Value(val) => val,
+              _ => Value::Text(format!("{:?}", v)),
+            })
+          })
+          .collect::<Result<Vec<_>, _>>()?
+      } else {
+        vec![]
+      }
+    } else {
+      vec![]
+    }
+  } else {
+    vec![]
+  };
+
+  let returning = if let Some(returning_items) = insert.returning {
+    let mut returning = Vec::new();
+
+    for item in returning_items {
+      match item {
+        SelectItem::UnnamedExpr(expr) => {
+          if let Expr::Identifier(ident) = expr {
+            returning.push(ident.value.clone());
+          } else if let Expr::CompoundIdentifier(idents) = expr {
+            if idents.len() == 1 {
+              let column = idents[0].value.clone();
+              returning.push(column);
             } else {
-              (None, parts[0].to_string())
-            };
-            if let Some(q) = qual
-              && q != table_name
-            {
-              return Err(TranslateError::Custom(format!(
-                "qualified column refers to unknown table: {}",
-                q
+              return Err(TranslateError::custom(format!(
+                "Unsupported RETURNING identifier: {:?}",
+                idents
               )));
             }
-            let idx = find_column_index(&table_schema, &col_name)?;
-            let table_entries = vec![TableEntry {
-              name: table_name.clone(),
-              alias: None,
-              schema: table_schema.clone(),
-            }];
-            let value = expr_to_expr_value(&assign.value, &table_entries, params)?;
-            assigns.push(QueryUpdateAssignment {
-              column: QueryColumn {
-                table_index,
-                column_index: idx as ColumnSchemaIndex,
-              },
-              value,
-            });
-          }
-          _ => {
-            return Err(TranslateError::Custom(
-              "unsupported assignment target in UPDATE".into(),
-            ));
+          } else {
+            return Err(TranslateError::custom(format!(
+              "Unsupported RETURNING expression: {:?}",
+              expr
+            )));
           }
         }
+        SelectItem::Wildcard(_) => {
+          returning.push("*".to_string());
+        }
+        _ => return Err(TranslateError::custom("Unsupported RETURNING item")),
       }
-
-      let table_entries = vec![TableEntry {
-        name: table_name.clone(),
-        alias: None,
-        schema: table_schema.clone(),
-      }];
-
-      let predicate = match &update.selection {
-        Some(expr) => Some(translate_predicate(expr, &table_entries, params)?),
-        None => None,
-      };
-
-      Ok(Query::Update {
-        tables: vec![table_name],
-        table_index,
-        assignments: assigns,
-        predicate,
-        joins: Vec::new(),
-        from_table_indexes: Vec::new(),
-        returning: None,
-      })
     }
-    other => Err(TranslateError::Custom(format!(
-      "expected UPDATE statement, got {}",
-      other
+
+    Some(returning)
+  } else {
+    None
+  };
+
+  Ok(Statement::Query(Query::Insert(QueryInsert {
+    table,
+    row,
+    returning,
+  })))
+}
+
+fn translate_update(
+  update: ast::Update,
+  _params: Option<&QueryParams>,
+) -> TranslateResult<Statement> {
+  let table = match &update.table.relation {
+    TableFactor::Table { name, .. } => object_name_to_string(name)?,
+    _ => {
+      return Err(TranslateError::custom(
+        "Only simple table references supported in UPDATE",
+      ));
+    }
+  };
+
+  let predicate = update.selection.map(translate_expr).transpose()?;
+
+  // TODO: Implement proper assignment parsing from update.assignments
+  let assignments = vec![];
+
+  Ok(Statement::Query(Query::Update(QueryUpdate {
+    from: QueryFrom {
+      table,
+      joins: vec![], // TODO: handle joins in UPDATE
+    },
+    assignments,
+    predicate,
+    returning: None, // TODO: handle RETURNING clause in UPDATE
+  })))
+}
+
+fn translate_delete(
+  delete: ast::Delete,
+  _params: Option<&QueryParams>,
+) -> TranslateResult<Statement> {
+  if delete.tables.is_empty() {
+    return Err(TranslateError::custom("No tables in DELETE"));
+  }
+  if delete.tables.len() > 1 {
+    return Err(TranslateError::custom(
+      "Multiple tables in DELETE not supported",
+    ));
+  }
+  let table = object_name_to_string(&delete.tables[0])?;
+
+  let predicate = delete.selection.map(translate_expr).transpose()?;
+
+  Ok(Statement::Query(Query::Delete(QueryDelete {
+    from: QueryFrom {
+      table,
+      joins: vec![], // TODO: handle joins in DELETE
+    },
+    predicate,
+    returning: None, // TODO: handle RETURNING clause in DELETE
+  })))
+}
+
+fn translate_column_data_type(data_type: &ast::DataType) -> TranslateResult<ValueType> {
+  match data_type {
+    ast::DataType::Char(_) | ast::DataType::Varchar(_) | ast::DataType::Text => Ok(ValueType::Text),
+    ast::DataType::Int(_) | ast::DataType::Integer(_) | ast::DataType::BigInt(_) => {
+      Ok(ValueType::Integer)
+    }
+    ast::DataType::Float(_) | ast::DataType::Double(_) => Ok(ValueType::Float),
+    ast::DataType::Boolean => Ok(ValueType::Bool),
+    ast::DataType::Blob(_) => Ok(ValueType::Blob),
+    ast::DataType::Uuid => Ok(ValueType::Uuid),
+    ast::DataType::JSON | ast::DataType::JSONB => Ok(ValueType::Json),
+    _ => Err(TranslateError::custom(format!(
+      "Unsupported column data type: {:?}",
+      data_type
     ))),
   }
 }
 
-async fn translate_delete<S>(
-  stmt: &SQLStatement,
-  resolver: &S,
-  params: &mut ParamState<'_>,
-) -> Result<Query, TranslateError>
-where
-  S: DescribeSchema,
-{
-  match stmt {
-    SQLStatement::Delete(del) => {
-      let table = match &del.from {
-        sqlparser::ast::FromTable::WithoutKeyword(twj) => {
-          if twj.is_empty() {
-            return Err(TranslateError::Custom("DELETE missing FROM table".into()));
-          }
-          match &twj[0].relation {
-            TableFactor::Table { name, .. } => object_name_to_string(name),
-            _ => {
-              return Err(TranslateError::Custom(
-                "unsupported table factor in DELETE".into(),
-              ));
-            }
-          }
-        }
-        sqlparser::ast::FromTable::WithFromKeyword(twj) => {
-          if twj.is_empty() {
-            return Err(TranslateError::Custom("DELETE missing FROM table".into()));
-          }
-          match &twj[0].relation {
-            TableFactor::Table { name, .. } => object_name_to_string(name),
-            _ => {
-              return Err(TranslateError::Custom(
-                "unsupported table factor in DELETE".into(),
-              ));
-            }
-          }
-        }
-      };
+fn translate_create_table(create_table: ast::CreateTable) -> TranslateResult<Statement> {
+  let table_name = object_name_to_string(&create_table.name)?;
 
-      let table_schema = resolver
-        .describe_table(&table)
-        .await
-        .ok_or_else(|| TranslateError::Custom(format!("unknown table: {}", table)))?;
-      let table_index = 0;
-
-      let table_entries = vec![TableEntry {
-        name: table.clone(),
-        alias: None,
-        schema: table_schema.clone(),
-      }];
-
-      let predicate = match &del.selection {
-        Some(expr) => Some(translate_predicate(expr, &table_entries, params)?),
-        None => None,
-      };
-
-      Ok(Query::Delete {
-        tables: vec![table],
-        table_index,
-        predicate,
-        returning: None,
-      })
+  let columns = {
+    let mut columns = Vec::with_capacity(create_table.columns.len());
+    for col_def in &create_table.columns {
+      columns.push(db_schema::ColumnSchema {
+        name: col_def.name.value.clone(),
+        r#type: translate_column_data_type(&col_def.data_type)?,
+      });
     }
-    other => Err(TranslateError::Custom(format!(
-      "expected DELETE statement, got {}",
-      other
-    ))),
-  }
-}
+    columns
+  };
 
-fn parse_create_table_schema(
-  create: &sqlparser::ast::CreateTable,
-) -> Result<TableSchema, TranslateError> {
-  let table_name = object_name_to_string(&create.name);
-
-  let mut columns = Vec::new();
-  let mut primary_key = Vec::new();
-
-  for (column_index, col) in create.columns.iter().enumerate() {
-    let column_type = match &col.data_type {
-      DataType::Uuid => ValueType::Uuid,
-      DataType::Text => ValueType::Text,
-      DataType::Varchar(_)
-      | DataType::Char(_)
-      | DataType::Character(_)
-      | DataType::CharacterVarying(_)
-      | DataType::CharVarying(_)
-      | DataType::Nvarchar(_) => ValueType::Text,
-      DataType::Int(_)
-      | DataType::Integer(_)
-      | DataType::Int2(_)
-      | DataType::Int4(_)
-      | DataType::Int8(_)
-      | DataType::Int16
-      | DataType::Int32
-      | DataType::Int64
-      | DataType::Int128
-      | DataType::Int256
-      | DataType::IntUnsigned(_)
-      | DataType::Int4Unsigned(_)
-      | DataType::IntegerUnsigned(_)
-      | DataType::Int2Unsigned(_)
-      | DataType::Int8Unsigned(_) => ValueType::Integer,
-      DataType::Float(_)
-      | DataType::FloatUnsigned(_)
-      | DataType::Float4
-      | DataType::Float32
-      | DataType::Float64
-      | DataType::Real
-      | DataType::RealUnsigned
-      | DataType::Float8
-      | DataType::Double(_)
-      | DataType::DoubleUnsigned(_)
-      | DataType::DoublePrecision
-      | DataType::DoublePrecisionUnsigned => ValueType::Float,
-      DataType::Boolean => ValueType::Bool,
-      DataType::JSON | DataType::JSONB => ValueType::Json,
-      _ => {
-        return Err(TranslateError::Custom(format!(
-          "unsupported column type in CREATE TABLE: {}",
-          col.data_type
-        )));
-      }
-    };
-
-    if col
-      .options
-      .iter()
-      .any(|opt| matches!(opt.option, ColumnOption::PrimaryKey(_)))
-    {
-      primary_key.push(column_index as u32);
-    }
-
-    columns.push(ColumnSchema {
-      name: col.name.value.clone(),
-      r#type: column_type,
-    });
-  }
-
-  for constraint in create.constraints.iter() {
-    if let TableConstraint::PrimaryKey(pk) = constraint {
-      for ident in &pk.columns {
-        let column_name = ident.column.to_string();
-        let idx = columns
-          .iter()
-          .position(|c| c.name == column_name)
-          .ok_or_else(|| {
-            TranslateError::Custom(format!(
-              "unknown column '{}' in PRIMARY KEY constraint",
-              column_name
-            ))
-          })?;
-        primary_key.push(idx as u32);
-      }
-    }
-  }
-
-  Ok(TableSchema {
+  let schema = TableSchema {
     name: table_name,
     columns,
-    primary_key,
-  })
+    primary_key: vec![],
+    // TODO: extract constraints, indexes, etc.
+  };
+
+  Ok(Statement::DataDefinition(DataDefinition::CreateTable {
+    schema,
+    if_not_exists: create_table.if_not_exists,
+  }))
 }
 
-fn translate_create_table<S>(
-  stmt: &SQLStatement,
-  _resolver: &S,
-  _params: &mut ParamState<'_>,
-) -> Result<Statement, TranslateError>
-where
-  S: DescribeSchema,
-{
-  match stmt {
-    SQLStatement::CreateTable(create) => {
-      let schema = parse_create_table_schema(create)?;
-      Ok(Statement::DataDefinition(DataDefinition::CreateTable {
-        schema,
-        if_not_exists: create.if_not_exists,
-      }))
-    }
-    other => Err(TranslateError::Custom(format!(
-      "expected CREATE TABLE statement, got {}",
-      other
+fn translate_drop(
+  object_type: ast::ObjectType,
+  if_exists: bool,
+  names: Vec<ast::ObjectName>,
+) -> TranslateResult<Statement> {
+  if names.is_empty() {
+    return Err(TranslateError::custom("No object names in DROP"));
+  }
+  let name = object_name_to_string(&names[0])?;
+
+  match object_type {
+    ast::ObjectType::Table => Ok(Statement::DataDefinition(DataDefinition::DropTable {
+      table_name: name,
+      if_exists,
+    })),
+    ast::ObjectType::Index => Ok(Statement::DataDefinition(DataDefinition::DropIndex {
+      index_name: name,
+      if_exists,
+    })),
+    _ => Err(TranslateError::custom(format!(
+      "DROP {:?} not supported",
+      object_type
     ))),
   }
 }
 
-impl Translator for SqlTranslator {
-  async fn translate_with_params<S>(
-    &self,
-    query: &str,
-    params: Option<&QueryParams>,
-    resolver: &S,
-  ) -> Result<Statement, TranslateError>
-  where
-    S: DescribeSchema,
-  {
-    let mut pstate = ParamState::new(params);
+fn translate_alter_table(alter_table: ast::AlterTable) -> TranslateResult<Statement> {
+  let table_name = object_name_to_string(&alter_table.name)?;
 
-    let stmt = parse_single_statement(query)?;
+  // TODO: proper mapping of operations
+  let operations = vec![];
 
-    match &stmt {
-      SQLStatement::Query(q) => match &*q.body {
-        sqlparser::ast::SetExpr::Select(select) => translate_select(select, resolver, &mut pstate)
-          .await
-          .map(Statement::Query),
-        _ => Err(TranslateError::Custom(
-          "only simple SELECT statements are supported by the minimal translator".into(),
-        )),
-      },
-      SQLStatement::CreateTable(_) => translate_create_table(&stmt, resolver, &mut pstate),
-      SQLStatement::Insert(_) => translate_insert(&stmt, resolver, &mut pstate)
-        .await
-        .map(Statement::Query),
-      SQLStatement::Update(_) => translate_update(&stmt, resolver, &mut pstate)
-        .await
-        .map(Statement::Query),
-      SQLStatement::Delete(_) => translate_delete(&stmt, resolver, &mut pstate)
-        .await
-        .map(Statement::Query),
-      other => Err(TranslateError::Custom(format!(
-        "unsupported SQL statement: {}",
-        other
-      ))),
+  Ok(Statement::DataDefinition(DataDefinition::AlterTable {
+    table_name,
+    operations,
+    if_exists: alter_table.if_exists,
+  }))
+}
+
+fn translate_create_index(create_index: ast::CreateIndex) -> TranslateResult<Statement> {
+  let index_name = create_index
+    .name
+    .map(|n| object_name_to_string(&n))
+    .unwrap_or(Ok(String::new()))?;
+
+  let table_name = object_name_to_string(&create_index.table_name)?;
+
+  let column_indices: Vec<u32> = create_index
+    .columns
+    .into_iter()
+    .map(|_| 0u32) // TODO: proper mapping to actual column indices
+    .collect();
+
+  let schema = IndexSchema {
+    name: index_name,
+    table_name,
+    column_indices,
+    unique: create_index.unique,
+  };
+
+  Ok(Statement::DataDefinition(DataDefinition::CreateIndex {
+    schema,
+    if_not_exists: create_index.if_not_exists,
+  }))
+}
+
+fn translate_alter_index(
+  name: ast::ObjectName,
+  operation: ast::AlterIndexOperation,
+) -> TranslateResult<Statement> {
+  let index_name = object_name_to_string(&name)?;
+
+  let op = match operation {
+    ast::AlterIndexOperation::RenameIndex { index_name } => AlterIndexOperation::Rename {
+      new_name: object_name_to_string(&index_name)?,
+    },
+  };
+
+  Ok(Statement::DataDefinition(DataDefinition::AlterIndex {
+    index_name,
+    operation: op,
+    if_exists: false,
+  }))
+}
+
+fn translate_expr_value(expr: Expr) -> TranslateResult<QueryExprValue> {
+  match expr {
+    Expr::Identifier(ident) => Ok(QueryExprValue::Column(QueryColumn::new(
+      "".into(),
+      ident.value,
+    ))),
+    Expr::CompoundIdentifier(idents) if idents.len() == 2 => Ok(QueryExprValue::Column(
+      QueryColumn::new(idents[0].value.clone(), idents[1].value.clone()),
+    )),
+    Expr::Value(ast::ValueWithSpan { value, .. }) => {
+      let db_value = match value {
+        ast::Value::Number(n, _) => Value::Text(n),
+        ast::Value::SingleQuotedString(s) => Value::Text(s),
+        ast::Value::Boolean(b) => Value::Bool(b),
+        _ => Value::Text(format!("{:?}", value)),
+      };
+      Ok(QueryExprValue::Value(db_value))
     }
+    _ => Err(TranslateError::custom(format!(
+      "Unsupported expr value: {:?}",
+      expr
+    ))),
   }
 }

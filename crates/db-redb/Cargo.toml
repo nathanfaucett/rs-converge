@@ -12,12 +12,13 @@ path = "src/lib.rs"
 name = "db_redb"
 
 [features]
+wasm = ["automerge/wasm"]
 default = []
 
 [dependencies]
 # internal dependencies
-db-btree = { path = "../db-btree", default-features = false, features = ["std"] }
-db-core = { path = "../db-core", default-features = false, features = ["std"] }
+db-btree = { path = "../db-btree", default-features = false }
+db-automerge = { path = "../db-automerge", default-features = false }
 
 async-stream = { version = "0.3", default-features = false, features = [] }
 automerge = { version = "0.9", default-features = false, features = [] }

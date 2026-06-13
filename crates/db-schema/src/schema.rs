@@ -3,7 +3,6 @@ use alloc::{boxed::Box, format, string::ToString};
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, vec::Vec};
 
-use db_core::{MaybeSend, MaybeSendFuture, MaybeSync};
 use db_value::ValueType;
 
 pub type ColumnSchemaIndex = u32;
@@ -42,8 +41,4 @@ pub struct TableSchema {
   pub name: String,
   pub columns: Vec<ColumnSchema>,
   pub primary_key: Vec<ColumnSchemaIndex>,
-}
-
-pub trait DescribeSchema: MaybeSend + MaybeSync {
-  fn describe_table(&self, table_name: &str) -> impl MaybeSendFuture<Output = Option<TableSchema>>;
 }

@@ -1,5 +1,7 @@
-use core::{borrow::Borrow, ops::RangeBounds};
+use core::ops::RangeBounds;
+use std::sync::Arc;
 
+use async_lock::RwLock;
 use async_stream::stream;
 use automerge::{ActorId, AutoCommit};
 use futures::{Stream, StreamExt, pin_mut};
@@ -7,10 +9,9 @@ use futures::{Stream, StreamExt, pin_mut};
 use db_btree::{
   BTree, BTreeError, BTreeReadExecutor, BTreeResult, BTreeTransaction, BTreeWriteExecutor,
 };
-use db_core::{MaybeSend, MaybeSendStream};
 
 use crate::{
-  AutomergeBTreeTransaction, CompactionPolicy, DocumentChangeKey, DocumentType, ThresholdPolicy,
+  AutomergeBTreeTransaction, CompactionPolicy, DocumentChangeKey, ThresholdPolicy,
   document_change_key::DocumentId,
   hash_heads,
   reconstruction::{ReconstructedDocument, reconstruct_document},
@@ -20,21 +21,20 @@ use crate::{
 
 #[derive(Clone)]
 pub struct AutomergeBTreeInner<B> {
-  inner: B,
+  inner: Arc<RwLock<B>>,
   policy: ThresholdPolicy,
 }
 
 impl<B> AutomergeBTreeInner<B> {
   pub fn new(inner: B) -> Self {
     Self {
-      inner,
+      inner: Arc::new(RwLock::new(inner)),
       policy: ThresholdPolicy::default(),
     }
   }
-
   pub fn with_compaction(inner: B, threshold_count: usize, threshold_bytes: usize) -> Self {
     Self {
-      inner,
+      inner: Arc::new(RwLock::new(inner)),
       policy: ThresholdPolicy {
         threshold_count,
         threshold_bytes,
@@ -43,129 +43,129 @@ impl<B> AutomergeBTreeInner<B> {
   }
 }
 
-impl<B> AutomergeBTreeInner<B>
+async fn tx_get_document<B>(
+  tx: &mut B::Transaction,
+  doc_id: &DocumentId,
+  allow_compaction: bool,
+  policy: &ThresholdPolicy,
+) -> BTreeResult<Option<(AutoCommit, bool)>>
 where
   B: BTree<DocumentChangeKey, Vec<u8>>,
 {
-  async fn tx_get_document(
-    &self,
-    tx: &mut B::Transaction,
-    doc_id: DocumentId,
-    allow_compaction: bool,
-  ) -> BTreeResult<Option<(AutoCommit, bool)>> {
-    let reconstructed_document = reconstruct_document(tx, doc_id.clone()).await?;
+  let reconstructed_document = reconstruct_document(tx, doc_id).await?;
 
-    let mut doc = match reconstructed_document.doc {
-      Some(doc) => doc,
-      None => return Ok(None),
-    };
+  let mut doc = match reconstructed_document.doc {
+    Some(doc) => doc,
+    None => return Ok(None),
+  };
 
-    let compacted = if allow_compaction {
-      if self.policy.should_compact(
-        reconstructed_document.deltas,
-        reconstructed_document.bytes_size,
-      ) {
-        run_compaction(tx, doc_id, &mut doc).await?;
-        true
-      } else {
-        false
-      }
+  let compacted = if allow_compaction {
+    if policy.should_compact(
+      reconstructed_document.deltas,
+      reconstructed_document.bytes_size,
+    ) {
+      run_compaction(tx, &reconstructed_document.id, &mut doc).await?;
+      true
     } else {
       false
-    };
+    }
+  } else {
+    false
+  };
 
-    Ok(Some((doc, compacted)))
-  }
+  Ok(Some((doc, compacted)))
+}
 
-  async fn tx_remove_document(
-    &self,
-    tx: &mut B::Transaction,
-    doc_id: DocumentId,
-  ) -> BTreeResult<Option<AutoCommit>> {
-    let (keys_to_remove, reconstructed_document) = {
-      let stream = tx.range(DocumentChangeKey::range_for(doc_id.clone()));
-      pin_mut!(stream);
+async fn tx_remove_document<B>(
+  tx: &mut B::Transaction,
+  doc_id: &DocumentId,
+) -> BTreeResult<Option<AutoCommit>>
+where
+  B: BTree<DocumentChangeKey, Vec<u8>>,
+{
+  let (keys_to_remove, reconstructed_document) = {
+    let range = DocumentChangeKey::range_for(doc_id);
+    let stream = tx.range(range);
+    pin_mut!(stream);
 
-      let mut reconstructed_document = ReconstructedDocument::new(doc_id);
+    let mut reconstructed_document_option = None;
 
-      let mut results = Vec::new();
-      while let Some(item) = stream.next().await {
-        let (key, data) = item?;
-        reconstructed_document.apply(&key, &data)?;
-        results.push(key);
-      }
+    let mut results = Vec::new();
+    while let Some(item) = stream.next().await {
+      let (key, data) = item?;
 
-      (results, reconstructed_document)
-    };
+      let reconstructed_document =
+        reconstructed_document_option.get_or_insert_with(|| ReconstructedDocument::new(key.id()));
 
-    for key in keys_to_remove {
-      tx.remove(&key).await?;
+      reconstructed_document.apply(&key, &data)?;
+      results.push(key);
     }
 
-    Ok(reconstructed_document.doc)
+    (
+      results,
+      reconstructed_document_option
+        .ok_or_else(|| BTreeError::custom("Document not found".to_string()))?,
+    )
+  };
+
+  for key in keys_to_remove {
+    tx.remove(&key).await?;
   }
 
-  async fn tx_insert_snapshot(
-    &self,
-    tx: &mut B::Transaction,
-    key: DocumentId,
-    mut value: AutoCommit,
-  ) -> BTreeResult<()> {
-    let key = DocumentChangeKey {
-      doc_id: key,
-      doc_type: DocumentType::Snapshot,
-      change_hash: hash_heads(value.get_heads()),
-    };
-    tx.insert(key, value.save()).await?;
-    Ok(())
-  }
+  Ok(reconstructed_document.doc)
+}
 
-  async fn tx_update<F>(
-    &self,
-    tx: &mut B::Transaction,
-    key: DocumentId,
-    update_fn: F,
-  ) -> BTreeResult<()>
-  where
-    F: FnOnce(&mut AutoCommit) -> BTreeResult<()>,
-  {
-    let mut current_doc = self
-      .tx_get_document(tx, key.clone(), false)
-      .await?
-      .map(|(doc, _)| doc)
-      .unwrap_or_else(|| {
-        AutoCommit::new().with_actor(ActorId::from(
-          DocumentChangeKey::doc_id_to_uuid(&key).as_bytes(),
-        ))
-      });
+async fn tx_insert_snapshot<B>(
+  tx: &mut B::Transaction,
+  key: DocumentId,
+  mut value: AutoCommit,
+) -> BTreeResult<()>
+where
+  B: BTree<DocumentChangeKey, Vec<u8>>,
+{
+  let key = DocumentChangeKey::new_snapshot(key, hash_heads(value.get_heads()));
+  tx.insert(key, value.save()).await?;
+  Ok(())
+}
 
-    update_fn(&mut current_doc)?;
+async fn tx_update<B, F>(
+  tx: &mut B::Transaction,
+  key: DocumentId,
+  update_fn: F,
+  policy: &ThresholdPolicy,
+) -> BTreeResult<()>
+where
+  B: BTree<DocumentChangeKey, Vec<u8>>,
+  F: FnOnce(&mut AutoCommit) -> BTreeResult<()>,
+{
+  let mut current_doc = tx_get_document::<B>(tx, &key, false, policy)
+    .await?
+    .map(|(doc, _)| doc)
+    .unwrap_or_else(|| {
+      AutoCommit::new().with_actor(ActorId::from(
+        DocumentChangeKey::id_to_uuid(&key).as_bytes(),
+      ))
+    });
 
-    let key = DocumentChangeKey {
-      doc_id: key,
-      doc_type: DocumentType::Incremental,
-      change_hash: hash_heads(current_doc.get_heads()),
-    };
-    let delta = current_doc.save_incremental();
+  update_fn(&mut current_doc)?;
 
-    tx.insert(key, delta).await?;
+  let key = DocumentChangeKey::new_incremental(key, hash_heads(current_doc.get_heads()));
+  let delta = current_doc.save_incremental();
 
-    Ok(())
-  }
+  tx.insert(key, delta).await?;
+
+  Ok(())
 }
 
 impl<B> BTreeReadExecutor<DocumentId, AutoCommit> for AutomergeBTreeInner<B>
 where
   B: BTree<DocumentChangeKey, Vec<u8>>,
 {
-  async fn get<'a, Q>(&'a self, key: Q) -> BTreeResult<Option<AutoCommit>>
-  where
-    Q: Borrow<DocumentId> + MaybeSend + 'a,
-  {
-    let mut tx = self.inner.transaction().await?;
-    if let Some((result, compacted)) = self
-      .tx_get_document(&mut tx, key.borrow().clone(), true)
-      .await?
+  async fn get(&self, key: &DocumentId) -> BTreeResult<Option<AutoCommit>> {
+    let inner_guard = self.inner.read().await;
+    let mut tx = inner_guard.transaction().await?;
+    if let Some((result, compacted)) =
+      tx_get_document::<B>(&mut tx, key, true, &self.policy).await?
     {
       if compacted {
         tx.commit().await?;
@@ -175,19 +175,16 @@ where
       Ok(None)
     }
   }
-
-  fn range<'a, R>(
-    &'a self,
-    range: R,
-  ) -> impl Stream<Item = BTreeResult<(DocumentId, AutoCommit)>> + 'a
+  fn range<R>(&self, range: R) -> impl Stream<Item = BTreeResult<(DocumentId, AutoCommit)>>
   where
-    R: RangeBounds<DocumentId> + MaybeSend + 'a,
+    R: RangeBounds<DocumentId>,
   {
     stream! {
-      let inner_range = DocumentChangeKey::map_doc_id_range(range);
+      let inner_range = DocumentChangeKey::map_document_id_range(range);
 
-      let inner_stream = self.inner.range(inner_range);
-      futures::pin_mut!(inner_stream);
+      let inner_guard = self.inner.read().await;
+      let inner_stream = inner_guard.range(inner_range);
+      pin_mut!(inner_stream);
 
       let mut reconstructed_document_option: Option<ReconstructedDocument> = None;
 
@@ -195,7 +192,7 @@ where
         let (k, v) = item?;
 
         if let Some(mut doc) = reconstructed_document_option.take() {
-            if doc.matches(&k) {
+            if doc.same_id(&k) {
                 reconstructed_document_option = Some(doc);
             } else {
                 if let Some(completed_doc) = doc.doc.take() {
@@ -205,7 +202,7 @@ where
         }
 
         let reconstructed_document = reconstructed_document_option
-            .get_or_insert_with(|| ReconstructedDocument::new(k.doc_id.clone()));
+            .get_or_insert_with(|| ReconstructedDocument::new(k.id()));
 
         if let Err(e) = reconstructed_document.apply(&k, &v) {
             yield Err(BTreeError::Custom(e.to_string()));
@@ -226,29 +223,27 @@ where
   B: BTree<DocumentChangeKey, Vec<u8>>,
 {
   async fn insert(&mut self, key: DocumentId, value: AutoCommit) -> BTreeResult<()> {
-    let mut tx = self.inner.transaction().await?;
-    self.tx_insert_snapshot(&mut tx, key, value).await?;
+    let inner_guard = self.inner.read().await;
+    let mut tx = inner_guard.transaction().await?;
+    tx_insert_snapshot::<B>(&mut tx, key, value).await?;
     tx.commit().await
   }
 
-  async fn update<'a, F>(&'a mut self, key: DocumentId, update_fn: F) -> BTreeResult<Option<()>>
+  async fn update<F>(&mut self, key: DocumentId, update_fn: F) -> BTreeResult<Option<()>>
   where
-    F: FnOnce(&mut AutoCommit) -> BTreeResult<()> + MaybeSend + 'a,
+    F: FnOnce(&mut AutoCommit) -> BTreeResult<()>,
   {
-    let mut tx = self.inner.transaction().await?;
-    self.tx_update(&mut tx, key, update_fn).await?;
+    let inner_guard = self.inner.read().await;
+    let mut tx = inner_guard.transaction().await?;
+    tx_update::<B, _>(&mut tx, key, update_fn, &self.policy).await?;
     tx.commit().await?;
     Ok(Some(()))
   }
 
-  async fn remove<'a, Q>(&'a mut self, key: Q) -> BTreeResult<Option<AutoCommit>>
-  where
-    Q: Borrow<DocumentId> + MaybeSend + 'a,
-  {
-    let mut tx = self.inner.transaction().await?;
-    let result = self
-      .tx_remove_document(&mut tx, key.borrow().clone())
-      .await?;
+  async fn remove(&mut self, key: &DocumentId) -> BTreeResult<Option<AutoCommit>> {
+    let inner_guard = self.inner.read().await;
+    let mut tx = inner_guard.transaction().await?;
+    let result = tx_remove_document::<B>(&mut tx, key).await?;
     tx.commit().await?;
     Ok(result)
   }
@@ -257,11 +252,13 @@ where
 impl<B> BTree<DocumentId, AutoCommit> for AutomergeBTreeInner<B>
 where
   B: BTree<DocumentChangeKey, Vec<u8>>,
+  <B as BTree<DocumentChangeKey, Vec<u8>>>::Transaction: Send,
 {
   type Transaction = AutomergeBTreeTransactionInner<B::Transaction>;
 
   async fn transaction(&self) -> BTreeResult<Self::Transaction> {
-    let inner_tx = self.inner.transaction().await?;
+    let inner_guard = self.inner.read().await;
+    let inner_tx = inner_guard.transaction().await?;
     Ok(AutomergeBTreeTransactionInner::new(inner_tx))
   }
 }
@@ -299,19 +296,13 @@ impl<B> BTreeReadExecutor<DocumentId, AutoCommit> for AutomergeBTree<B>
 where
   B: BTree<DocumentId, AutoCommit>,
 {
-  async fn get<'a, Q>(&'a self, key: Q) -> BTreeResult<Option<AutoCommit>>
-  where
-    Q: Borrow<DocumentId> + MaybeSend + 'a,
-  {
+  async fn get(&self, key: &DocumentId) -> BTreeResult<Option<AutoCommit>> {
     self.inner.get(key).await
   }
 
-  fn range<'a, R>(
-    &'a self,
-    range: R,
-  ) -> impl MaybeSendStream<Item = BTreeResult<(DocumentId, AutoCommit)>> + 'a
+  fn range<R>(&self, range: R) -> impl Stream<Item = BTreeResult<(DocumentId, AutoCommit)>>
   where
-    R: RangeBounds<DocumentId> + MaybeSend + 'a,
+    R: RangeBounds<DocumentId>,
   {
     self.inner.range(range)
   }
@@ -327,9 +318,9 @@ where
     tx.commit().await
   }
 
-  async fn update<'a, F>(&'a mut self, key: DocumentId, update_fn: F) -> BTreeResult<Option<()>>
+  async fn update<F>(&mut self, key: DocumentId, update_fn: F) -> BTreeResult<Option<()>>
   where
-    F: FnOnce(&mut AutoCommit) -> BTreeResult<()> + MaybeSend + 'a,
+    F: FnOnce(&mut AutoCommit) -> BTreeResult<()>,
   {
     let mut tx = self.inner.transaction().await?;
 
@@ -342,11 +333,7 @@ where
       Ok(None)
     }
   }
-
-  async fn remove<'a, Q>(&'a mut self, key: Q) -> BTreeResult<Option<AutoCommit>>
-  where
-    Q: Borrow<DocumentId> + MaybeSend + 'a,
-  {
+  async fn remove(&mut self, key: &DocumentId) -> BTreeResult<Option<AutoCommit>> {
     let mut tx = self.inner.transaction().await?;
     let value = tx.remove(key).await?;
     tx.commit().await?;

@@ -1,19 +1,15 @@
-use std::{borrow::Borrow, marker::PhantomData, ops::RangeBounds};
+use std::{marker::PhantomData, ops::RangeBounds};
 
 use async_stream::stream;
 use futures::Stream;
-use redb::WriteTransaction;
+use redb::{Key, Value, WriteTransaction};
 
 use db_btree::{
   BTreeError, BTreeKey, BTreeReadExecutor, BTreeResult, BTreeTransaction, BTreeValue,
   BTreeWriteExecutor,
 };
-use db_core::MaybeSend;
 
-use crate::{
-  Codec,
-  util::{rx_range, table_definition, tx_insert, tx_read, tx_remove, tx_update},
-};
+use crate::util::{table_definition, tx_insert, tx_range, tx_read, tx_remove, tx_update};
 
 pub struct RedbBTreeTransaction<K, V> {
   tx: WriteTransaction,
@@ -24,7 +20,7 @@ pub struct RedbBTreeTransaction<K, V> {
 impl<K, V> RedbBTreeTransaction<K, V> {
   pub fn new(tx: WriteTransaction, name: impl Into<String>) -> Self {
     Self {
-      tx: tx,
+      tx,
       name: name.into(),
       _phantom_marker: PhantomData,
     }
@@ -33,24 +29,21 @@ impl<K, V> RedbBTreeTransaction<K, V> {
 
 impl<K, V> BTreeReadExecutor<K, V> for RedbBTreeTransaction<K, V>
 where
-  K: BTreeKey + Codec,
-  V: BTreeValue + Codec,
+  K: BTreeKey + Key,
+  V: BTreeValue + Value,
 {
-  async fn get<'a, Q>(&'a self, key: Q) -> BTreeResult<Option<V>>
-  where
-    Q: Borrow<K> + MaybeSend + 'a,
-  {
+  async fn get(&self, key: &K) -> BTreeResult<Option<V>> {
     let table = self
       .tx
       .open_table(table_definition(&self.name))
       .map_err(BTreeError::custom)?;
 
-    tx_read::<K, V, _>(&table, key.borrow())
+    tx_read::<K, V, _, _>(&table, key)
   }
 
-  fn range<'a, R>(&'a self, range: R) -> impl Stream<Item = BTreeResult<(K, V)>> + 'a
+  fn range<R>(&self, range: R) -> impl Stream<Item = BTreeResult<(K, V)>>
   where
-    R: RangeBounds<K> + MaybeSend + 'a,
+    R: RangeBounds<K>,
   {
     stream! {
         let table = self
@@ -58,7 +51,7 @@ where
           .open_table(table_definition(&self.name))
           .map_err(BTreeError::custom)?;
 
-        let results = rx_range(&table, range)?;
+        let results = tx_range(&table, range)?;
 
         for result in results {
             yield Ok(result);
@@ -69,8 +62,8 @@ where
 
 impl<K, V> BTreeWriteExecutor<K, V> for RedbBTreeTransaction<K, V>
 where
-  K: BTreeKey + Codec,
-  V: BTreeValue + Codec,
+  K: BTreeKey + Key,
+  V: BTreeValue + Value,
 {
   async fn insert(&mut self, key: K, value: V) -> BTreeResult<()> {
     let mut table = self
@@ -81,17 +74,16 @@ where
     tx_insert(&mut table, key, value)
   }
 
-  async fn update<'a, F>(&'a mut self, key: K, update_fn: F) -> BTreeResult<Option<()>>
+  async fn update<F>(&mut self, key: K, update_fn: F) -> BTreeResult<Option<()>>
   where
-    K: Ord,
-    F: FnOnce(&mut V) -> BTreeResult<()> + MaybeSend + 'a,
+    F: FnOnce(&mut V) -> BTreeResult<()>,
   {
     let mut table = self
       .tx
       .open_table(table_definition(&self.name))
       .map_err(BTreeError::custom)?;
 
-    tx_update(&mut table, key, |current| {
+    tx_update::<K, V, _>(&mut table, key, |current| {
       if let Some(mut value) = current {
         update_fn(&mut value)?;
         Ok(Some(value))
@@ -100,25 +92,20 @@ where
       }
     })
   }
-
-  async fn remove<'a, Q>(&'a mut self, key: Q) -> BTreeResult<Option<V>>
-  where
-    K: Ord,
-    Q: Borrow<K> + MaybeSend + 'a,
-  {
+  async fn remove(&mut self, key: &K) -> BTreeResult<Option<V>> {
     let mut table = self
       .tx
       .open_table(table_definition(&self.name))
       .map_err(BTreeError::custom)?;
 
-    tx_remove::<K, V>(&mut table, key.borrow())
+    tx_remove::<K, V, _>(&mut table, key)
   }
 }
 
 impl<K, V> BTreeTransaction<K, V> for RedbBTreeTransaction<K, V>
 where
-  K: BTreeKey + Codec,
-  V: BTreeValue + Codec,
+  K: BTreeKey + Key,
+  V: BTreeValue + Value,
 {
   async fn commit(self) -> BTreeResult<()>
   where

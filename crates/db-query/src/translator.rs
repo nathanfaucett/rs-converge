@@ -6,13 +6,11 @@ use alloc::{
   string::{String, ToString},
   vec::Vec,
 };
-use db_core::{MaybeSend, MaybeSendFuture, MaybeSync};
 #[cfg(feature = "std")]
 use std::collections::BTreeMap;
 
 use thiserror::Error;
 
-use db_schema::DescribeSchema;
 use db_value::Value;
 
 use crate::Statement;
@@ -49,24 +47,16 @@ impl TranslateError {
   }
 }
 
-pub trait Translator: MaybeSend + MaybeSync {
-  fn translate_with_params<S>(
+pub type TranslateResult<T> = Result<T, TranslateError>;
+
+pub trait Translator {
+  fn translate_with_params(
     &self,
     query: &str,
     params: Option<&QueryParams>,
-    resolver: &S,
-  ) -> impl MaybeSendFuture<Output = Result<Statement, TranslateError>>
-  where
-    S: DescribeSchema;
+  ) -> impl Future<Output = Result<Vec<Statement>, TranslateError>>;
 
-  fn translate<S>(
-    &self,
-    query: &str,
-    resolver: &S,
-  ) -> impl MaybeSendFuture<Output = Result<Statement, TranslateError>>
-  where
-    S: DescribeSchema,
-  {
-    self.translate_with_params(query, None, resolver)
+  fn translate(&self, query: &str) -> impl Future<Output = Result<Vec<Statement>, TranslateError>> {
+    self.translate_with_params(query, None)
   }
 }

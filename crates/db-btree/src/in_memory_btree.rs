@@ -1,19 +1,15 @@
 #[cfg(not(feature = "std"))]
-use alloc::collections::BTreeMap;
-#[cfg(not(feature = "std"))]
-use alloc::sync::Arc;
-use db_core::MaybeSend;
+use alloc::{collections::BTreeMap, sync::Arc};
 #[cfg(feature = "std")]
 use std::{collections::BTreeMap, sync::Arc};
 
 use async_lock::RwLock;
 use async_stream::stream;
-use core::{borrow::Borrow, mem::take, ops::RangeBounds};
+use core::{borrow::Borrow, ops::RangeBounds};
 use futures::Stream;
 
 use crate::{
-  BTree, BTreeDefinition, BTreeFactory, BTreeKey, BTreeReadExecutor, BTreeResult, BTreeTransaction,
-  BTreeValue, BTreeWriteExecutor,
+  BTree, BTreeKey, BTreeReadExecutor, BTreeResult, BTreeTransaction, BTreeValue, BTreeWriteExecutor,
 };
 
 #[derive(Debug, Clone)]
@@ -35,10 +31,7 @@ impl<K, V> InMemoryBTree<K, V> {
   }
 }
 
-impl<K, V> Default for InMemoryBTree<K, V>
-where
-  K: Ord,
-{
+impl<K, V> Default for InMemoryBTree<K, V> {
   fn default() -> Self {
     Self::new()
   }
@@ -46,27 +39,20 @@ where
 
 impl<K, V> BTreeReadExecutor<K, V> for InMemoryBTree<K, V>
 where
-  K: BTreeKey,
-  V: BTreeValue,
+  K: BTreeKey + Clone,
+  V: BTreeValue + Clone,
 {
-  async fn get<'a, Q>(&'a self, key: Q) -> BTreeResult<Option<V>>
-  where
-    K: Ord,
-    Q: Borrow<K> + MaybeSend + 'a,
-  {
+  async fn get(&self, key: &K) -> BTreeResult<Option<V>> {
     let guard = self.inner.read().await;
-    Ok(guard.get(key.borrow()).cloned())
+    Ok(guard.get(key).cloned())
   }
 
-  fn range<'a, R>(&'a self, range: R) -> impl Stream<Item = BTreeResult<(K, V)>> + 'a
+  fn range<R>(&self, range: R) -> impl Stream<Item = BTreeResult<(K, V)>>
   where
-    K: Ord + Clone,
-    R: RangeBounds<K> + MaybeSend + 'a,
+    R: RangeBounds<K>,
   {
-    let inner = self.inner.clone();
     stream! {
-      let guard = inner.read().await;
-      for (key, value) in guard.range(range) {
+      for (key, value) in self.inner.read().await.range(range) {
         yield Ok((key.clone(), value.clone()));
       }
     }
@@ -75,25 +61,19 @@ where
 
 impl<K, V> BTreeWriteExecutor<K, V> for InMemoryBTree<K, V>
 where
-  K: BTreeKey,
-  V: BTreeValue,
+  K: BTreeKey + Clone,
+  V: BTreeValue + Clone,
 {
-  async fn insert(&mut self, key: K, value: V) -> BTreeResult<()>
-  where
-    K: Ord,
-  {
-    let mut guard = self.inner.write().await;
-    guard.insert(key, value);
+  async fn insert(&mut self, key: K, value: V) -> BTreeResult<()> {
+    self.inner.write().await.insert(key, value);
     Ok(())
   }
 
-  async fn update<'a, F>(&'a mut self, key: K, update_fn: F) -> BTreeResult<Option<()>>
+  async fn update<F>(&mut self, key: K, update_fn: F) -> BTreeResult<Option<()>>
   where
-    K: Ord,
-    F: FnOnce(&mut V) -> BTreeResult<()> + MaybeSend + 'a,
+    F: FnOnce(&mut V) -> BTreeResult<()>,
   {
-    let mut guard = self.inner.write().await;
-    if let Some(value) = guard.get_mut(&key) {
+    if let Some(value) = self.inner.write().await.get_mut(&key) {
       update_fn(value)?;
       Ok(Some(()))
     } else {
@@ -101,13 +81,8 @@ where
     }
   }
 
-  async fn remove<'a, Q>(&'a mut self, key: Q) -> BTreeResult<Option<V>>
-  where
-    K: Ord,
-    Q: Borrow<K> + MaybeSend + 'a,
-  {
-    let mut guard = self.inner.write().await;
-    Ok(guard.remove(key.borrow()))
+  async fn remove(&mut self, key: &K) -> BTreeResult<Option<V>> {
+    Ok(self.inner.write().await.remove(key.borrow()))
   }
 }
 
@@ -126,57 +101,52 @@ impl<V> InMemoryTransactionPatchEntry<V> {
   }
 }
 
-#[derive(Debug, Clone)]
-pub struct InMemoryTransactionPatch<K, V>(BTreeMap<K, InMemoryTransactionPatchEntry<V>>);
+#[derive(Debug)]
+pub struct InMemoryTransactionPatch<K, V> {
+  inner: BTreeMap<K, InMemoryTransactionPatchEntry<V>>,
+}
 
 impl<K, V> Default for InMemoryTransactionPatch<K, V> {
   fn default() -> Self {
-    Self(BTreeMap::new())
+    Self {
+      inner: BTreeMap::new(),
+    }
   }
 }
 
-impl<K, V> InMemoryTransactionPatch<K, V> {
-  pub fn get<Q>(&self, base: &BTreeMap<K, V>, key: &Q) -> Option<V>
-  where
-    K: Ord,
-    V: Clone,
-    Q: Borrow<K>,
-  {
-    match self.0.get(key.borrow()) {
+impl<K, V> InMemoryTransactionPatch<K, V>
+where
+  K: BTreeKey + Clone,
+  V: BTreeValue + Clone,
+{
+  pub fn get(&self, base: &BTreeMap<K, V>, key: &K) -> Option<V> {
+    match self.inner.get(key) {
       Some(entry) => entry.as_option().cloned(),
-      None => base.get(key.borrow()).cloned(),
+      None => base.get(key).cloned(),
     }
   }
 
-  pub fn insert(&mut self, key: K, value: V)
-  where
-    K: Ord,
-  {
+  pub fn insert(&mut self, key: K, value: V) {
     self
-      .0
+      .inner
       .insert(key, InMemoryTransactionPatchEntry::Present(value));
   }
 
-  pub fn remove<Q>(&mut self, base: &BTreeMap<K, V>, key: Q) -> Option<V>
-  where
-    K: Ord + Clone,
-    V: Clone,
-    Q: Borrow<K>,
-  {
-    match self.0.get(key.borrow()) {
-      Some(InMemoryTransactionPatchEntry::Present(value)) => {
+  pub fn remove(&mut self, base: &BTreeMap<K, V>, key: &K) -> Option<V> {
+    match self.inner.get_key_value(key) {
+      Some((key, InMemoryTransactionPatchEntry::Present(value))) => {
         let removed = value.clone();
         self
-          .0
-          .insert(key.borrow().clone(), InMemoryTransactionPatchEntry::Deleted);
+          .inner
+          .insert(key.clone(), InMemoryTransactionPatchEntry::Deleted);
         Some(removed)
       }
-      Some(InMemoryTransactionPatchEntry::Deleted) => None,
+      Some((_key, InMemoryTransactionPatchEntry::Deleted)) => None,
       None => {
-        if let Some(existing) = base.get(key.borrow()) {
+        if let Some((key, existing)) = base.get_key_value(key.borrow()) {
           self
-            .0
-            .insert(key.borrow().clone(), InMemoryTransactionPatchEntry::Deleted);
+            .inner
+            .insert(key.clone(), InMemoryTransactionPatchEntry::Deleted);
           Some(existing.clone())
         } else {
           None
@@ -185,11 +155,8 @@ impl<K, V> InMemoryTransactionPatch<K, V> {
     }
   }
 
-  pub fn commit(self, base: &mut BTreeMap<K, V>)
-  where
-    K: Ord,
-  {
-    for (key, entry) in self.0 {
+  pub fn commit(self, base: &mut BTreeMap<K, V>) {
+    for (key, entry) in self.inner {
       match entry {
         InMemoryTransactionPatchEntry::Present(value) => {
           base.insert(key, value);
@@ -203,21 +170,24 @@ impl<K, V> InMemoryTransactionPatch<K, V> {
 
   pub fn range<R>(&self, base: &BTreeMap<K, V>, range: R) -> BTreeMap<K, V>
   where
-    K: Ord + Clone,
-    V: Clone,
     R: RangeBounds<K>,
   {
     merge_range_maps(
       base,
-      &self.0,
+      &self.inner,
       range,
-      |k| !matches!(self.0.get(k), Some(InMemoryTransactionPatchEntry::Deleted)),
+      |k| {
+        !matches!(
+          self.inner.get(k.borrow()),
+          Some(InMemoryTransactionPatchEntry::Deleted)
+        )
+      },
       |k, entry, merged| match entry {
         InMemoryTransactionPatchEntry::Present(value) => {
           merged.insert(k.clone(), value.clone());
         }
         InMemoryTransactionPatchEntry::Deleted => {
-          merged.remove(k);
+          merged.remove(k.borrow());
         }
       },
     )
@@ -232,8 +202,8 @@ fn merge_range_maps<K, V, P, R, FInclude, FApply>(
   mut apply_patch: FApply,
 ) -> BTreeMap<K, V>
 where
-  K: Ord + Clone,
   V: Clone,
+  K: Ord + Clone,
   R: RangeBounds<K>,
   FInclude: FnMut(&K) -> bool,
   FApply: FnMut(&K, &P, &mut BTreeMap<K, V>),
@@ -281,53 +251,40 @@ where
 #[derive(Debug)]
 pub struct InMemoryBTreeTransaction<K, V> {
   inner: Arc<RwLock<BTreeMap<K, V>>>,
-  patch: Arc<RwLock<InMemoryTransactionPatch<K, V>>>,
+  patch: InMemoryTransactionPatch<K, V>,
 }
 
 impl<K, V> BTreeTransaction<K, V> for InMemoryBTreeTransaction<K, V>
 where
-  K: BTreeKey,
-  V: BTreeValue,
+  K: BTreeKey + Clone,
+  V: BTreeValue + Clone,
 {
   async fn commit(self) -> BTreeResult<()> {
-    let patch = take(&mut *self.patch.write().await);
-    patch.commit(&mut *self.inner.write().await);
+    let InMemoryBTreeTransaction { inner, patch } = self;
+    patch.commit(&mut *inner.write().await);
     Ok(())
   }
 
   async fn rollback(self) -> BTreeResult<()> {
-    let _ = take(&mut *self.patch.write().await);
     Ok(())
   }
 }
 
 impl<K, V> BTreeReadExecutor<K, V> for InMemoryBTreeTransaction<K, V>
 where
-  K: BTreeKey,
-  V: BTreeValue,
+  K: BTreeKey + Clone,
+  V: BTreeValue + Clone,
 {
-  async fn get<'a, Q>(&'a self, key: Q) -> BTreeResult<Option<V>>
-  where
-    K: Ord,
-    Q: Borrow<K> + MaybeSend + 'a,
-  {
-    let guard = self.inner.read().await;
-    let patch_guard = self.patch.read().await;
-    Ok(patch_guard.get(&*guard, &key))
+  async fn get(&self, key: &K) -> BTreeResult<Option<V>> {
+    Ok(self.patch.get(&*self.inner.read().await, key))
   }
 
-  fn range<'a, R>(&'a self, range: R) -> impl Stream<Item = BTreeResult<(K, V)>> + 'a
+  fn range<R>(&self, range: R) -> impl Stream<Item = BTreeResult<(K, V)>>
   where
-    K: Ord + Clone,
-    R: RangeBounds<K> + MaybeSend + 'a,
+    R: RangeBounds<K>,
   {
-    let inner = self.inner.clone();
-    let patch = self.patch.clone();
-
     stream! {
-      let guard = inner.read().await;
-      let patch_guard = patch.read().await;
-      let merged = patch_guard.range(&*guard, range);
+      let merged = self.patch.range(&*self.inner.read().await, range);
 
       for (key, value) in merged {
         yield Ok((key, value));
@@ -338,89 +295,48 @@ where
 
 impl<K, V> BTreeWriteExecutor<K, V> for InMemoryBTreeTransaction<K, V>
 where
-  K: BTreeKey,
-  V: BTreeValue,
+  K: BTreeKey + Clone,
+  V: BTreeValue + Clone,
 {
   async fn insert(&mut self, key: K, value: V) -> BTreeResult<()>
   where
     K: Ord,
   {
-    let patch = self.patch.clone();
-    patch.write().await.insert(key, value);
+    self.patch.insert(key, value);
     Ok(())
   }
 
-  async fn update<'a, F>(&'a mut self, key: K, update_fn: F) -> BTreeResult<Option<()>>
+  async fn update<F>(&mut self, key: K, update_fn: F) -> BTreeResult<Option<()>>
   where
-    F: FnOnce(&mut V) -> BTreeResult<()> + MaybeSend + 'a,
+    F: FnOnce(&mut V) -> BTreeResult<()>,
   {
-    let inner = self.inner.clone();
-    let patch = self.patch.clone();
-
-    let guard = inner.read().await;
-    let mut patch_guard = patch.write().await;
-
-    if let Some(value) = patch_guard.get(&*guard, &key) {
+    if let Some(value) = self.patch.get(&*self.inner.read().await, &key) {
       let mut value_clone = value.clone();
       update_fn(&mut value_clone)?;
-      patch_guard.insert(key, value_clone);
+      self.patch.insert(key.clone(), value_clone);
       Ok(Some(()))
     } else {
       Ok(None)
     }
   }
 
-  async fn remove<'a, Q>(&'a mut self, key: Q) -> BTreeResult<Option<V>>
-  where
-    K: Ord + Clone,
-    Q: Borrow<K> + MaybeSend + 'a,
-  {
-    let inner = self.inner.clone();
-    let patch = self.patch.clone();
-    let key_owned = key.borrow().clone();
-
-    let mut guard = patch.write().await;
-    Ok(guard.remove(&*inner.read().await, key_owned))
+  async fn remove(&mut self, key: &K) -> BTreeResult<Option<V>> {
+    Ok(self.patch.remove(&*self.inner.read().await, key))
   }
 }
 
 impl<K, V> BTree<K, V> for InMemoryBTree<K, V>
 where
-  K: BTreeKey,
-  V: BTreeValue,
+  K: BTreeKey + Clone,
+  V: BTreeValue + Clone,
 {
   type Transaction = InMemoryBTreeTransaction<K, V>;
 
   async fn transaction(&self) -> BTreeResult<Self::Transaction> {
-    let inner = self.inner.clone();
     Ok(InMemoryBTreeTransaction {
-      inner,
-      patch: Arc::new(RwLock::new(InMemoryTransactionPatch::default())),
+      inner: self.inner.clone(),
+      patch: InMemoryTransactionPatch::default(),
     })
-  }
-}
-
-#[derive(Default, Clone, Copy)]
-pub struct InMemoryBTreeFactory;
-
-impl InMemoryBTreeFactory {
-  pub fn new() -> Self {
-    Self
-  }
-}
-
-impl BTreeFactory for InMemoryBTreeFactory {
-  type BTree<K, V>
-    = InMemoryBTree<K, V>
-  where
-    K: BTreeKey,
-    V: BTreeValue;
-
-  async fn create<D>(&self, _definition: &D) -> BTreeResult<Self::BTree<D::Key, D::Value>>
-  where
-    D: BTreeDefinition,
-  {
-    Ok(InMemoryBTree::new())
   }
 }
 

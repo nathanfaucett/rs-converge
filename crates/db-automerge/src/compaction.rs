@@ -1,10 +1,9 @@
 use automerge::{AutoCommit, ChangeHash};
+use db_btree::{BTreeResult, BTreeTransaction};
 use futures::{StreamExt, pin_mut};
 use sha2::{Digest, Sha256};
 
-use db_btree::{BTreeResult, BTreeTransaction};
-
-use crate::{DocumentChangeKey, DocumentType, document_change_key::DocumentId};
+use crate::{DocumentChangeKey, DocumentId};
 
 pub fn hash_hashes<I>(hashes: I) -> [u8; 32]
 where
@@ -60,37 +59,35 @@ impl CompactionPolicy for ThresholdPolicy {
 
 pub async fn run_compaction<T>(
   tx: &mut T,
-  doc_id: DocumentId,
+  doc_id: &DocumentId,
   compacted_doc: &mut AutoCommit,
 ) -> BTreeResult<()>
 where
   T: BTreeTransaction<DocumentChangeKey, Vec<u8>>,
 {
-  let to_remove: Vec<DocumentChangeKey> = {
-    let range_stream = tx.range(DocumentChangeKey::range_for(doc_id.clone()));
+  let to_remove = {
+    let doc_range = DocumentChangeKey::range_for(doc_id);
+    let range_stream = tx.range(doc_range);
     pin_mut!(range_stream);
 
     let mut results: Vec<DocumentChangeKey> = Vec::new();
 
     while let Some(item) = range_stream.next().await {
-      let (k, _v) = match item {
-        Ok(pair) => pair,
+      let k = match item {
+        Ok((k, _v)) => k,
         Err(err) => return Err(err),
       };
       results.push(k);
     }
     results
   };
-  let new_key = DocumentChangeKey {
-    doc_id,
-    doc_type: DocumentType::Snapshot,
-    change_hash: hash_heads(compacted_doc.get_heads()),
-  };
 
+  let new_key =
+    DocumentChangeKey::new_snapshot(doc_id.clone(), hash_heads(compacted_doc.get_heads()));
   tx.insert(new_key, compacted_doc.save()).await?;
 
   for k in to_remove {
-    tx.remove(k).await?;
+    tx.remove(&k).await?;
   }
 
   Ok(())

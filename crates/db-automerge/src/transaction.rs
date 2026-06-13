@@ -1,4 +1,4 @@
-use core::{borrow::Borrow, ops::RangeBounds};
+use core::ops::RangeBounds;
 use std::collections::BTreeMap;
 
 use async_stream::stream;
@@ -6,10 +6,9 @@ use automerge::AutoCommit;
 use futures::{Stream, StreamExt, pin_mut};
 
 use db_btree::{BTreeError, BTreeReadExecutor, BTreeResult, BTreeTransaction, BTreeWriteExecutor};
-use db_core::{MaybeSend, MaybeSendStream};
 
 use crate::{
-  DocumentChangeKey, DocumentType,
+  DocumentChangeKey,
   document_change_key::DocumentId,
   hash_heads,
   reconstruction::{ReconstructedDocument, reconstruct_document},
@@ -50,11 +49,7 @@ where
   ) -> BTreeResult<()> {
     match op {
       Some(mut snapshot_doc) => {
-        let key = DocumentChangeKey {
-          doc_id,
-          doc_type: DocumentType::Snapshot,
-          change_hash: hash_heads(snapshot_doc.get_heads()),
-        };
+        let key = DocumentChangeKey::new_snapshot(doc_id, hash_heads(snapshot_doc.get_heads()));
         inner_tx.insert(key, snapshot_doc.save()).await?;
       }
       None => {
@@ -67,7 +62,7 @@ where
   async fn remove_doc_entries(inner_tx: &mut T, doc_id: DocumentId) -> BTreeResult<()> {
     let keys_to_remove: Vec<DocumentChangeKey> = {
       let mut collected: Vec<DocumentChangeKey> = Vec::new();
-      let stream = inner_tx.range(DocumentChangeKey::range_for(doc_id));
+      let stream = inner_tx.range(DocumentChangeKey::range_for(&doc_id));
       pin_mut!(stream);
       while let Some(item) = stream.next().await {
         let (k, _v) = item?;
@@ -106,30 +101,22 @@ impl<T> BTreeReadExecutor<DocumentId, AutoCommit> for AutomergeBTreeTransactionI
 where
   T: BTreeTransaction<DocumentChangeKey, Vec<u8>> + Send,
 {
-  async fn get<'a, Q>(&'a self, key: Q) -> BTreeResult<Option<AutoCommit>>
-  where
-    DocumentId: Ord,
-    Q: Borrow<DocumentId> + MaybeSend + 'a,
-  {
-    let doc_id = key.borrow().clone();
-    if let Some(pending) = self.pending.get(&doc_id) {
+  async fn get(&self, key: &DocumentId) -> BTreeResult<Option<AutoCommit>> {
+    if let Some(pending) = self.pending.get(key) {
       return Ok(pending.clone());
     }
-    Ok(reconstruct_document(&self.inner_tx, doc_id).await?.doc)
+    Ok(reconstruct_document(&self.inner_tx, key).await?.doc)
   }
 
-  fn range<'a, R>(
-    &'a self,
-    range: R,
-  ) -> impl Stream<Item = BTreeResult<(DocumentId, AutoCommit)>> + 'a
+  fn range<R>(&self, range: R) -> impl Stream<Item = BTreeResult<(DocumentId, AutoCommit)>>
   where
-    DocumentId: Ord,
-    R: core::ops::RangeBounds<DocumentId> + MaybeSend + 'a,
+    R: RangeBounds<DocumentId>,
   {
     stream! {
       let mut merged: BTreeMap<DocumentId, AutoCommit> = BTreeMap::new();
 
-      let inner_stream = self.inner_tx.range(DocumentChangeKey::map_doc_id_range(range));
+      let range = DocumentChangeKey::map_document_id_range(range);
+      let inner_stream = self.inner_tx.range(range);
       pin_mut!(inner_stream);
 
       let mut reconstructed_document_option: Option<ReconstructedDocument> = None;
@@ -138,7 +125,7 @@ where
         let (k, v) = item?;
 
         if let Some(mut doc) = reconstructed_document_option.take() {
-          if doc.matches(&k) {
+          if doc.same_id(&k) {
             reconstructed_document_option = Some(doc);
           } else if let Some(completed_doc) = doc.doc.take() {
             merged.insert(doc.id, completed_doc);
@@ -146,7 +133,7 @@ where
         }
 
         let reconstructed_document = reconstructed_document_option
-          .get_or_insert_with(|| ReconstructedDocument::new(k.doc_id.clone()));
+          .get_or_insert_with(|| ReconstructedDocument::new(k.id()));
 
         reconstructed_document.apply(&k, &v)?;
       }
@@ -186,50 +173,39 @@ where
     Ok(())
   }
 
-  async fn update<'a, F>(&'a mut self, key: DocumentId, update_fn: F) -> BTreeResult<Option<()>>
+  async fn update<F>(&mut self, key: DocumentId, update_fn: F) -> BTreeResult<Option<()>>
   where
-    F: FnOnce(&mut AutoCommit) -> BTreeResult<()> + MaybeSend + 'a,
+    F: FnOnce(&mut AutoCommit) -> BTreeResult<()>,
   {
-    let doc_id = key;
-
-    let pending_doc_option = self.pending.get(&doc_id).cloned().flatten();
+    let pending_doc_option = self.pending.get(&key).cloned().flatten();
 
     let mut doc = if let Some(pending_doc) = pending_doc_option {
       pending_doc
     } else {
-      reconstruct_document(&self.inner_tx, doc_id.clone())
+      reconstruct_document(&self.inner_tx, &key)
         .await?
         .doc
         .ok_or_else(|| {
-          BTreeError::Custom(format!(
-            "Document with id {:x?} not found for update",
-            doc_id
-          ))
+          BTreeError::Custom(format!("Document with id {:x?} not found for update", key))
         })?
     };
 
     update_fn(&mut doc)?;
 
-    self.pending.insert(doc_id, Some(doc));
+    self.pending.insert(key, Some(doc));
 
     Ok(Some(()))
   }
 
-  async fn remove<'a, Q>(&'a mut self, key: Q) -> BTreeResult<Option<AutoCommit>>
-  where
-    DocumentId: Ord,
-    Q: core::borrow::Borrow<DocumentId> + MaybeSend + 'a,
-  {
-    let doc_id = key.borrow().clone();
-
-    if let Some(existing) = self.pending.remove(&doc_id) {
+  async fn remove(&mut self, key: &DocumentId) -> BTreeResult<Option<AutoCommit>> {
+    if let Some((doc_id, existing)) = self.pending.remove_entry(key) {
       self.pending.insert(doc_id, None);
       return Ok(existing);
     }
 
-    let existing = reconstruct_document(&self.inner_tx, doc_id.clone()).await?;
+    let existing = reconstruct_document(&self.inner_tx, key).await?;
     if existing.doc.is_some() {
-      self.pending.insert(doc_id, None);
+      self.pending.insert(existing.id, None);
     }
     Ok(existing.doc)
   }
@@ -247,19 +223,13 @@ impl<T> BTreeReadExecutor<DocumentId, AutoCommit> for AutomergeBTreeTransaction<
 where
   T: BTreeTransaction<DocumentId, AutoCommit>,
 {
-  async fn get<'a, Q>(&'a self, key: Q) -> BTreeResult<Option<AutoCommit>>
-  where
-    Q: Borrow<DocumentId> + MaybeSend + 'a,
-  {
+  async fn get(&self, key: &DocumentId) -> BTreeResult<Option<AutoCommit>> {
     self.0.get(key).await
   }
 
-  fn range<'a, R>(
-    &'a self,
-    range: R,
-  ) -> impl MaybeSendStream<Item = BTreeResult<(DocumentId, AutoCommit)>> + 'a
+  fn range<R>(&self, range: R) -> impl Stream<Item = BTreeResult<(DocumentId, AutoCommit)>>
   where
-    R: RangeBounds<DocumentId> + MaybeSend + 'a,
+    R: RangeBounds<DocumentId>,
   {
     self.0.range(range)
   }
@@ -273,17 +243,14 @@ where
     self.0.insert(key, value).await
   }
 
-  async fn update<'a, F>(&'a mut self, key: DocumentId, update_fn: F) -> BTreeResult<Option<()>>
+  async fn update<F>(&mut self, key: DocumentId, update_fn: F) -> BTreeResult<Option<()>>
   where
-    F: FnOnce(&mut AutoCommit) -> BTreeResult<()> + MaybeSend + 'a,
+    F: FnOnce(&mut AutoCommit) -> BTreeResult<()>,
   {
     self.0.update(key, update_fn).await
   }
 
-  async fn remove<'a, Q>(&'a mut self, key: Q) -> BTreeResult<Option<AutoCommit>>
-  where
-    Q: Borrow<DocumentId> + MaybeSend + 'a,
-  {
+  async fn remove(&mut self, key: &DocumentId) -> BTreeResult<Option<AutoCommit>> {
     self.0.remove(key).await
   }
 }

@@ -19,7 +19,6 @@ std = [
   "wasm-bindgen/std",
   "serde/std",
   "thiserror/std",
-  "db-core/std",
   "db-schema/std",
   "db-value/std"
 ]
@@ -27,7 +26,6 @@ wasm = ["dep:tsify", "dep:serde-wasm-bindgen", "dep:wasm-bindgen", "db-schema/wa
 
 [dependencies]
 # internal dependencies
-db-core = { path = "../db-core", default-features = false, features = [] }
 db-value = { path = "../db-value", default-features = false, features = [] }
 db-schema = { path = "../db-schema", default-features = false, features = [] }
 

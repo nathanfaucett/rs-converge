@@ -22,12 +22,8 @@ std = [
 in-memory = ["dep:async-stream", "dep:async-lock"]
 
 [dependencies]
-# internal dependencies
-db-core = { path = "../db-core", default-features = false, features = [] }
-
+async-lock = { version = "3.4", default-features = false, features = [], optional = true }
 async-stream = { version = "0.3", default-features = false, features = [
-], optional = true }
-async-lock = { version = "3.4", default-features = false, features = [
 ], optional = true }
 futures = { version = "0.3", default-features = false, features = [] }
 thiserror = { version = "2.0", default-features = false, features = [] }

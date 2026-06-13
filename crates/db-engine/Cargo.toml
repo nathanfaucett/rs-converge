@@ -22,7 +22,6 @@ std = [
   "serde_json/std",
   "db-schema/std",
   "db-btree/std",
-  "db-core/std",
   "db-value/std",
   "db-query/std"
 ]
@@ -33,7 +32,6 @@ wasm = ["dep:tsify", "dep:serde-wasm-bindgen", "dep:wasm-bindgen", "automerge/wa
 [dependencies]
 # internal dependencies
 db-btree = { path = "../db-btree", default-features = false, features = [] }
-db-core = { path = "../db-core", default-features = false, features = [] }
 db-value = { path = "../db-value", default-features = false, features = [] }
 db-query = { path = "../db-query", default-features = false, features = [] }
 db-schema = { path = "../db-schema", default-features = false, features = [] }

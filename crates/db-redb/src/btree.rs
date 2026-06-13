@@ -1,15 +1,14 @@
-use std::{borrow::Borrow, marker::PhantomData, ops::RangeBounds, sync::Arc};
+use std::{marker::PhantomData, ops::RangeBounds, sync::Arc};
 
 use async_stream::stream;
 use futures::Stream;
-use redb::{Database, ReadableDatabase};
+use redb::{Database, Key, ReadableDatabase, Value};
 
 use db_btree::{BTree, BTreeError, BTreeKey, BTreeReadExecutor, BTreeResult, BTreeValue};
-use db_core::MaybeSend;
 
 use crate::{
-  Codec, RedbBTreeTransaction,
-  util::{rx_range, table_definition, tx_read},
+  RedbBTreeTransaction,
+  util::{table_definition, tx_range},
 };
 
 #[derive(Clone)]
@@ -31,32 +30,33 @@ impl<K, V> RedbBTree<K, V> {
 
 impl<K, V> BTreeReadExecutor<K, V> for RedbBTree<K, V>
 where
-  K: BTreeKey + Codec,
-  V: BTreeValue + Codec,
+  K: BTreeKey + Key,
+  V: BTreeValue + Value,
 {
-  async fn get<'a, Q>(&'a self, key: Q) -> BTreeResult<Option<V>>
-  where
-    Q: Borrow<K> + MaybeSend + 'a,
-  {
+  async fn get(&self, key: &K) -> BTreeResult<Option<V>> {
     let db = self.db.begin_read().map_err(BTreeError::custom)?;
     let table = db
-      .open_table(table_definition(&self.name))
+      .open_table(table_definition::<K, V>(&self.name))
       .map_err(BTreeError::custom)?;
 
-    tx_read::<K, V, _>(&table, key.borrow())
+    let value = table.get(key).map_err(BTreeError::custom)?;
+
+    match value {
+      Some(v) => Ok(Some(V::from_bytes(v.value()).into())),
+      None => Ok(None),
+    }
   }
 
-  fn range<'a, R>(&'a self, range: R) -> impl Stream<Item = BTreeResult<(K, V)>> + 'a
+  fn range<R>(&self, range: R) -> impl Stream<Item = BTreeResult<(K, V)>>
   where
-    R: RangeBounds<K> + MaybeSend + 'a,
+    R: RangeBounds<K>,
   {
     stream! {
         let db = self.db.begin_read().map_err(BTreeError::custom)?;
         let table = db
           .open_table(table_definition(&self.name))
           .map_err(BTreeError::custom)?;
-
-        let results = rx_range(&table, range)?;
+        let results = tx_range(&table, range).map_err(BTreeError::custom)?;
 
         for result in results {
             yield Ok(result);
@@ -67,8 +67,8 @@ where
 
 impl<K, V> BTree<K, V> for RedbBTree<K, V>
 where
-  K: BTreeKey + Codec,
-  V: BTreeValue + Codec,
+  K: BTreeKey + Key,
+  V: BTreeValue + Value,
 {
   type Transaction = RedbBTreeTransaction<K, V>;
 
@@ -110,12 +110,153 @@ mod test {
       tx.commit().await.expect("failed to commit");
 
       let got = tree
-        .get("key1".to_string())
+        .get(&"key1".to_string())
         .await
         .expect("failed to get")
         .expect("missing key");
 
       assert_eq!(got, "value1".to_string());
+    });
+  }
+
+  #[test]
+  fn insert_and_get() {
+    block_on(async {
+      let db = Database::create(tmp_path()).expect("failed to create database");
+      let tree = RedbBTree::<String, String>::new(Arc::new(db), "ctx_tree");
+
+      let mut tx = tree
+        .transaction()
+        .await
+        .expect("failed to create transaction");
+      tx.insert("foo".to_string(), "bar".to_string())
+        .await
+        .expect("insert failed");
+      tx.commit().await.expect("commit failed");
+
+      let value = tree
+        .get(&"foo".to_string())
+        .await
+        .expect("get failed")
+        .expect("key missing");
+      assert_eq!(value, "bar".to_string());
+    });
+  }
+
+  #[test]
+  fn insert_multiple_keys() {
+    block_on(async {
+      let db = Database::create(tmp_path()).expect("failed to create database");
+      let tree = RedbBTree::<u64, String>::new(Arc::new(db), "ctx_nums");
+
+      let mut tx = tree.transaction().await.expect("fail transaction");
+      tx.insert(1u64, "one".to_string())
+        .await
+        .expect("insert 1 failed");
+      tx.insert(2u64, "two".to_string())
+        .await
+        .expect("insert 2 failed");
+      tx.insert(3u64, "three".to_string())
+        .await
+        .expect("insert 3 failed");
+      tx.commit().await.expect("commit failed");
+
+      for key in [1u64, 2u64, 3u64] {
+        let value = tree
+          .get(&key)
+          .await
+          .expect("get failed")
+          .expect("key missing");
+        assert_eq!(value, format!("{}", key), "wrong value for key {}", key);
+      }
+    });
+  }
+
+  #[test]
+  fn get_nonexistent_key() {
+    block_on(async {
+      let db = Database::create(tmp_path()).expect("failed to create database");
+      let tree = RedbBTree::<String, String>::new(Arc::new(db), "ctx_empty");
+
+      let result = tree
+        .get(&"nonexistent".to_string())
+        .await
+        .expect("get failed");
+      assert!(result.is_none(), "should return none for missing key");
+    });
+  }
+
+  #[test]
+  fn range_query() {
+    block_on(async {
+      let db = Database::create(tmp_path()).expect("failed to create database");
+      let tree = RedbBTree::<u64, String>::new(Arc::new(db), "ctx_range");
+
+      // Insert keys 1-5
+      let mut tx = tree.transaction().await.expect("fail transaction");
+      for i in 1..=5 {
+        tx.insert(i, format!("value_{}", i).to_string())
+          .await
+          .expect("insert failed");
+      }
+      tx.commit().await.expect("commit failed");
+
+      let mut count = 0;
+      let results = tree.range(2u64..=4u64).collect::<Vec<_>>().await;
+      for result in results {
+        let (k, v) = result.expect("range error");
+        assert_eq!(k, count + 1); // Should be in order: 2, 3, 4
+        assert_eq!(v, format!("value_{}", k));
+        count += 1;
+      }
+      assert_eq!(count, 3, "should have retrieved 3 items");
+    });
+  }
+
+  #[test]
+  fn insert_overwrite() {
+    block_on(async {
+      let db = Database::create(tmp_path()).expect("failed to create database");
+      let tree = RedbBTree::<String, String>::new(Arc::new(db), "ctx_override");
+
+      // Insert same key multiple times (should overwrite)
+      let mut tx = tree.transaction().await.expect("fail transaction");
+      tx.insert("key".to_string(), "first".to_string())
+        .await
+        .expect("insert 1 failed");
+      tx.insert("key".to_string(), "second".to_string())
+        .await
+        .expect("insert 2 failed");
+      tx.insert("key".to_string(), "third".to_string())
+        .await
+        .expect("insert 3 failed");
+      tx.commit().await.expect("commit failed");
+
+      // Should only have the last value
+      let value = tree
+        .get(&"key".to_string())
+        .await
+        .expect("get failed")
+        .expect("key missing");
+      assert_eq!(value, "third", "should overwrite previous values");
+    });
+  }
+
+  #[test]
+  fn range_empty() {
+    block_on(async {
+      let db = Database::create(tmp_path()).expect("failed to create database");
+      let tree = RedbBTree::<String, String>::new(Arc::new(db), "ctx_empty_range");
+
+      let mut count = 0;
+      let results = tree.range::<str, _>(..).collect::<Vec<_>>().await;
+
+      for result in results {
+        let (_, _) = result.expect("range error");
+        assert!(false, "should not have items");
+        count += 1;
+      }
+      assert_eq!(count, 0, "empty table should yield no items");
     });
   }
 }

@@ -17,14 +17,12 @@ default = ["std"]
 std = [
     "serde/std",
   "wasm-bindgen/std",
-  "db-core/std",
   "db-value/std"
 ]
 wasm = ["dep:tsify", "dep:serde-wasm-bindgen", "dep:wasm-bindgen"]
 
 [dependencies]
 # internal dependencies
-db-core = { path = "../db-core", default-features = false, features = [] }
 db-value = { path = "../db-value", default-features = false, features = [] }
 
 serde = { version = "1.0", default-features = false, features = ["alloc", "derive"] }

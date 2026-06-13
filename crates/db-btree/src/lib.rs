@@ -8,8 +8,8 @@ mod btree;
 mod in_memory_btree;
 
 pub use btree::{
-  BTree, BTreeDefinition, BTreeError, BTreeFactory, BTreeKey, BTreeManager, BTreeManagerAnyBTree,
-  BTreeReadExecutor, BTreeResult, BTreeTransaction, BTreeValue, BTreeWriteExecutor,
+  BTree, BTreeError, BTreeKey, BTreeReadExecutor, BTreeResult, BTreeTransaction, BTreeValue,
+  BTreeWriteExecutor,
 };
 #[cfg(feature = "in-memory")]
-pub use in_memory_btree::{InMemoryBTree, InMemoryBTreeFactory};
+pub use in_memory_btree::InMemoryBTree;
