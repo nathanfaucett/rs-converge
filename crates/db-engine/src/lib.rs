@@ -10,3 +10,4 @@ mod executor;
 mod kernel;
 
 pub use engine::{Engine, EngineError, EngineResult};
+pub use kernel::EngineKernel;

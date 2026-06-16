@@ -1,21 +1,21 @@
-use std::{marker::PhantomData, ops::RangeBounds, sync::Arc};
+use std::{borrow::Borrow, marker::PhantomData, ops::RangeBounds, sync::Arc};
 
 use async_stream::stream;
 use futures::Stream;
-use redb::{Database, Key, ReadableDatabase, Value};
+use redb::{Database, ReadableDatabase};
 
-use db_btree::{BTree, BTreeError, BTreeKey, BTreeReadExecutor, BTreeResult, BTreeValue};
+use db_btree::{BTree, BTreeError, BTreeQuery, BTreeReadExecutor, BTreeResult};
 
 use crate::{
   RedbBTreeTransaction,
-  util::{table_definition, tx_range},
+  util::{RedbKey, RedbValue, map_range, range_as_ref, table_definition},
 };
 
 #[derive(Clone)]
 pub struct RedbBTree<K, V> {
   db: Arc<Database>,
   name: String,
-  _phantom_marker: PhantomData<(K, V)>,
+  _marker: PhantomData<(K, V)>,
 }
 
 impl<K, V> RedbBTree<K, V> {
@@ -23,43 +23,63 @@ impl<K, V> RedbBTree<K, V> {
     Self {
       db,
       name: name.into(),
-      _phantom_marker: PhantomData,
+      _marker: PhantomData,
     }
   }
 }
 
 impl<K, V> BTreeReadExecutor<K, V> for RedbBTree<K, V>
 where
-  K: BTreeKey + Key,
-  V: BTreeValue + Value,
+  K: RedbKey,
+  V: RedbValue,
 {
-  async fn get(&self, key: &K) -> BTreeResult<Option<V>> {
+  async fn get<Q>(&self, query: &Q) -> BTreeResult<Option<V>>
+  where
+    Q: BTreeQuery<K> + ?Sized,
+    K: Borrow<Q>,
+  {
     let db = self.db.begin_read().map_err(BTreeError::custom)?;
+
     let table = db
-      .open_table(table_definition::<K, V>(&self.name))
+      .open_table(table_definition(&self.name))
       .map_err(BTreeError::custom)?;
 
-    let value = table.get(key).map_err(BTreeError::custom)?;
+    let key: K = query.to_key();
 
-    match value {
-      Some(v) => Ok(Some(V::from_bytes(v.value()).into())),
-      None => Ok(None),
-    }
+    let guard = match table
+      .get(key.encode().map_err(BTreeError::custom)?.as_slice())
+      .map_err(BTreeError::custom)?
+    {
+      Some(value) => value,
+      None => return Ok(None),
+    };
+
+    let value = RedbValue::decode(guard.value()).map_err(BTreeError::custom)?;
+
+    Ok(Some(value))
   }
 
-  fn range<R>(&self, range: R) -> impl Stream<Item = BTreeResult<(K, V)>>
+  fn range<Q, R>(&self, range: R) -> impl Stream<Item = BTreeResult<(K, V)>>
   where
-    R: RangeBounds<K>,
+    Q: BTreeQuery<K> + ?Sized,
+    K: Borrow<Q>,
+    R: RangeBounds<Q>,
   {
     stream! {
         let db = self.db.begin_read().map_err(BTreeError::custom)?;
         let table = db
           .open_table(table_definition(&self.name))
           .map_err(BTreeError::custom)?;
-        let results = tx_range(&table, range).map_err(BTreeError::custom)?;
+
+        let mapped_range = map_range(range).map_err(BTreeError::custom)?;
+        let mapped_range_bytes = range_as_ref(&mapped_range);
+        let results = table.range(mapped_range_bytes).map_err(BTreeError::custom)?;
 
         for result in results {
-            yield Ok(result);
+            let (guard_key, guard_value) = result.map_err(BTreeError::custom)?;
+            let key: K = K::decode(guard_key.value()).map_err(BTreeError::custom)?;
+            let value: V = V::decode(guard_value.value()).map_err(BTreeError::custom)?;
+            yield Ok((key, value));
         }
     }
   }
@@ -67,8 +87,8 @@ where
 
 impl<K, V> BTree<K, V> for RedbBTree<K, V>
 where
-  K: BTreeKey + Key,
-  V: BTreeValue + Value,
+  K: RedbKey,
+  V: RedbValue,
 {
   type Transaction = RedbBTreeTransaction<K, V>;
 
@@ -81,7 +101,7 @@ where
 
 #[cfg(test)]
 mod test {
-  use futures::executor::block_on;
+  use futures::{StreamExt, executor::block_on};
 
   use db_btree::{BTree, BTreeReadExecutor, BTreeTransaction, BTreeWriteExecutor};
 
@@ -249,7 +269,7 @@ mod test {
       let tree = RedbBTree::<String, String>::new(Arc::new(db), "ctx_empty_range");
 
       let mut count = 0;
-      let results = tree.range::<str, _>(..).collect::<Vec<_>>().await;
+      let results = tree.range(..).collect::<Vec<_>>().await;
 
       for result in results {
         let (_, _) = result.expect("range error");

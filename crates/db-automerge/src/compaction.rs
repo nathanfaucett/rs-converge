@@ -3,7 +3,7 @@ use db_btree::{BTreeResult, BTreeTransaction};
 use futures::{StreamExt, pin_mut};
 use sha2::{Digest, Sha256};
 
-use crate::{DocumentChangeKey, DocumentId};
+use crate::{DocumentChangeKey, DocumentId, document_change_key_borrow::DocumentChangeKeyBorrow};
 
 pub fn hash_hashes<I>(hashes: I) -> [u8; 32]
 where
@@ -66,7 +66,7 @@ where
   T: BTreeTransaction<DocumentChangeKey, Vec<u8>>,
 {
   let to_remove = {
-    let doc_range = DocumentChangeKey::range_for(doc_id);
+    let doc_range = DocumentChangeKeyBorrow::range_for(doc_id);
     let range_stream = tx.range(doc_range);
     pin_mut!(range_stream);
 

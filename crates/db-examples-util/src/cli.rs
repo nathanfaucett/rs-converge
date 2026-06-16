@@ -1,13 +1,11 @@
-use db_btree::{BTreeFactory, BTreeManager};
-use db_engine::Engine;
+use db_engine::{Engine, EngineKernel};
 use db_query::Translator;
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 
-pub async fn cli<M, F, T>(engine: Engine<M, F>, translator: T)
+pub async fn cli<K, T>(engine: Engine<K>, translator: T)
 where
-  M: BTreeManager<F>,
-  F: BTreeFactory,
+  K: EngineKernel,
   T: Translator,
 {
   println!("=== DB Engine CLI Interface (with Arrow Key History) ===");
@@ -42,10 +40,12 @@ where
 
         // 5. Execute the dynamic query
         match engine.translate_and_execute(query, &translator).await {
-          Ok(res) => {
-            println!("Execution successful. Rows returned: {}", res.rows.len());
-            for (idx, row) in res.rows.iter().enumerate() {
-              println!("[Row {}]: {:?}", idx + 1, row);
+          Ok(results) => {
+            for result in results {
+              println!("Execution successful. Rows returned: {}", result.rows.len());
+              for (idx, row) in result.rows.iter().enumerate() {
+                println!("[Row {}]: {:?}", idx + 1, row);
+              }
             }
           }
           Err(err) => {

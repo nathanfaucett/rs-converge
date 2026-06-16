@@ -1,8 +1,13 @@
+use std::borrow::Borrow;
+
 use automerge::AutoCommit;
-use db_btree::{BTreeError, BTreeReadExecutor, BTreeResult};
+use db_btree::{BTreeError, BTreeQuery, BTreeReadExecutor, BTreeResult};
 use futures::{StreamExt, pin_mut};
 
-use crate::{DocumentChangeKey, document_change_key::DocumentId};
+use crate::{
+  DocumentChangeKey, document_change_key::DocumentId,
+  document_change_key_borrow::DocumentChangeKeyBorrow,
+};
 
 #[derive(Debug, Clone)]
 pub struct ReconstructedDocument {
@@ -51,11 +56,13 @@ impl ReconstructedDocument {
   }
 }
 
-pub async fn reconstruct_document<T>(tx: &T, key: &DocumentId) -> BTreeResult<ReconstructedDocument>
+pub async fn reconstruct_document<T, Q>(tx: &T, key: &Q) -> BTreeResult<ReconstructedDocument>
 where
+  Q: BTreeQuery<DocumentId> + ?Sized,
+  DocumentId: Borrow<Q>,
   T: BTreeReadExecutor<DocumentChangeKey, Vec<u8>>,
 {
-  let range = DocumentChangeKey::range_for(key);
+  let range = DocumentChangeKeyBorrow::range_for(key);
   let stream = tx.range(range);
   pin_mut!(stream);
 

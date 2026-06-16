@@ -1,13 +1,11 @@
-use db_btree::{BTreeFactory, BTreeManager};
-use db_engine::Engine;
+use db_engine::{Engine, EngineKernel};
 use db_query::{QueryParams, Translator};
 use db_value::Value;
 use uuid::Uuid;
 
-pub async fn run<M, F, T>(engine: Engine<M, F>, translator: T)
+pub async fn run<K, T>(engine: Engine<K>, translator: T)
 where
-  M: BTreeManager<F>,
-  F: BTreeFactory,
+  K: EngineKernel,
   T: Translator,
 {
   // Create tables via SQL using the facade.
@@ -71,7 +69,7 @@ where
     .await
     .expect("insert order 2");
 
-  let res = engine
+  let results = engine
     .translate_and_execute(
       "SELECT u.name, o.amount FROM users u JOIN orders o ON u.id = o.user_id;",
       &translator,
@@ -79,8 +77,10 @@ where
     .await
     .expect("translate_and_execute select");
 
-  println!("Joined rows: {}", res.rows.len());
-  for row in res.rows {
-    println!("row: {:?}", row);
+  for result in results {
+    println!("Joined rows: {}", result.rows.len());
+    for row in result.rows {
+      println!("row: {:?}", row);
+    }
   }
 }
