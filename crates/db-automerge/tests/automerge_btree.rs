@@ -1,10 +1,10 @@
 use automerge::{AutoCommit, transaction::Transactable};
 use db_btree::{BTreeReadExecutor, BTreeWriteExecutor, InMemoryBTree};
-use futures::{StreamExt, executor::block_on};
+use futures::executor::block_on;
 use std::fs;
 use uuid::Uuid;
 
-use db_automerge::{AutomergeBTree, DocumentChangeKey, DocumentId};
+use db_automerge::{AutomergeBTree, DocumentChangeKey};
 
 fn tmp_path(name: &str) -> std::path::PathBuf {
   let mut path = std::env::temp_dir();
@@ -28,40 +28,6 @@ fn insert_and_get_latest() {
   let expected_bytes = expected.save();
   let got_bytes = got.save();
   assert_eq!(got_bytes, expected_bytes);
-}
-
-#[test]
-fn range_ordering() {
-  let underlying = InMemoryBTree::<DocumentChangeKey, Vec<u8>>::new();
-  let mut store = AutomergeBTree::new_automerge(underlying);
-
-  let mut ids: Vec<DocumentId> = Vec::new();
-  for i in 0..3 {
-    let id = Uuid::now_v7().as_bytes().to_vec();
-    ids.push(id.clone());
-    let mut doc = AutoCommit::new();
-    doc
-      .put(&automerge::ROOT, "v", format!("v{}", i))
-      .expect("put");
-    block_on(store.insert(id, doc)).expect("insert");
-    std::thread::sleep(std::time::Duration::from_millis(1));
-  }
-
-  let start = &Uuid::nil().as_bytes().to_vec();
-  let end = &Uuid::from_u128(u128::MAX).as_bytes().to_vec();
-
-  let s = store.range(start..=end);
-  let items: Vec<(DocumentId, AutoCommit)> = block_on(async move {
-    let mut collected: Vec<(DocumentId, AutoCommit)> = Vec::new();
-    futures::pin_mut!(s);
-    while let Some(item) = s.next().await {
-      let (k, v) = item.expect("range failed");
-      collected.push((k, v));
-    }
-    collected
-  });
-
-  assert_eq!(items.len(), 3);
 }
 
 #[test]

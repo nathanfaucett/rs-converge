@@ -269,12 +269,12 @@ mod test {
       let tree = RedbBTree::<String, String>::new(Arc::new(db), "ctx_empty_range");
 
       let mut count = 0;
-      let results = tree.range(..).collect::<Vec<_>>().await;
+      let results = tree.range::<str, _>(..).collect::<Vec<_>>().await;
 
       for result in results {
         let (_, _) = result.expect("range error");
-        assert!(false, "should not have items");
         count += 1;
+        unreachable!("should not have items");
       }
       assert_eq!(count, 0, "empty table should yield no items");
     });

@@ -126,13 +126,17 @@ where
       Ok(None)
     }
   }
-  async fn remove(&mut self, key: &K) -> BTreeResult<Option<V>> {
+  async fn remove<Q>(&mut self, key: &Q) -> BTreeResult<Option<V>>
+  where
+    Q: BTreeQuery<K> + ?Sized,
+    K: Borrow<Q>,
+  {
     let mut table = self
       .tx
       .open_table(table_definition(&self.name))
       .map_err(BTreeError::custom)?;
 
-    let key_bytes = key.encode().map_err(BTreeError::custom)?;
+    let key_bytes = key.to_key().encode().map_err(BTreeError::custom)?;
 
     let value = if let Some(entry) = table
       .get(key_bytes.as_slice())
