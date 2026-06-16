@@ -114,11 +114,19 @@ mod test {
     path
   }
 
+  fn create_tree<K, V>(table_name: &str) -> RedbBTree<K, V> {
+    let db = Database::create(tmp_path()).expect("failed to create database");
+    let tx = db.begin_write().expect("failed to begin transaction");
+    tx.open_table(table_definition(table_name))
+      .expect("failed to create table");
+    tx.commit().expect("failed to commit transaction");
+    RedbBTree::<K, V>::new(Arc::new(db), table_name)
+  }
+
   #[test]
   fn it_works() {
     block_on(async {
-      let db = Database::create(tmp_path()).expect("failed to create database");
-      let tree = RedbBTree::<String, String>::new(Arc::new(db), "test_tree");
+      let tree = create_tree::<String, String>("test_tree");
 
       let mut tx = tree
         .transaction()
@@ -142,8 +150,7 @@ mod test {
   #[test]
   fn insert_and_get() {
     block_on(async {
-      let db = Database::create(tmp_path()).expect("failed to create database");
-      let tree = RedbBTree::<String, String>::new(Arc::new(db), "ctx_tree");
+      let tree = create_tree("ctx_tree");
 
       let mut tx = tree
         .transaction()
@@ -166,17 +173,16 @@ mod test {
   #[test]
   fn insert_multiple_keys() {
     block_on(async {
-      let db = Database::create(tmp_path()).expect("failed to create database");
-      let tree = RedbBTree::<u64, String>::new(Arc::new(db), "ctx_nums");
+      let tree = create_tree("ctx_nums");
 
       let mut tx = tree.transaction().await.expect("fail transaction");
-      tx.insert(1u64, "one".to_string())
+      tx.insert(1u64, "1".to_string())
         .await
         .expect("insert 1 failed");
-      tx.insert(2u64, "two".to_string())
+      tx.insert(2u64, "2".to_string())
         .await
         .expect("insert 2 failed");
-      tx.insert(3u64, "three".to_string())
+      tx.insert(3u64, "3".to_string())
         .await
         .expect("insert 3 failed");
       tx.commit().await.expect("commit failed");
@@ -195,8 +201,7 @@ mod test {
   #[test]
   fn get_nonexistent_key() {
     block_on(async {
-      let db = Database::create(tmp_path()).expect("failed to create database");
-      let tree = RedbBTree::<String, String>::new(Arc::new(db), "ctx_empty");
+      let tree = create_tree::<String, String>("ctx_empty");
 
       let result = tree
         .get(&"nonexistent".to_string())
@@ -209,8 +214,7 @@ mod test {
   #[test]
   fn range_query() {
     block_on(async {
-      let db = Database::create(tmp_path()).expect("failed to create database");
-      let tree = RedbBTree::<u64, String>::new(Arc::new(db), "ctx_range");
+      let tree = create_tree("ctx_range");
 
       // Insert keys 1-5
       let mut tx = tree.transaction().await.expect("fail transaction");
@@ -225,7 +229,7 @@ mod test {
       let results = tree.range(2u64..=4u64).collect::<Vec<_>>().await;
       for result in results {
         let (k, v) = result.expect("range error");
-        assert_eq!(k, count + 1); // Should be in order: 2, 3, 4
+        assert_eq!(k, count + 2); // Should be in order: 2, 3, 4
         assert_eq!(v, format!("value_{}", k));
         count += 1;
       }
@@ -236,8 +240,7 @@ mod test {
   #[test]
   fn insert_overwrite() {
     block_on(async {
-      let db = Database::create(tmp_path()).expect("failed to create database");
-      let tree = RedbBTree::<String, String>::new(Arc::new(db), "ctx_override");
+      let tree = create_tree::<String, String>("ctx_override");
 
       // Insert same key multiple times (should overwrite)
       let mut tx = tree.transaction().await.expect("fail transaction");
@@ -265,18 +268,14 @@ mod test {
   #[test]
   fn range_empty() {
     block_on(async {
-      let db = Database::create(tmp_path()).expect("failed to create database");
-      let tree = RedbBTree::<String, String>::new(Arc::new(db), "ctx_empty_range");
+      let tree = create_tree::<String, String>("ctx_empty_range");
 
-      let mut count = 0;
       let results = tree.range::<str, _>(..).collect::<Vec<_>>().await;
 
       for result in results {
         let (_, _) = result.expect("range error");
-        count += 1;
         unreachable!("should not have items");
       }
-      assert_eq!(count, 0, "empty table should yield no items");
     });
   }
 }

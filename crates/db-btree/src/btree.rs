@@ -1,7 +1,9 @@
+#[cfg(not(feature = "std"))]
+use alloc::string::{String, ToString};
+
 use futures::Stream;
 
-use core::ops::RangeBounds;
-use std::borrow::Borrow;
+use core::{borrow::Borrow, ops::RangeBounds};
 
 use thiserror::Error;
 

@@ -1,12 +1,14 @@
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeMap, sync::Arc};
-use std::ops::Bound;
 #[cfg(feature = "std")]
 use std::{collections::BTreeMap, sync::Arc};
 
 use async_lock::RwLock;
 use async_stream::stream;
-use core::{borrow::Borrow, ops::RangeBounds};
+use core::{
+  borrow::Borrow,
+  ops::{Bound, RangeBounds},
+};
 use futures::Stream;
 
 use crate::{
