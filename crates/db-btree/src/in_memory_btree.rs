@@ -12,8 +12,7 @@ use core::{
 use futures::Stream;
 
 use crate::{
-  BTree, BTreeKey, BTreeReadExecutor, BTreeResult, BTreeTransaction, BTreeValue,
-  BTreeWriteExecutor, btree::BTreeQuery,
+  BTree, BTreeKey, BTreeReadExecutor, BTreeResult, BTreeTransaction, BTreeValue, BTreeWriteExecutor,
 };
 
 #[derive(Debug, Clone)]
@@ -46,20 +45,14 @@ where
   K: BTreeKey + Clone,
   V: BTreeValue + Clone,
 {
-  async fn get<Q>(&self, key: &Q) -> BTreeResult<Option<V>>
-  where
-    Q: BTreeQuery<K> + ?Sized,
-    K: Borrow<Q>,
-  {
+  async fn get(&self, key: &K) -> BTreeResult<Option<V>> {
     let guard = self.inner.read().await;
     Ok(guard.get(key).cloned())
   }
 
-  fn range<Q, R>(&self, range: R) -> impl Stream<Item = BTreeResult<(K, V)>>
+  fn range<R>(&self, range: R) -> impl Stream<Item = BTreeResult<(K, V)>>
   where
-    Q: BTreeQuery<K> + ?Sized,
-    K: Borrow<Q>,
-    R: RangeBounds<Q>,
+    R: RangeBounds<K>,
   {
     stream! {
       for (key, value) in self.inner.read().await.range(range) {
@@ -91,11 +84,7 @@ where
     }
   }
 
-  async fn remove<Q>(&mut self, key: &Q) -> BTreeResult<Option<V>>
-  where
-    Q: BTreeQuery<K> + ?Sized,
-    K: Borrow<Q>,
-  {
+  async fn remove(&mut self, key: &K) -> BTreeResult<Option<V>> {
     Ok(self.inner.write().await.remove(key.borrow()))
   }
 }
@@ -133,11 +122,7 @@ where
   K: BTreeKey + Clone,
   V: BTreeValue + Clone,
 {
-  pub fn get<Q>(&self, base: &BTreeMap<K, V>, key: &Q) -> Option<V>
-  where
-    Q: BTreeQuery<K> + ?Sized,
-    K: Borrow<Q>,
-  {
+  pub fn get(&self, base: &BTreeMap<K, V>, key: &K) -> Option<V> {
     match self.inner.get(key) {
       Some(entry) => entry.as_option().cloned(),
       None => base.get(key).cloned(),
@@ -150,11 +135,7 @@ where
       .insert(key, InMemoryTransactionPatchEntry::Present(value));
   }
 
-  pub fn remove<Q>(&mut self, base: &BTreeMap<K, V>, key: &Q) -> Option<V>
-  where
-    Q: BTreeQuery<K> + ?Sized,
-    K: Borrow<Q>,
-  {
+  pub fn remove(&mut self, base: &BTreeMap<K, V>, key: &K) -> Option<V> {
     match self.inner.get_key_value(key) {
       Some((key, InMemoryTransactionPatchEntry::Present(value))) => {
         let removed = value.clone();
@@ -192,7 +173,7 @@ where
 
   pub fn range<Q, R>(&self, base: &BTreeMap<K, V>, range: R) -> BTreeMap<K, V>
   where
-    Q: BTreeQuery<K> + ?Sized,
+    Q: Ord + ?Sized,
     K: Borrow<Q>,
     R: RangeBounds<Q>,
   {
@@ -228,7 +209,7 @@ fn merge_range_maps<K, V, Q, P, R, FInclude, FApply>(
 where
   K: BTreeKey + Borrow<Q> + Clone,
   V: Clone,
-  Q: BTreeQuery<K> + ?Sized,
+  Q: Ord + ?Sized,
   R: RangeBounds<Q>,
   FInclude: FnMut(&K) -> bool,
   FApply: FnMut(&K, &P, &mut BTreeMap<K, V>),
@@ -279,6 +260,8 @@ pub struct InMemoryBTreeTransaction<K, V> {
   patch: InMemoryTransactionPatch<K, V>,
 }
 
+unsafe impl<K, V> Send for InMemoryBTreeTransaction<K, V> {}
+
 impl<K, V> BTreeTransaction<K, V> for InMemoryBTreeTransaction<K, V>
 where
   K: BTreeKey + Clone,
@@ -300,19 +283,13 @@ where
   K: BTreeKey + Clone,
   V: BTreeValue + Clone,
 {
-  async fn get<Q>(&self, key: &Q) -> BTreeResult<Option<V>>
-  where
-    Q: BTreeQuery<K> + ?Sized,
-    K: Borrow<Q>,
-  {
+  async fn get(&self, key: &K) -> BTreeResult<Option<V>> {
     Ok(self.patch.get(&*self.inner.read().await, key))
   }
 
-  fn range<Q, R>(&self, range: R) -> impl Stream<Item = BTreeResult<(K, V)>>
+  fn range<R>(&self, range: R) -> impl Stream<Item = BTreeResult<(K, V)>>
   where
-    Q: BTreeQuery<K> + ?Sized,
-    K: Borrow<Q>,
-    R: RangeBounds<Q>,
+    R: RangeBounds<K>,
   {
     stream! {
       let merged = self.patch.range(&*self.inner.read().await, range);
@@ -339,6 +316,7 @@ where
 
   async fn update<F>(&mut self, key: K, update_fn: F) -> BTreeResult<Option<()>>
   where
+    K: Ord,
     F: FnOnce(&mut V) -> BTreeResult<()>,
   {
     if let Some(value) = self.patch.get(&*self.inner.read().await, &key) {
@@ -351,11 +329,7 @@ where
     }
   }
 
-  async fn remove<Q>(&mut self, key: &Q) -> BTreeResult<Option<V>>
-  where
-    Q: BTreeQuery<K> + ?Sized,
-    K: Borrow<Q>,
-  {
+  async fn remove(&mut self, key: &K) -> BTreeResult<Option<V>> {
     Ok(self.patch.remove(&*self.inner.read().await, key))
   }
 }

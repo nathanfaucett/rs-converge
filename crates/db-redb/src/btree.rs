@@ -1,14 +1,15 @@
-use std::{borrow::Borrow, marker::PhantomData, ops::RangeBounds, sync::Arc};
+use std::{marker::PhantomData, ops::RangeBounds, sync::Arc};
 
 use async_stream::stream;
 use futures::Stream;
 use redb::{Database, ReadableDatabase};
 
-use db_btree::{BTree, BTreeError, BTreeQuery, BTreeReadExecutor, BTreeResult};
+use db_btree::{BTree, BTreeError, BTreeReadExecutor, BTreeResult};
 
 use crate::{
   RedbBTreeTransaction,
-  util::{RedbKey, RedbValue, map_range, range_as_ref, table_definition},
+  key::Key,
+  redb::{RedbKey, RedbValue, table_definition},
 };
 
 #[derive(Clone)]
@@ -33,52 +34,43 @@ where
   K: RedbKey,
   V: RedbValue,
 {
-  async fn get<Q>(&self, query: &Q) -> BTreeResult<Option<V>>
-  where
-    Q: BTreeQuery<K> + ?Sized,
-    K: Borrow<Q>,
-  {
+  async fn get(&self, key: &K) -> BTreeResult<Option<V>> {
     let db = self.db.begin_read().map_err(BTreeError::custom)?;
 
     let table = db
-      .open_table(table_definition(&self.name))
+      .open_table(table_definition::<K, V>(&self.name))
       .map_err(BTreeError::custom)?;
 
-    let key: K = query.to_key();
-
     let guard = match table
-      .get(key.encode().map_err(BTreeError::custom)?.as_slice())
+      .get(Key::new(key.clone()))
       .map_err(BTreeError::custom)?
     {
       Some(value) => value,
       None => return Ok(None),
     };
 
-    let value = RedbValue::decode(guard.value()).map_err(BTreeError::custom)?;
+    let value: V = guard.value().into_inner();
 
     Ok(Some(value))
   }
 
-  fn range<Q, R>(&self, range: R) -> impl Stream<Item = BTreeResult<(K, V)>>
+  fn range<R>(&self, range: R) -> impl Stream<Item = BTreeResult<(K, V)>>
   where
-    Q: BTreeQuery<K> + ?Sized,
-    K: Borrow<Q>,
-    R: RangeBounds<Q>,
+    R: RangeBounds<K>,
   {
     stream! {
         let db = self.db.begin_read().map_err(BTreeError::custom)?;
         let table = db
-          .open_table(table_definition(&self.name))
+          .open_table(table_definition::<K, V>(&self.name))
           .map_err(BTreeError::custom)?;
 
-        let mapped_range = map_range(range).map_err(BTreeError::custom)?;
-        let mapped_range_bytes = range_as_ref(&mapped_range);
-        let results = table.range(mapped_range_bytes).map_err(BTreeError::custom)?;
+        let mapped_range = Key::range(range);
+        let results = table.range(mapped_range).map_err(BTreeError::custom)?;
 
         for result in results {
             let (guard_key, guard_value) = result.map_err(BTreeError::custom)?;
-            let key: K = K::decode(guard_key.value()).map_err(BTreeError::custom)?;
-            let value: V = V::decode(guard_value.value()).map_err(BTreeError::custom)?;
+            let key: K = guard_key.value().into_inner();
+            let value: V = guard_value.value().into_inner();
             yield Ok((key, value));
         }
     }
@@ -114,10 +106,14 @@ mod test {
     path
   }
 
-  fn create_tree<K, V>(table_name: &str) -> RedbBTree<K, V> {
+  fn create_tree<K, V>(table_name: &str) -> RedbBTree<K, V>
+  where
+    K: RedbKey,
+    V: RedbValue,
+  {
     let db = Database::create(tmp_path()).expect("failed to create database");
     let tx = db.begin_write().expect("failed to begin transaction");
-    tx.open_table(table_definition(table_name))
+    tx.open_table(table_definition::<K, V>(table_name))
       .expect("failed to create table");
     tx.commit().expect("failed to commit transaction");
     RedbBTree::<K, V>::new(Arc::new(db), table_name)
@@ -270,7 +266,7 @@ mod test {
     block_on(async {
       let tree = create_tree::<String, String>("ctx_empty_range");
 
-      let results = tree.range::<str, _>(..).collect::<Vec<_>>().await;
+      let results = tree.range(..).collect::<Vec<_>>().await;
 
       for result in results {
         let (_, _) = result.expect("range error");

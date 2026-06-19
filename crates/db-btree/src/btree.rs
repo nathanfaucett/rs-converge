@@ -3,7 +3,7 @@ use alloc::string::{String, ToString};
 
 use futures::Stream;
 
-use core::{borrow::Borrow, ops::RangeBounds};
+use core::ops::RangeBounds;
 
 use thiserror::Error;
 
@@ -50,42 +50,15 @@ pub trait BTreeKey: BTreeValue + Ord {}
 
 impl<T> BTreeKey for T where T: BTreeValue + Ord {}
 
-pub trait BTreeQuery<K>: Ord
-where
-  K: BTreeKey + Borrow<Self>,
-{
-  fn to_key(&self) -> K;
-}
-
-impl<T> BTreeQuery<T> for T
-where
-  T: BTreeKey + Borrow<T> + Clone,
-{
-  fn to_key(&self) -> T {
-    self.borrow().clone()
-  }
-}
-
-impl BTreeQuery<String> for str {
-  fn to_key(&self) -> String {
-    self.to_string()
-  }
-}
-
 pub trait BTreeReadExecutor<K, V>
 where
   K: BTreeKey,
   V: BTreeValue,
 {
-  fn get<Q>(&self, key: &Q) -> impl Future<Output = BTreeResult<Option<V>>>
+  fn get(&self, key: &K) -> impl Future<Output = BTreeResult<Option<V>>>;
+  fn range<R>(&self, range: R) -> impl Stream<Item = BTreeResult<(K, V)>>
   where
-    Q: BTreeQuery<K> + ?Sized,
-    K: Borrow<Q>;
-  fn range<Q, R>(&self, range: R) -> impl Stream<Item = BTreeResult<(K, V)>>
-  where
-    Q: BTreeQuery<K> + ?Sized,
-    K: Borrow<Q>,
-    R: RangeBounds<Q>;
+    R: RangeBounds<K>;
 }
 
 pub trait BTreeWriteExecutor<K, V>: BTreeReadExecutor<K, V>
@@ -94,18 +67,13 @@ where
   V: BTreeValue,
 {
   fn insert(&mut self, key: K, value: V) -> impl Future<Output = BTreeResult<()>>;
-
   fn update<F>(&mut self, key: K, update_fn: F) -> impl Future<Output = BTreeResult<Option<()>>>
   where
     F: FnOnce(&mut V) -> BTreeResult<()>;
-
-  fn remove<Q>(&mut self, key: &Q) -> impl Future<Output = BTreeResult<Option<V>>>
-  where
-    Q: BTreeQuery<K> + ?Sized,
-    K: Borrow<Q>;
+  fn remove(&mut self, key: &K) -> impl Future<Output = BTreeResult<Option<V>>>;
 }
 
-pub trait BTreeTransaction<K, V>: BTreeWriteExecutor<K, V>
+pub trait BTreeTransaction<K, V>: BTreeWriteExecutor<K, V> + Send
 where
   K: BTreeKey,
   V: BTreeValue,

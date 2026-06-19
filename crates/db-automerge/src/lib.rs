@@ -1,7 +1,6 @@
 mod automerge_tree;
 mod compaction;
 mod document_change_key;
-mod document_change_key_borrow;
 mod document_type;
 mod reconstruction;
 mod transaction;
