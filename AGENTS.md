@@ -3,7 +3,6 @@
 ## Patterns & Conventions
 
 - Default to `no_std`; enable `std` only when required (IO, threading, async runtimes).
-- In `no_std` crates, use `hashbrown` for hash maps and BTree maps/sets.
 - Group Rust imports by namespace and order: std/core/alloc → external → internal (`crate`, `super`).
 - Prefer explicit imports and minimal dependencies.
 - Avoid glob imports and hard-coded absolute paths.

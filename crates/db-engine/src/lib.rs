@@ -8,6 +8,10 @@ mod catalog;
 mod engine;
 mod executor;
 mod kernel;
+#[cfg(feature = "redb")]
+mod redb;
 
 pub use engine::{Engine, EngineError, EngineResult};
 pub use kernel::EngineKernel;
+#[cfg(feature = "redb")]
+pub use redb::RedbEngineKernel;
