@@ -98,7 +98,7 @@ where
     Self: 'a;
 
   fn fixed_width() -> Option<usize> {
-    K::fixed_width().map(|x| x + 1)
+    K::fixed_width()
   }
 
   fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
