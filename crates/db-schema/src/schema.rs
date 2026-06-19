@@ -16,6 +16,7 @@ pub type ColumnSchemaIndex = u32;
 pub struct ColumnSchema {
   pub name: String,
   pub r#type: ValueType,
+  pub primary_key: bool,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -40,5 +41,4 @@ pub struct IndexSchema {
 pub struct TableSchema {
   pub name: String,
   pub columns: Vec<ColumnSchema>,
-  pub primary_key: Vec<ColumnSchemaIndex>,
 }

@@ -45,6 +45,7 @@ pub enum QueryJoinKind {
 pub struct QueryJoin {
   pub kind: QueryJoinKind,
   pub table: String,
+  pub alias: Option<String>,
   pub on: QueryExpr,
 }
 
@@ -66,7 +67,7 @@ pub enum QuerySortDirection {
   tsify(into_wasm_abi, from_wasm_abi)
 )]
 pub struct QueryOrderBy {
-  pub expr: QueryColumn,
+  pub by: QueryColumn,
   pub direction: QuerySortDirection,
 }
 
@@ -151,6 +152,7 @@ pub enum QueryAggregate {
 )]
 pub struct QueryFrom {
   pub table: String,
+  pub alias: Option<String>,
   pub joins: Vec<QueryJoin>,
 }
 
@@ -201,7 +203,7 @@ impl QueryResult {
   }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Default, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(
   feature = "wasm",
   derive(tsify::Tsify),

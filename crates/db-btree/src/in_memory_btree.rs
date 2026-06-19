@@ -54,11 +54,11 @@ where
   where
     R: RangeBounds<K>,
   {
-    stream! {
+    stream!({
       for (key, value) in self.inner.read().await.range(range) {
         yield Ok((key.clone(), value.clone()));
       }
-    }
+    })
   }
 }
 
@@ -86,6 +86,21 @@ where
 
   async fn remove(&mut self, key: &K) -> BTreeResult<Option<V>> {
     Ok(self.inner.write().await.remove(key.borrow()))
+  }
+
+  fn remove_range<R>(&mut self, range: R) -> impl Stream<Item = BTreeResult<(K, V)>>
+  where
+    R: RangeBounds<K>,
+  {
+    stream!({
+      let mut guard = self.inner.write().await;
+      let keys_to_remove: Vec<K> = guard.range(range).map(|(k, _)| k.clone()).collect();
+      for key in keys_to_remove {
+        if let Some(value) = guard.remove(&key) {
+          yield Ok((key, value));
+        }
+      }
+    })
   }
 }
 
@@ -291,13 +306,13 @@ where
   where
     R: RangeBounds<K>,
   {
-    stream! {
+    stream!({
       let merged = self.patch.range(&*self.inner.read().await, range);
 
       for (key, value) in merged {
         yield Ok((key, value));
       }
-    }
+    })
   }
 }
 
@@ -331,6 +346,20 @@ where
 
   async fn remove(&mut self, key: &K) -> BTreeResult<Option<V>> {
     Ok(self.patch.remove(&*self.inner.read().await, key))
+  }
+
+  fn remove_range<R>(&mut self, range: R) -> impl Stream<Item = BTreeResult<(K, V)>>
+  where
+    R: RangeBounds<K>,
+  {
+    stream!({
+      let merged = self.patch.range(&*self.inner.read().await, range);
+
+      for (key, value) in merged {
+        self.patch.remove(&*self.inner.read().await, &key);
+        yield Ok((key, value));
+      }
+    })
   }
 }
 

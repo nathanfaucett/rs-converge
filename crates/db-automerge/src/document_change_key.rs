@@ -48,7 +48,11 @@ impl DocumentChangeKey {
     Uuid::new_v5(&Uuid::NAMESPACE_DNS, id)
   }
 
-  pub fn id(&self) -> &[u8] {
+  pub fn id(&self) -> &DocumentId {
+    &self.id
+  }
+
+  pub fn as_slice(&self) -> &[u8] {
     &self.id
   }
 

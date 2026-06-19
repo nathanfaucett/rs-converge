@@ -70,7 +70,11 @@ where
   fn update<F>(&mut self, key: K, update_fn: F) -> impl Future<Output = BTreeResult<Option<()>>>
   where
     F: FnOnce(&mut V) -> BTreeResult<()>;
+
   fn remove(&mut self, key: &K) -> impl Future<Output = BTreeResult<Option<V>>>;
+  fn remove_range<R>(&mut self, range: R) -> impl Stream<Item = BTreeResult<(K, V)>>
+  where
+    R: RangeBounds<K>;
 }
 
 pub trait BTreeTransaction<K, V>: BTreeWriteExecutor<K, V> + Send

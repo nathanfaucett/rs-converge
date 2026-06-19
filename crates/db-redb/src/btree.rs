@@ -58,22 +58,22 @@ where
   where
     R: RangeBounds<K>,
   {
-    stream! {
-        let db = self.db.begin_read().map_err(BTreeError::custom)?;
-        let table = db
-          .open_table(table_definition::<K, V>(&self.name))
-          .map_err(BTreeError::custom)?;
+    stream!({
+      let db = self.db.begin_read().map_err(BTreeError::custom)?;
+      let table = db
+        .open_table(table_definition::<K, V>(&self.name))
+        .map_err(BTreeError::custom)?;
 
-        let mapped_range = Key::range(range);
-        let results = table.range(mapped_range).map_err(BTreeError::custom)?;
+      let mapped_range = Key::range(range);
+      let results = table.range(mapped_range).map_err(BTreeError::custom)?;
 
-        for result in results {
-            let (guard_key, guard_value) = result.map_err(BTreeError::custom)?;
-            let key: K = guard_key.value().into_inner();
-            let value: V = guard_value.value().into_inner();
-            yield Ok((key, value));
-        }
-    }
+      for result in results {
+        let (guard_key, guard_value) = result.map_err(BTreeError::custom)?;
+        let key: K = guard_key.value().into_inner();
+        let value: V = guard_value.value().into_inner();
+        yield Ok((key, value));
+      }
+    })
   }
 }
 

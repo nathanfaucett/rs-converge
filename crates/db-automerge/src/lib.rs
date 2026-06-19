@@ -4,6 +4,7 @@ mod document_change_key;
 mod document_type;
 mod reconstruction;
 mod transaction;
+mod util;
 
 pub use automerge_tree::{AutomergeBTree, AutomergeBTreeInner};
 pub use compaction::{CompactionPolicy, ThresholdPolicy, hash_hashes, hash_heads, run_compaction};

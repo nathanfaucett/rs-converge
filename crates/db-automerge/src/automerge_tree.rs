@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use async_lock::RwLock;
 use async_stream::stream;
-use automerge::{ActorId, AutoCommit};
+use automerge::AutoCommit;
 use futures::{Stream, StreamExt, pin_mut};
 
 use db_btree::{
@@ -11,12 +11,11 @@ use db_btree::{
 };
 
 use crate::{
-  AutomergeBTreeTransaction, CompactionPolicy, DocumentChangeKey, ThresholdPolicy,
+  AutomergeBTreeTransaction, DocumentChangeKey, ThresholdPolicy,
   document_change_key::DocumentId,
-  hash_heads,
-  reconstruction::{ReconstructedDocument, reconstruct_document},
-  run_compaction,
+  reconstruction::ReconstructedDocument,
   transaction::AutomergeBTreeTransactionInner,
+  util::{tx_get_document, tx_insert_snapshot, tx_remove_document, tx_update},
 };
 
 #[derive(Clone)]
@@ -43,117 +42,6 @@ impl<B> AutomergeBTreeInner<B> {
   }
 }
 
-async fn tx_get_document<T>(
-  tx: &mut T,
-  doc_id: &DocumentId,
-  allow_compaction: bool,
-  policy: &ThresholdPolicy,
-) -> BTreeResult<Option<(AutoCommit, bool)>>
-where
-  T: BTreeTransaction<DocumentChangeKey, Vec<u8>>,
-{
-  let reconstructed_document = reconstruct_document(tx, doc_id).await?;
-
-  let mut doc = match reconstructed_document.doc {
-    Some(doc) => doc,
-    None => return Ok(None),
-  };
-
-  let compacted = if allow_compaction {
-    if policy.should_compact(
-      reconstructed_document.deltas,
-      reconstructed_document.bytes_size,
-    ) {
-      run_compaction(tx, &reconstructed_document.id, &mut doc).await?;
-      true
-    } else {
-      false
-    }
-  } else {
-    false
-  };
-
-  Ok(Some((doc, compacted)))
-}
-
-async fn tx_remove_document<T>(tx: &mut T, doc_id: &DocumentId) -> BTreeResult<Option<AutoCommit>>
-where
-  T: BTreeTransaction<DocumentChangeKey, Vec<u8>>,
-{
-  let (keys_to_remove, reconstructed_document) = {
-    let range = DocumentChangeKey::range_for(doc_id);
-    let stream = tx.range(range);
-    pin_mut!(stream);
-
-    let mut reconstructed_document_option = None;
-
-    let mut results = Vec::new();
-    while let Some(item) = stream.next().await {
-      let (key, data) = item?;
-
-      let reconstructed_document =
-        reconstructed_document_option.get_or_insert_with(|| ReconstructedDocument::new(key.id()));
-
-      reconstructed_document.apply(&key, &data)?;
-      results.push(key);
-    }
-
-    (
-      results,
-      reconstructed_document_option
-        .ok_or_else(|| BTreeError::custom("Document not found".to_string()))?,
-    )
-  };
-
-  for key in keys_to_remove {
-    tx.remove(&key).await?;
-  }
-
-  Ok(reconstructed_document.doc)
-}
-
-async fn tx_insert_snapshot<B>(
-  tx: &mut B::Transaction,
-  key: DocumentId,
-  mut value: AutoCommit,
-) -> BTreeResult<()>
-where
-  B: BTree<DocumentChangeKey, Vec<u8>>,
-{
-  let key = DocumentChangeKey::new_snapshot(key, hash_heads(value.get_heads()));
-  tx.insert(key, value.save()).await?;
-  Ok(())
-}
-
-async fn tx_update<T, F>(
-  tx: &mut T,
-  doc_id: DocumentId,
-  update_fn: F,
-  policy: &ThresholdPolicy,
-) -> BTreeResult<()>
-where
-  T: BTreeTransaction<DocumentChangeKey, Vec<u8>>,
-  F: FnOnce(&mut AutoCommit) -> BTreeResult<()>,
-{
-  let mut current_doc = tx_get_document(tx, &doc_id, false, policy)
-    .await?
-    .map(|(doc, _)| doc)
-    .unwrap_or_else(|| {
-      AutoCommit::new().with_actor(ActorId::from(
-        DocumentChangeKey::id_to_uuid(doc_id.as_slice()).as_bytes(),
-      ))
-    });
-
-  update_fn(&mut current_doc)?;
-
-  let key = DocumentChangeKey::new_incremental(doc_id, hash_heads(current_doc.get_heads()));
-  let delta = current_doc.save_incremental();
-
-  tx.insert(key, delta).await?;
-
-  Ok(())
-}
-
 impl<B> BTreeReadExecutor<DocumentId, AutoCommit> for AutomergeBTreeInner<B>
 where
   B: BTree<DocumentChangeKey, Vec<u8>>,
@@ -175,7 +63,7 @@ where
   where
     R: RangeBounds<DocumentId>,
   {
-    stream! {
+    stream!({
       let inner_range = DocumentChangeKey::map_document_id_range(range);
 
       let inner_guard = self.inner.read().await;
@@ -188,29 +76,30 @@ where
         let (k, v) = item?;
 
         if let Some(mut doc) = reconstructed_document_option.take() {
-            if doc.same_id(&k) {
-                reconstructed_document_option = Some(doc);
-            } else {
-                if let Some(completed_doc) = doc.doc.take() {
-                    yield Ok((doc.id, completed_doc));
-                }
+          if doc.same_id(&k) {
+            reconstructed_document_option = Some(doc);
+          } else {
+            if let Some(completed_doc) = doc.doc.take() {
+              yield Ok((doc.id, completed_doc));
             }
+          }
         }
 
         let reconstructed_document = reconstructed_document_option
-            .get_or_insert_with(|| ReconstructedDocument::new(k.id()));
+          .get_or_insert_with(|| ReconstructedDocument::new(k.id().clone()));
 
         if let Err(e) = reconstructed_document.apply(&k, &v) {
-            yield Err(BTreeError::Custom(e.to_string()));
-            continue;
+          yield Err(BTreeError::Custom(e.to_string()));
+          continue;
         }
       }
 
       if let Some(mut doc) = reconstructed_document_option
-          && let Some(completed_doc) = doc.doc.take() {
-              yield Ok((doc.id, completed_doc));
-          }
-    }
+        && let Some(completed_doc) = doc.doc.take()
+      {
+        yield Ok((doc.id, completed_doc));
+      }
+    })
   }
 }
 
@@ -221,7 +110,7 @@ where
   async fn insert(&mut self, key: DocumentId, value: AutoCommit) -> BTreeResult<()> {
     let inner_guard = self.inner.read().await;
     let mut tx = inner_guard.transaction().await?;
-    tx_insert_snapshot::<B>(&mut tx, key, value).await?;
+    tx_insert_snapshot(&mut tx, key, value).await?;
     tx.commit().await
   }
 
@@ -243,6 +132,61 @@ where
     tx.commit().await?;
     Ok(result)
   }
+
+  fn remove_range<R>(
+    &mut self,
+    range: R,
+  ) -> impl Stream<Item = BTreeResult<(DocumentId, AutoCommit)>>
+  where
+    R: RangeBounds<DocumentId>,
+  {
+    stream!({
+      let inner_range = DocumentChangeKey::map_document_id_range(range);
+
+      let inner_guard = self.inner.write().await;
+      let inner_stream = inner_guard.range(inner_range);
+      pin_mut!(inner_stream);
+
+      let mut reconstructed_document_option: Option<ReconstructedDocument> = None;
+      let mut keys_to_remove = Vec::new();
+
+      while let Some(item) = inner_stream.next().await {
+        let (k, v) = item?;
+
+        keys_to_remove.push(k.clone());
+
+        if let Some(mut doc) = reconstructed_document_option.take() {
+          if doc.same_id(&k) {
+            reconstructed_document_option = Some(doc);
+          } else {
+            if let Some(completed_doc) = doc.doc.take() {
+              yield Ok((doc.id, completed_doc));
+            }
+          }
+        }
+
+        let reconstructed_document = reconstructed_document_option
+          .get_or_insert_with(|| ReconstructedDocument::new(k.id().clone()));
+
+        if let Err(e) = reconstructed_document.apply(&k, &v) {
+          yield Err(BTreeError::Custom(e.to_string()));
+          continue;
+        }
+      }
+
+      if let Some(mut doc) = reconstructed_document_option
+        && let Some(completed_doc) = doc.doc.take()
+      {
+        yield Ok((doc.id, completed_doc));
+      }
+
+      let mut tx = inner_guard.transaction().await?;
+      for doc_id in keys_to_remove {
+        tx.remove(&doc_id).await?;
+      }
+      tx.commit().await?;
+    })
+  }
 }
 
 impl<B> BTree<DocumentId, AutoCommit> for AutomergeBTreeInner<B>
@@ -254,7 +198,10 @@ where
   async fn transaction(&self) -> BTreeResult<Self::Transaction> {
     let inner_guard = self.inner.read().await;
     let inner_tx = inner_guard.transaction().await?;
-    Ok(AutomergeBTreeTransactionInner::new(inner_tx))
+    Ok(AutomergeBTreeTransactionInner::new(
+      inner_tx,
+      self.policy.clone(),
+    ))
   }
 }
 
@@ -334,6 +281,27 @@ where
     let value = tx.remove(key).await?;
     tx.commit().await?;
     Ok(value)
+  }
+
+  fn remove_range<R>(
+    &mut self,
+    range: R,
+  ) -> impl Stream<Item = BTreeResult<(DocumentId, AutoCommit)>>
+  where
+    R: RangeBounds<DocumentId>,
+  {
+    stream!({
+      let mut tx = self.inner.transaction().await?;
+      {
+        let inner_stream = tx.remove_range(range);
+        pin_mut!(inner_stream);
+
+        while let Some(item) = inner_stream.next().await {
+          yield item;
+        }
+      }
+      tx.commit().await?;
+    })
   }
 }
 

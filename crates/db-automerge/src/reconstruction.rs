@@ -13,9 +13,9 @@ pub struct ReconstructedDocument {
 }
 
 impl ReconstructedDocument {
-  pub fn new(id: &[u8]) -> Self {
+  pub fn new(id: DocumentId) -> Self {
     Self {
-      id: id.to_vec(),
+      id,
       doc: None,
       deltas: 0,
       bytes_size: 0,
@@ -23,7 +23,7 @@ impl ReconstructedDocument {
   }
 
   pub fn same_id(&self, key: &DocumentChangeKey) -> bool {
-    self.id == key.id()
+    &self.id == key.id()
   }
 
   pub fn apply(&mut self, key: &DocumentChangeKey, data: &[u8]) -> BTreeResult<()> {
@@ -64,8 +64,8 @@ where
   while let Some(item) = stream.next().await {
     let (key, data) = item?;
 
-    let reconstructed_document =
-      reconstructed_document_option.get_or_insert_with(|| ReconstructedDocument::new(key.id()));
+    let reconstructed_document = reconstructed_document_option
+      .get_or_insert_with(|| ReconstructedDocument::new(key.id().clone()));
 
     reconstructed_document.apply(&key, &data)?;
   }

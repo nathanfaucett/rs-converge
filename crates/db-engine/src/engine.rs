@@ -4,15 +4,31 @@ use alloc::{
   sync::Arc,
   vec::Vec,
 };
+use db_schema::{ColumnSchema, ColumnSchemaIndex, IndexSchema, TableSchema};
+use futures::{StreamExt, pin_mut};
 #[cfg(feature = "std")]
 use std::sync::Arc;
 
 use thiserror::Error;
 
-use db_btree::BTreeError;
-use db_query::{QueryParams, QueryResult, Statement, TranslateError, Translator};
+use db_btree::{BTree, BTreeError, BTreeTransaction, BTreeWriteExecutor};
+use db_query::{
+  Query, QueryColumn, QueryExpr, QueryExprValue, QueryFrom, QueryJoin, QueryJoinKind, QueryOrderBy,
+  QueryParams, QueryResult, QuerySelect, QuerySortDirection, Statement, TranslateError, Translator,
+};
 
-use crate::kernel::EngineKernel;
+use crate::{
+  catalog::{
+    ENGINE_INDEX_FIELD_INDEX_NAME, ENGINE_INDEX_FIELD_TABLE_NAME, ENGINE_INDEX_FIELD_UNIQUE,
+    ENGINE_INDEX_FIELDS, ENGINE_INDEX_FIELDS_FIELD_COLUMN_INDEX,
+    ENGINE_INDEX_FIELDS_FIELD_FIELD_ORDER, ENGINE_INDEX_FIELDS_FIELD_INDEX_NAME, ENGINE_INDICES,
+    ENGINE_TABLE_FIELD_TABLE_NAME, ENGINE_TABLE_FIELDS, ENGINE_TABLE_FIELDS_FIELD_COLUMN_INDEX,
+    ENGINE_TABLE_FIELDS_FIELD_COLUMN_NAME, ENGINE_TABLE_FIELDS_FIELD_PRIMARY_KEY,
+    ENGINE_TABLE_FIELDS_FIELD_TABLE_NAME, ENGINE_TABLE_FIELDS_FIELD_VALUE_TYPE, ENGINE_TABLES,
+  },
+  executor::execute_statement,
+  kernel::{EngineKernel, EngineKernelExecutor, EngineKernelTransaction},
+};
 
 #[derive(Error, Debug)]
 pub enum EngineError {
@@ -31,6 +47,7 @@ pub enum EngineError {
 
 pub type EngineResult<T> = Result<T, EngineError>;
 
+#[derive(Clone)]
 pub struct Engine<K> {
   pub(crate) kernel: Arc<K>,
 }
@@ -53,6 +70,268 @@ impl<K> Engine<K>
 where
   K: EngineKernel,
 {
+  pub async fn index_schema(&self, name: &str) -> EngineResult<IndexSchema> {
+    let mut query_results = self
+      .execute(vec![Statement::Query(Query::Select(QuerySelect {
+        from: QueryFrom {
+          table: ENGINE_INDICES.to_string(),
+          alias: None,
+          joins: vec![QueryJoin {
+            kind: QueryJoinKind::Inner,
+            table: ENGINE_INDEX_FIELDS.to_string(),
+            alias: None,
+            on: QueryExpr::Equals(
+              Box::new(QueryExpr::Value(QueryExprValue::Column(QueryColumn::new(
+                ENGINE_INDEX_FIELDS.to_string(),
+                ENGINE_INDEX_FIELDS_FIELD_INDEX_NAME.to_string(),
+              )))),
+              Box::new(QueryExpr::Value(QueryExprValue::Column(QueryColumn::new(
+                ENGINE_INDICES.to_string(),
+                ENGINE_INDEX_FIELD_INDEX_NAME.to_string(),
+              )))),
+            ),
+          }],
+        },
+        predicate: Some(QueryExpr::Equals(
+          Box::new(QueryExpr::Value(QueryExprValue::Column(QueryColumn::new(
+            ENGINE_INDICES.to_string(),
+            ENGINE_INDEX_FIELD_TABLE_NAME.to_string(),
+          )))),
+          Box::new(QueryExpr::Value(QueryExprValue::Value(name.into()))),
+        )),
+        projection: vec![
+          QueryColumn::new(
+            ENGINE_INDICES.to_string(),
+            ENGINE_INDEX_FIELD_TABLE_NAME.to_string(),
+          ),
+          QueryColumn::new(
+            ENGINE_INDICES.to_string(),
+            ENGINE_INDEX_FIELD_UNIQUE.to_string(),
+          ),
+          QueryColumn::new(
+            ENGINE_INDEX_FIELDS.to_string(),
+            ENGINE_INDEX_FIELDS_FIELD_COLUMN_INDEX.to_string(),
+          ),
+        ],
+        order_by: vec![QueryOrderBy {
+          by: QueryColumn::new(
+            ENGINE_INDEX_FIELDS.to_string(),
+            ENGINE_INDEX_FIELDS_FIELD_FIELD_ORDER.to_string(),
+          ),
+          direction: QuerySortDirection::Asc,
+        }],
+        ..Default::default()
+      }))])
+      .await?;
+
+    if query_results.len() != 1 {
+      return Err(EngineError::InvalidQuery(
+        "Expected exactly one query result for index schema",
+      ));
+    }
+
+    let query_result = query_results.remove(0);
+
+    let mut index_schema = IndexSchema {
+      name: name.to_string(),
+      table_name: String::new(),
+      column_indices: Vec::with_capacity(query_result.rows.len()),
+      unique: false,
+    };
+
+    for row in query_result.rows {
+      let table_name = row[0].to_text().ok_or({
+        EngineError::InvalidQuery("Expected table_name to be text in index schema query result")
+      })?;
+      let unique = row[1].to_bool().ok_or({
+        EngineError::InvalidQuery("Expected unique to be bool in index schema query result")
+      })?;
+      let column_index = row[3].to_integer().ok_or({
+        EngineError::InvalidQuery("Expected field_order to be integer in index schema query result")
+      })?;
+
+      if index_schema.table_name.is_empty() {
+        index_schema.table_name = table_name;
+        index_schema.unique = unique;
+      }
+
+      index_schema
+        .column_indices
+        .push(column_index as ColumnSchemaIndex);
+    }
+
+    Ok(index_schema)
+  }
+
+  pub async fn table_schema(&self, name: &str) -> EngineResult<TableSchema> {
+    let mut query_results = self
+      .execute(vec![Statement::Query(Query::Select(QuerySelect {
+        from: QueryFrom {
+          table: ENGINE_TABLES.to_string(),
+          alias: None,
+          joins: vec![QueryJoin {
+            kind: QueryJoinKind::Inner,
+            table: ENGINE_TABLE_FIELDS.to_string(),
+            alias: None,
+            on: QueryExpr::Equals(
+              Box::new(QueryExpr::Value(QueryExprValue::Column(QueryColumn::new(
+                ENGINE_TABLES.to_string(),
+                ENGINE_TABLE_FIELDS_FIELD_TABLE_NAME.to_string(),
+              )))),
+              Box::new(QueryExpr::Value(QueryExprValue::Column(QueryColumn::new(
+                ENGINE_TABLE_FIELDS.to_string(),
+                ENGINE_TABLE_FIELD_TABLE_NAME.to_string(),
+              )))),
+            ),
+          }],
+        },
+        predicate: Some(QueryExpr::Equals(
+          Box::new(QueryExpr::Value(QueryExprValue::Column(QueryColumn::new(
+            ENGINE_TABLES.to_string(),
+            ENGINE_TABLE_FIELD_TABLE_NAME.to_string(),
+          )))),
+          Box::new(QueryExpr::Value(QueryExprValue::Value(name.into()))),
+        )),
+        projection: vec![
+          QueryColumn::new(
+            ENGINE_TABLES.to_string(),
+            ENGINE_TABLE_FIELD_TABLE_NAME.to_string(),
+          ),
+          QueryColumn::new(
+            ENGINE_TABLE_FIELDS.to_string(),
+            ENGINE_TABLE_FIELDS_FIELD_COLUMN_NAME.to_string(),
+          ),
+          QueryColumn::new(
+            ENGINE_TABLE_FIELDS.to_string(),
+            ENGINE_TABLE_FIELDS_FIELD_VALUE_TYPE.to_string(),
+          ),
+          QueryColumn::new(
+            ENGINE_TABLE_FIELDS.to_string(),
+            ENGINE_TABLE_FIELDS_FIELD_PRIMARY_KEY.to_string(),
+          ),
+        ],
+        order_by: vec![QueryOrderBy {
+          by: QueryColumn::new(
+            ENGINE_TABLE_FIELDS.to_string(),
+            ENGINE_TABLE_FIELDS_FIELD_COLUMN_INDEX.to_string(),
+          ),
+          direction: QuerySortDirection::Asc,
+        }],
+        ..Default::default()
+      }))])
+      .await?;
+
+    if query_results.len() != 1 {
+      return Err(EngineError::InvalidQuery(
+        "Expected exactly one query result for index schema",
+      ));
+    }
+
+    let query_result = query_results.remove(0);
+
+    let mut table_schema = TableSchema {
+      name: name.to_string(),
+      columns: Vec::with_capacity(query_result.rows.len()),
+    };
+
+    for row in query_result.rows {
+      let table_name = row[0].to_text().ok_or({
+        EngineError::InvalidQuery("Expected table_name to be text in index schema query result")
+      })?;
+      let column_name = row[1].to_text().ok_or({
+        EngineError::InvalidQuery("Expected column_name to be text in index schema query result")
+      })?;
+      let value_type = row[2].to_type().ok_or({
+        EngineError::InvalidQuery(
+          "Expected value_type to be ValueType in index schema query result",
+        )
+      })?;
+      let primary_key = row[3].as_bool().ok_or({
+        EngineError::InvalidQuery("Expected primary_key to be bool in index schema query result")
+      })?;
+
+      if table_schema.name.is_empty() {
+        table_schema.name = table_name;
+      }
+
+      table_schema.columns.push(ColumnSchema {
+        name: column_name,
+        r#type: value_type,
+        primary_key,
+      });
+    }
+
+    Ok(table_schema)
+  }
+
+  pub async fn create_table(&self, table_schema: TableSchema) -> EngineResult<()> {
+    let etx = self.kernel.transaction().await?;
+    {
+      let tables = etx.table(ENGINE_TABLES).await?;
+      let mut tx = tables.transaction().await?;
+
+      tx.insert(
+        vec![table_schema.name.clone().into()],
+        vec![table_schema.name.clone().into()],
+      )
+      .await?;
+
+      tx.commit().await?;
+    }
+    {
+      let table_fields = etx.table(ENGINE_TABLE_FIELDS).await?;
+      let mut tx = table_fields.transaction().await?;
+
+      for (column_index, column_schema) in table_schema.columns.iter().enumerate() {
+        tx.insert(
+          vec![
+            table_schema.name.clone().into(),
+            column_schema.name.clone().into(),
+          ],
+          vec![
+            table_schema.name.clone().into(),
+            column_schema.name.clone().into(),
+            column_schema.r#type.into(),
+            (column_index as i64).into(),
+            column_schema.primary_key.into(),
+          ],
+        )
+        .await?;
+      }
+
+      tx.commit().await?;
+    }
+    etx.commit().await?;
+    Ok(())
+  }
+
+  pub async fn drop_table(&self, table_name: &str) -> EngineResult<()> {
+    let etx = self.kernel.transaction().await?;
+    {
+      let tables = etx.table(ENGINE_TABLES).await?;
+      let mut tx = tables.transaction().await?;
+
+      tx.remove(&vec![table_name.into()]).await?;
+
+      tx.commit().await?;
+    }
+    {
+      let table_fields = etx.table(ENGINE_TABLE_FIELDS).await?;
+      let mut tx = table_fields.transaction().await?;
+      {
+        let range = tx.remove_range(vec![table_name.into()]..);
+        pin_mut!(range);
+
+        while let Some(item) = range.next().await {
+          let _ = item?;
+        }
+      }
+      tx.commit().await?;
+    }
+    etx.commit().await?;
+    Ok(())
+  }
+
   pub async fn translate_and_execute_with_params<T>(
     &self,
     query: &str,
@@ -79,6 +358,6 @@ where
   }
 
   pub async fn execute(&self, statements: Vec<Statement>) -> EngineResult<Vec<QueryResult>> {
-    crate::executor::execute_statement(self, statements).await
+    execute_statement(self, statements).await
   }
 }

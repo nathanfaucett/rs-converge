@@ -167,8 +167,11 @@ fn translate_from(from: &[TableWithJoins]) -> TranslateResult<QueryFrom> {
   }
 
   let twj = &from[0];
-  let table = match &twj.relation {
-    TableFactor::Table { name, .. } => object_name_to_string(name)?,
+  let (table, alias) = match &twj.relation {
+    TableFactor::Table { name, alias, .. } => (
+      object_name_to_string(name)?,
+      alias.as_ref().map(|a| a.name.value.to_owned()),
+    ),
     _ => {
       return Err(TranslateError::custom(
         "Only simple table references supported in FROM",
@@ -181,12 +184,19 @@ fn translate_from(from: &[TableWithJoins]) -> TranslateResult<QueryFrom> {
     joins.push(translate_join(join)?);
   }
 
-  Ok(QueryFrom { table, joins })
+  Ok(QueryFrom {
+    table,
+    alias,
+    joins,
+  })
 }
 
 fn translate_join(join: &Join) -> TranslateResult<QueryJoin> {
-  let table = match &join.relation {
-    TableFactor::Table { name, .. } => object_name_to_string(name)?,
+  let (table, alias) = match &join.relation {
+    TableFactor::Table { name, alias, .. } => (
+      object_name_to_string(name)?,
+      alias.as_ref().map(|a| a.name.value.to_owned()),
+    ),
     _ => {
       return Err(TranslateError::custom(
         "Complex table in JOIN not supported",
@@ -212,7 +222,12 @@ fn translate_join(join: &Join) -> TranslateResult<QueryJoin> {
     _ => return Err(TranslateError::custom("Unsupported JOIN type")),
   };
 
-  Ok(QueryJoin { kind, table, on })
+  Ok(QueryJoin {
+    kind,
+    table,
+    alias,
+    on,
+  })
 }
 
 fn parse_join_constraint(constraint: &JoinConstraint) -> TranslateResult<QueryExpr> {
@@ -392,6 +407,7 @@ fn translate_update(
   Ok(Statement::Query(Query::Update(QueryUpdate {
     from: QueryFrom {
       table,
+      alias: None,
       joins: vec![], // TODO: handle joins in UPDATE
     },
     assignments,
@@ -419,6 +435,7 @@ fn translate_delete(
   Ok(Statement::Query(Query::Delete(QueryDelete {
     from: QueryFrom {
       table,
+      alias: None,
       joins: vec![], // TODO: handle joins in DELETE
     },
     predicate,
@@ -453,6 +470,10 @@ fn translate_create_table(create_table: ast::CreateTable) -> TranslateResult<Sta
       columns.push(db_schema::ColumnSchema {
         name: col_def.name.value.clone(),
         r#type: translate_column_data_type(&col_def.data_type)?,
+        primary_key: col_def
+          .options
+          .iter()
+          .any(|opt| matches!(opt.option, ast::ColumnOption::PrimaryKey(_))),
       });
     }
     columns
@@ -461,8 +482,6 @@ fn translate_create_table(create_table: ast::CreateTable) -> TranslateResult<Sta
   let schema = TableSchema {
     name: table_name,
     columns,
-    primary_key: vec![],
-    // TODO: extract constraints, indexes, etc.
   };
 
   Ok(Statement::DataDefinition(DataDefinition::CreateTable {

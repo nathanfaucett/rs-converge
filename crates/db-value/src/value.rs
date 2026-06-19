@@ -202,9 +202,20 @@ impl Value {
     }
   }
 
+  pub fn to_type(&self) -> Option<ValueType> {
+    self.as_type().cloned()
+  }
+
   pub fn as_uuid(&self) -> Option<&Uuid> {
     match self {
       Value::Uuid(uuid) => Some(uuid),
+      _ => None,
+    }
+  }
+
+  pub fn to_uuid(&self) -> Option<Uuid> {
+    match self {
+      Value::Uuid(uuid) => Some(*uuid),
       _ => None,
     }
   }
@@ -214,6 +225,10 @@ impl Value {
       Value::Bool(b) => Some(*b),
       _ => None,
     }
+  }
+
+  pub fn to_bool(&self) -> Option<bool> {
+    self.as_bool()
   }
 
   pub fn as_integer(&self) -> Option<i64> {
@@ -230,12 +245,20 @@ impl Value {
     }
   }
 
+  pub fn to_integer(&self) -> Option<i64> {
+    self.as_integer()
+  }
+
   pub fn as_float(&self) -> Option<f64> {
     match self {
       Value::Float(f) => Some(*f),
       Value::Integer(i) => Some(*i as f64),
       _ => None,
     }
+  }
+
+  pub fn to_float(&self) -> Option<f64> {
+    self.as_float()
   }
 
   pub fn as_text(&self) -> Option<&str> {
@@ -245,6 +268,10 @@ impl Value {
     }
   }
 
+  pub fn to_text(&self) -> Option<String> {
+    self.as_text().map(str::to_string)
+  }
+
   pub fn as_blob(&self) -> Option<&[u8]> {
     match self {
       Value::Blob(b) => Some(b.as_slice()),
@@ -252,11 +279,19 @@ impl Value {
     }
   }
 
+  pub fn to_blob(&self) -> Option<Vec<u8>> {
+    self.as_blob().map(|blob| blob.to_vec())
+  }
+
   pub fn as_json(&self) -> Option<&JsonValue> {
     match self {
       Value::Json(j) => Some(j),
       _ => None,
     }
+  }
+
+  pub fn to_json(&self) -> Option<JsonValue> {
+    self.as_json().cloned()
   }
 }
 

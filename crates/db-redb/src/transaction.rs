@@ -58,22 +58,22 @@ where
   where
     R: RangeBounds<K>,
   {
-    stream! {
-        let table = self
-          .tx
-          .open_table(table_definition::<K, V>(&self.name))
-          .map_err(BTreeError::custom)?;
+    stream!({
+      let table = self
+        .tx
+        .open_table(table_definition::<K, V>(&self.name))
+        .map_err(BTreeError::custom)?;
 
-        let mapped_range = Key::range(range);
-        let results = table.range(mapped_range).map_err(BTreeError::custom)?;
+      let mapped_range = Key::range(range);
+      let results = table.range(mapped_range).map_err(BTreeError::custom)?;
 
-        for result in results {
-            let (guard_key, guard_value) = result.map_err(BTreeError::custom)?;
-            let key: K = guard_key.value().into_inner();
-            let value: V = guard_value.value().into_inner();
-            yield Ok((key, value));
-        }
-    }
+      for result in results {
+        let (guard_key, guard_value) = result.map_err(BTreeError::custom)?;
+        let key: K = guard_key.value().into_inner();
+        let value: V = guard_value.value().into_inner();
+        yield Ok((key, value));
+      }
+    })
   }
 }
 
@@ -135,6 +135,35 @@ where
     }
 
     Ok(value)
+  }
+
+  fn remove_range<R>(&mut self, range: R) -> impl Stream<Item = BTreeResult<(K, V)>>
+  where
+    R: RangeBounds<K>,
+  {
+    stream!({
+      let mut table = self
+        .tx
+        .open_table(table_definition::<K, V>(&self.name))
+        .map_err(BTreeError::custom)?;
+
+      let mapped_range = Key::range(range);
+      let results = table.range(mapped_range).map_err(BTreeError::custom)?;
+
+      let mut keys_to_remove = Vec::new();
+
+      for result in results {
+        let (guard_key, guard_value) = result.map_err(BTreeError::custom)?;
+        let key: K = guard_key.value().into_inner();
+        let value: V = guard_value.value().into_inner();
+        keys_to_remove.push(Key::new(key.clone()));
+        yield Ok((key, value));
+      }
+
+      for key in keys_to_remove {
+        table.remove(&key).map_err(BTreeError::custom)?;
+      }
+    })
   }
 }
 
