@@ -1,8 +1,5 @@
 #[cfg(not(feature = "std"))]
-use alloc::{
-  string::{String, ToString},
-  vec::Vec,
-};
+use alloc::vec::Vec;
 
 use db_query::{DataDefinition, Query, QueryResult, Statement};
 

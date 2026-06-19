@@ -45,7 +45,6 @@ pub enum QueryJoinKind {
 pub struct QueryJoin {
   pub kind: QueryJoinKind,
   pub table: String,
-  pub alias: Option<String>,
   pub on: QueryExpr,
 }
 
@@ -152,7 +151,6 @@ pub enum QueryAggregate {
 )]
 pub struct QueryFrom {
   pub table: String,
-  pub alias: Option<String>,
   pub joins: Vec<QueryJoin>,
 }
 

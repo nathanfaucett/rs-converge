@@ -1,5 +1,6 @@
 #[cfg(not(feature = "std"))]
 use alloc::{
+  boxed::Box,
   string::{String, ToString},
   sync::Arc,
   vec::Vec,
