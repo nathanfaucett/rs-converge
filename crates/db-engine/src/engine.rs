@@ -76,11 +76,9 @@ where
       .execute(vec![Statement::Query(Query::Select(QuerySelect {
         from: QueryFrom {
           table: ENGINE_INDICES.to_string(),
-          alias: None,
           joins: vec![QueryJoin {
             kind: QueryJoinKind::Inner,
             table: ENGINE_INDEX_FIELDS.to_string(),
-            alias: None,
             on: QueryExpr::Equals(
               Box::new(QueryExpr::Value(QueryExprValue::Column(QueryColumn::new(
                 ENGINE_INDEX_FIELDS.to_string(),
@@ -169,11 +167,9 @@ where
       .execute(vec![Statement::Query(Query::Select(QuerySelect {
         from: QueryFrom {
           table: ENGINE_TABLES.to_string(),
-          alias: None,
           joins: vec![QueryJoin {
             kind: QueryJoinKind::Inner,
             table: ENGINE_TABLE_FIELDS.to_string(),
-            alias: None,
             on: QueryExpr::Equals(
               Box::new(QueryExpr::Value(QueryExprValue::Column(QueryColumn::new(
                 ENGINE_TABLES.to_string(),
