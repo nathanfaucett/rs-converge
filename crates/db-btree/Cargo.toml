@@ -13,7 +13,7 @@ path = "src/lib.rs"
 name = "db_btree"
 
 [features]
-default = ["std", "in-memory"]
+default = ["std"]
 std = [
   "futures/std",
   "async-lock?/std",

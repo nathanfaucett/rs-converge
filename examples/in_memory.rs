@@ -1,6 +1,9 @@
-use db::{engine::Engine, sql_translator::SqlTranslator};
+use db::{
+    engine::{Engine, InMemoryKernel},
+    sql_translator::SqlTranslator,
+};
 
 #[tokio::main]
 async fn main() {
-    db_examples_util::run(Engine::new(unimplemented!()), SqlTranslator).await;
+    db_examples_util::run(Engine::new(InMemoryKernel::new()), SqlTranslator).await;
 }

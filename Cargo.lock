@@ -379,31 +379,13 @@ dependencies = [
 name = "db"
 version = "0.1.0"
 dependencies = [
- "db-automerge",
+ "db-btree-automerge",
+ "db-btree-redb",
  "db-engine",
  "db-examples-util",
- "db-redb",
  "db-sql-translator",
  "redb",
  "tokio",
- "uuid",
-]
-
-[[package]]
-name = "db-automerge"
-version = "0.1.0"
-dependencies = [
- "async-lock",
- "async-stream",
- "automerge 0.9.0",
- "base64",
- "db-btree",
- "db-engine",
- "db-redb",
- "futures",
- "redb",
- "serde",
- "sha2 0.10.9",
  "uuid",
 ]
 
@@ -418,21 +400,46 @@ dependencies = [
 ]
 
 [[package]]
-name = "db-engine"
+name = "db-btree-automerge"
 version = "0.1.0"
 dependencies = [
  "async-lock",
  "async-stream",
- "automerge 0.10.0",
- "autosurgeon",
- "db-automerge",
+ "automerge 0.9.0",
+ "base64",
  "db-btree",
- "db-query",
- "db-redb",
- "db-schema",
+ "futures",
+ "serde",
+ "sha2 0.10.9",
+ "uuid",
+]
+
+[[package]]
+name = "db-btree-redb"
+version = "0.1.0"
+dependencies = [
+ "async-lock",
+ "async-stream",
+ "dashmap",
+ "db-btree",
  "db-value",
  "futures",
  "redb",
+ "serde",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
+name = "db-engine"
+version = "0.1.0"
+dependencies = [
+ "async-lock",
+ "db-btree",
+ "db-query",
+ "db-schema",
+ "db-value",
+ "futures",
  "serde",
  "serde-wasm-bindgen",
  "serde_json",
@@ -446,13 +453,9 @@ dependencies = [
 name = "db-examples-util"
 version = "0.1.0"
 dependencies = [
- "db-btree",
  "db-engine",
  "db-query",
- "db-sql-translator",
- "db-value",
  "rustyline",
- "uuid",
 ]
 
 [[package]]
@@ -467,24 +470,6 @@ dependencies = [
  "tsify",
  "uuid",
  "wasm-bindgen",
-]
-
-[[package]]
-name = "db-redb"
-version = "0.1.0"
-dependencies = [
- "async-lock",
- "async-stream",
- "automerge 0.9.0",
- "dashmap",
- "db-automerge",
- "db-btree",
- "db-value",
- "futures",
- "redb",
- "serde",
- "thiserror 2.0.18",
- "uuid",
 ]
 
 [[package]]

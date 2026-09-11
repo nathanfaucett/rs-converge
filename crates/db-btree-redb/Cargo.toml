@@ -1,5 +1,5 @@
 [package]
-name = "db-redb"
+name = "db-btree-redb"
 version = "0.1.0"
 authors.workspace = true
 edition.workspace = true
@@ -9,20 +9,19 @@ rust-version.workspace = true
 
 [lib]
 path = "src/lib.rs"
-name = "db_redb"
+name = "db_btree_redb"
 
 [features]
-wasm = ["automerge/wasm"]
+wasm = []
 default = []
 
 [dependencies]
 # internal dependencies
 db-btree = { path = "../db-btree", default-features = false }
 db-value = { path = "../db-value", default-features = false }
-db-automerge = { path = "../db-automerge", default-features = false }
 
 async-stream = { version = "0.3", default-features = false, features = [] }
-automerge = { version = "0.9", default-features = false, features = [] }
+
 futures = { version = "0.3", default-features = false, features = [
   "std",
   "executor",

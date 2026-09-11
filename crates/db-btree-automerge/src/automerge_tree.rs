@@ -6,11 +6,11 @@ use async_stream::stream;
 use automerge::AutoCommit;
 use futures::{Stream, StreamExt, pin_mut};
 
-use db_btree::{BTree, BTreeError, BTreeRead, BTreeResult, BTreeTransaction};
+use db_btree::{BTree, BTreeRead, BTreeResult, BTreeTransaction};
 
 use crate::{
     AutomergeBTreeTransaction, DocumentChangeKey, ThresholdPolicy, document_change_key::DocumentId,
-    reconstruction::ReconstructedDocument, util::tx_get_document,
+    reconstruction::reconstruct_documents, util::tx_get_document,
 };
 
 #[derive(Clone)]
@@ -69,37 +69,18 @@ where
             let inner_range = DocumentChangeKey::map_document_id_range(range);
 
             let inner_guard = self.inner.read().await;
-            let inner_stream = inner_guard.range(inner_range);
-            pin_mut!(inner_stream);
+            let documents = reconstruct_documents(inner_guard.range(inner_range));
+            pin_mut!(documents);
 
-            let mut reconstructed_document_option: Option<ReconstructedDocument> = None;
-
-            while let Some(item) = inner_stream.next().await {
-                let (k, v) = item?;
-
-                if let Some(mut doc) = reconstructed_document_option.take() {
-                    if doc.same_id(&k) {
-                        reconstructed_document_option = Some(doc);
-                    } else {
-                        if let Some(completed_doc) = doc.doc.take() {
-                            yield Ok((doc.id, completed_doc));
+            while let Some(document) = documents.next().await {
+                match document.result {
+                    Ok(mut document) => {
+                        if let Some(doc) = document.doc.take() {
+                            yield Ok((document.id, doc));
                         }
                     }
+                    Err(error) => yield Err(error),
                 }
-
-                let reconstructed_document = reconstructed_document_option
-                    .get_or_insert_with(|| ReconstructedDocument::new(k.id().clone()));
-
-                if let Err(e) = reconstructed_document.apply(&k, &v) {
-                    yield Err(BTreeError::Custom(e.to_string()));
-                    continue;
-                }
-            }
-
-            if let Some(mut doc) = reconstructed_document_option
-                && let Some(completed_doc) = doc.doc.take()
-            {
-                yield Ok((doc.id, completed_doc));
             }
         })
     }

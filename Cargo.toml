@@ -1,24 +1,18 @@
 [package]
 name = "db"
-description = "Database built on top of a B-Tree implementation."
-repository = "https://github.com/aicacia/rs-db"
-rust-version = "1.96"
-edition = "2024"
-
-[package.version]
-workspace = true
-
-[package.authors]
-workspace = true
-
-[package.license]
-workspace = true
+version = "0.1.0"
+publish = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
 
 [features]
-default = ["std", "automerge", "redb", "in-memory"]
+default = ["std"]
 std = ["db-sql-translator/std"]
-redb = ["std"]
-automerge = ["std"]
+redb = ["dep:db-btree-redb", "std"]
+automerge = ["dep:db-btree-automerge", "std"]
 in-memory = ["db-engine/in-memory"]
 
 [lib]
@@ -28,10 +22,8 @@ name = "db"
 db-engine = { path = "crates/db-engine", default-features = false, features = [
   "std",
 ] }
-db-automerge = { path = "crates/db-automerge", default-features = false, features = [
-] }
-db-redb = { path = "crates/db-redb", default-features = false, features = [
-] }
+db-btree-automerge = { path = "crates/db-btree-automerge", default-features = false, features = [], optional = true }
+db-btree-redb = { path = "crates/db-btree-redb", default-features = false, features = [], optional = true }
 db-sql-translator = { path = "crates/db-sql-translator", default-features = false, features = [
 ] }
 
@@ -44,22 +36,14 @@ db-examples-util = { path = "crates/db-examples-util" }
 [workspace]
 members = [
   "crates/db-engine",
-  "crates/db-redb",
-  "crates/db-automerge",
+  "crates/db-btree-redb",
+  "crates/db-btree-automerge",
   "crates/db-sql-translator",
   "crates/db-wasm",
   "crates/db-btree",
   "crates/db-value",
   "crates/db-query",
 ]
-
-[workspace.package]
-version = "0.1.0"
-edition = "2024"
-authors = ["nathanfaucett@gmail.com"]
-license = "MIT OR Apache-2.0"
-rust-version = "1.96"
-repository = "https://github.com/aicacia/rs-db"
 
 [[example]]
 name = "in_memory"
@@ -68,6 +52,14 @@ required-features = ["in-memory"]
 [[example]]
 name = "in_memory_cli"
 required-features = ["in-memory"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["nathanfaucett@gmail.com"]
+license = "MIT OR Apache-2.0"
+rust-version = "1.98"
+repository = "https://github.com/aicacia/rs-db"
 
 [workspace.lints.rust]
 ambiguous_negative_literals = "warn"
@@ -113,6 +105,7 @@ unnecessary_safety_doc = "warn"
 unneeded_field_pattern = "warn"
 unused_result_ok = "warn"
 absolute_paths = "warn"
+redundant_clone = "warn"
 
 # May cause issues with structured logging otherwise.
 literal_string_with_formatting_args = "allow"

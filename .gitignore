@@ -1,4 +1,1 @@
-/.cargo/config.toml
 /target
-/graphify-out
-/node_modules

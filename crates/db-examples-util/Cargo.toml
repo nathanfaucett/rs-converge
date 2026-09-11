@@ -14,13 +14,9 @@ name = "db_examples_util"
 
 [dependencies]
 # internal dependencies
-db-btree = { path = "../db-btree", default-features = true }
-db-value = { path = "../db-value", default-features = true }
+db-engine = { path = "../db-engine", default-features = false, features = ["std"] }
 db-query = { path = "../db-query", default-features = true }
-db-engine = { path = "../db-engine", default-features = true }
-db-sql-translator = { path = "../db-sql-translator", default-features = true }
 
-uuid = { version = "1.23", features = ["v7"] }
 rustyline = { version = "18.0" }
 
 [build-dependencies]

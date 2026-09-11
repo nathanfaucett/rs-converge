@@ -1,5 +1,5 @@
 [package]
-name = "db-automerge"
+name = "db-btree-automerge"
 version = "0.1.0"
 publish = false
 authors.workspace = true
@@ -10,7 +10,7 @@ rust-version.workspace = true
 
 [lib]
 path = "src/lib.rs"
-name = "db_automerge"
+name = "db_btree_automerge"
 
 [features]
 wasm = ["automerge/wasm"]
@@ -33,9 +33,7 @@ serde = { version = "1.0", default-features = false, features = ["std", "derive"
 base64 = { version = "0.21", default-features = false, features = ["std"] }
 
 [dev-dependencies]
-db-engine = { path = "../db-engine", default-features = false, features = [
-  "std",
+db-btree = { path = "../db-btree", default-features = false, features = [
   "in-memory",
+  "std",
 ] }
-db-redb = { path = "../db-redb", default-features = false, features = [] }
-redb = { version = "4.1", default-features = false, features = ["uuid"] }

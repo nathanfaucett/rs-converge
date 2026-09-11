@@ -31,7 +31,7 @@ use crate::{
         ENGINE_TABLE_FIELDS_FIELD_VALUE_TYPE, ENGINE_TABLES,
     },
     executor::execute_statement,
-    kernel::{EngineKernel, EngineKernelTransaction},
+    kernel::{Kernel, KernelTransaction},
 };
 
 #[derive(Error, Debug)]
@@ -84,7 +84,7 @@ impl<K> Engine<K> {
 
 impl<K> Engine<K>
 where
-    K: EngineKernel,
+    K: Kernel,
 {
     pub async fn index_schema(&self, name: &str) -> EngineResult<IndexSchema> {
         let mut query_results = self

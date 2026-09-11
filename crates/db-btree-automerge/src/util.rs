@@ -1,13 +1,13 @@
 use automerge::{ActorId, AutoCommit};
 use futures::{StreamExt, pin_mut};
 
-use db_btree::{BTreeError, BTreeResult, BTreeTransaction};
+use db_btree::{BTreeResult, BTreeTransaction};
 
 use crate::{
     CompactionPolicy, DocumentChangeKey, ThresholdPolicy,
     document_change_key::DocumentId,
     hash_heads,
-    reconstruction::{ReconstructedDocument, reconstruct_document},
+    reconstruction::{reconstruct_document, reconstruct_documents},
     run_compaction,
 };
 
@@ -20,7 +20,9 @@ pub async fn tx_get_document<T>(
 where
     T: BTreeTransaction<DocumentChangeKey, Vec<u8>>,
 {
-    let reconstructed_document = reconstruct_document(tx, doc_id).await?;
+    let Some(reconstructed_document) = reconstruct_document(tx, doc_id).await? else {
+        return Ok(None);
+    };
 
     let mut doc = match reconstructed_document.doc {
         Some(doc) => doc,
@@ -51,36 +53,21 @@ pub async fn tx_remove_document<T>(
 where
     T: BTreeTransaction<DocumentChangeKey, Vec<u8>>,
 {
-    let (keys_to_remove, reconstructed_document) = {
-        let range = DocumentChangeKey::range_for(doc_id);
-        let stream = tx.range(range);
-        pin_mut!(stream);
+    let (keys_to_remove, result) = {
+        let documents = reconstruct_documents(tx.range(DocumentChangeKey::range_for(doc_id)));
+        pin_mut!(documents);
 
-        let mut reconstructed_document_option = None;
-
-        let mut results = Vec::new();
-        while let Some(item) = stream.next().await {
-            let (key, data) = item?;
-
-            let reconstructed_document = reconstructed_document_option
-                .get_or_insert_with(|| ReconstructedDocument::new(key.id().clone()));
-
-            reconstructed_document.apply(&key, &data)?;
-            results.push(key);
+        match documents.next().await {
+            Some(document) => (document.keys, document.result),
+            None => return Ok(None),
         }
-
-        (
-            results,
-            reconstructed_document_option
-                .ok_or_else(|| BTreeError::custom("Document not found".to_string()))?,
-        )
     };
 
     for key in keys_to_remove {
         tx.remove(&key).await?;
     }
 
-    Ok(reconstructed_document.doc)
+    Ok(result?.doc)
 }
 
 pub async fn tx_insert_snapshot<T>(

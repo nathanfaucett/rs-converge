@@ -13,7 +13,7 @@ path = "src/lib.rs"
 name = "db_engine"
 
 [features]
-default = ["std", "in-memory", "automerge", "redb"]
+default = ["std"]
 std = [
   "futures/std",
   "uuid/std",
@@ -25,10 +25,8 @@ std = [
   "db-value/std",
   "db-query/std"
 ]
-redb = ["dep:db-redb", "dep:redb", "db-value/redb", "std"]
-automerge = ["dep:db-automerge", "dep:automerge", "dep:autosurgeon", "db-value/automerge", "std"]
-in-memory = ["dep:async-stream", "db-btree/in-memory"]
-wasm = ["dep:tsify", "dep:serde-wasm-bindgen", "dep:wasm-bindgen", "automerge/wasm", "db-value/wasm", "db-query/wasm", "db-schema/wasm"]
+in-memory = ["db-btree/in-memory"]
+wasm = ["dep:tsify", "dep:serde-wasm-bindgen", "dep:wasm-bindgen", "db-value/wasm", "db-query/wasm", "db-schema/wasm"]
 
 [dependencies]
 # internal dependencies
@@ -37,17 +35,7 @@ db-value = { path = "../db-value", default-features = false, features = [] }
 db-query = { path = "../db-query", default-features = false, features = [] }
 db-schema = { path = "../db-schema", default-features = false, features = [] }
 
-# automerge
-db-automerge = { path = "../db-automerge", default-features = false, features = [], optional = true }
-automerge = { version = "0.10", default-features = false, features = [], optional = true }
-autosurgeon = { version = "0.12", default-features = false, features = ["uuid"], optional = true }
 
-# redb
-db-redb = { path = "../db-redb", default-features = false, features = [], optional = true }
-redb = { version = "4.1", default-features = false, features = ["uuid"], optional = true }
-
-async-stream = { version = "0.3", default-features = false, features = [
-], optional = true }
 async-lock = { version = "3.4", default-features = false, features = [
 ] }
 futures = { version = "0.3", default-features = false, features = [] }
