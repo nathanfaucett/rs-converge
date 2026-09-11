@@ -3,7 +3,11 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use db::{engine::Engine, redb_automerge::RedbAutomergeKernel, sql_translator::SqlTranslator};
+use db::{
+    engine::Engine,
+    redb_automerge::{AutomergeRowReconciler, RedbKernel},
+    sql_translator::SqlTranslator,
+};
 
 fn database_path() -> std::path::PathBuf {
     let nanos = SystemTime::now()
@@ -17,7 +21,7 @@ fn database_path() -> std::path::PathBuf {
 async fn main() {
     let path = database_path();
     let database = Arc::new(redb::Database::create(&path).expect("open Redb database"));
-    let engine = Engine::new(RedbAutomergeKernel::new(database));
+    let engine = Engine::new(RedbKernel::new(database), AutomergeRowReconciler);
 
     db_examples_util::run(engine, SqlTranslator).await;
     std::fs::remove_file(path).expect("remove Redb database");

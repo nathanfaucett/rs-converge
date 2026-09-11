@@ -1,6 +1,6 @@
 #![cfg(feature = "in-memory")]
 
-use db_engine::{Engine, InMemoryKernel};
+use db_engine::{DirectRowReconciler, Engine, InMemoryKernel};
 use db_query::{
     DataDefinition, Query, QueryColumn, QueryFrom, QueryInsert, QuerySelect, Statement,
 };
@@ -11,7 +11,7 @@ use futures::executor::block_on;
 #[test]
 fn creates_inserts_and_selects_rows() {
     block_on(async {
-        let engine = Engine::new(InMemoryKernel::new());
+        let engine = Engine::new(InMemoryKernel::new(), DirectRowReconciler);
         let schema = TableSchema {
             name: "users".into(),
             columns: vec![
@@ -65,7 +65,7 @@ fn creates_inserts_and_selects_rows() {
 #[test]
 fn rolls_back_the_full_statement_batch() {
     block_on(async {
-        let engine = Engine::new(InMemoryKernel::new());
+        let engine = Engine::new(InMemoryKernel::new(), DirectRowReconciler);
         let schema = TableSchema {
             name: "users".into(),
             columns: vec![ColumnSchema {

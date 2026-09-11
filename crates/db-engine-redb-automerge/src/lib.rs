@@ -1,4 +1,6 @@
 mod change_log;
 mod kernel;
+mod reconciler;
 
-pub use kernel::{RedbAutomergeKernel, RedbAutomergeKernelTransaction};
+pub use kernel::{RedbKernel, RedbKernelTransaction};
+pub use reconciler::AutomergeRowReconciler;

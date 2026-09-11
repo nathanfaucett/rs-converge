@@ -1,11 +1,12 @@
-use db_engine::{Engine, Kernel};
+use db_engine::{Engine, Kernel, RowReconciler};
 use db_query::Translator;
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 
-pub async fn cli<K, T>(engine: Engine<K>, translator: T)
+pub async fn cli<K, R, T>(engine: Engine<K, R>, translator: T)
 where
     K: Kernel,
+    R: RowReconciler<K::Transaction>,
     T: Translator,
 {
     println!("=== DB Engine CLI Interface (with Arrow Key History) ===");

@@ -32,6 +32,7 @@ use crate::{
     },
     executor::execute_statement,
     kernel::{Kernel, KernelTransaction},
+    reconciler::RowReconciler,
 };
 
 #[derive(Error, Debug)]
@@ -61,27 +62,30 @@ impl EngineError {
 pub type EngineResult<T> = Result<T, EngineError>;
 
 #[derive(Clone)]
-pub struct Engine<K> {
+pub struct Engine<K, R> {
     pub(crate) kernel: Arc<K>,
+    pub(crate) reconciler: Arc<R>,
 }
 
-impl<K> From<K> for Engine<K> {
-    fn from(kernel: K) -> Self {
+impl<K, R> From<(K, R)> for Engine<K, R> {
+    fn from((kernel, reconciler): (K, R)) -> Self {
         Self {
             kernel: Arc::new(kernel),
+            reconciler: Arc::new(reconciler),
         }
     }
 }
 
-impl<K> Engine<K> {
-    pub fn new(kernel: K) -> Self {
-        Self::from(kernel)
+impl<K, R> Engine<K, R> {
+    pub fn new(kernel: K, reconciler: R) -> Self {
+        Self::from((kernel, reconciler))
     }
 }
 
-impl<K> Engine<K>
+impl<K, R> Engine<K, R>
 where
     K: Kernel,
+    R: RowReconciler<K::Transaction>,
 {
     pub async fn index_schema(&self, name: &str) -> EngineResult<IndexSchema> {
         let mut query_results = self
@@ -297,10 +301,10 @@ where
     pub async fn drop_table(&self, table_name: &str) -> EngineResult<()> {
         let mut transaction = self.kernel.transaction().await?;
         let table_key = Row::new(vec![table_name.into()]);
-        transaction.remove_record(ENGINE_TABLES, &table_key).await?;
+        transaction.remove_entry(ENGINE_TABLES, &table_key).await?;
 
         let field_keys = {
-            let fields = transaction.scan_records(ENGINE_TABLE_FIELDS);
+            let fields = transaction.scan_entries(ENGINE_TABLE_FIELDS);
             pin_mut!(fields);
             let mut field_keys = Vec::new();
             while let Some(item) = fields.next().await {
@@ -312,10 +316,12 @@ where
             field_keys
         };
         for key in field_keys {
-            transaction.remove_record(ENGINE_TABLE_FIELDS, &key).await?;
+            transaction.remove_entry(ENGINE_TABLE_FIELDS, &key).await?;
         }
 
-        transaction.drop_table(table_name).await?;
+        self.reconciler
+            .drop_table(&mut transaction, table_name)
+            .await?;
         transaction.commit().await
     }
 

@@ -10,28 +10,38 @@ use futures::{StreamExt, pin_mut};
 use crate::{
     EngineError, EngineResult,
     catalog::{
-        ENGINE_TABLE_FIELDS, ENGINE_TABLE_FIELDS_FIELD_COLUMN_INDEX,
-        ENGINE_TABLE_FIELDS_FIELD_COLUMN_NAME, ENGINE_TABLE_FIELDS_FIELD_PRIMARY_KEY,
-        ENGINE_TABLE_FIELDS_FIELD_VALUE_TYPE, ENGINE_TABLES,
+        ENGINE_INDEX_FIELDS, ENGINE_INDICES, ENGINE_TABLE_FIELDS,
+        ENGINE_TABLE_FIELDS_FIELD_COLUMN_INDEX, ENGINE_TABLE_FIELDS_FIELD_COLUMN_NAME,
+        ENGINE_TABLE_FIELDS_FIELD_PRIMARY_KEY, ENGINE_TABLE_FIELDS_FIELD_VALUE_TYPE, ENGINE_TABLES,
     },
     engine::Engine,
     kernel::{Kernel, KernelTransaction},
+    reconciler::RowReconciler,
 };
 
-pub async fn execute_statement<K>(
-    engine: &Engine<K>,
+pub async fn execute_statement<K, R>(
+    engine: &Engine<K, R>,
     statements: Vec<db_query::Statement>,
 ) -> EngineResult<Vec<QueryResult>>
 where
     K: Kernel,
+    R: RowReconciler<K::Transaction>,
 {
     let mut transaction = engine.kernel.transaction().await?;
+    if let Err(error) = ensure_catalog(&mut transaction).await {
+        transaction.rollback().await?;
+        return Err(error);
+    }
     let mut results = Vec::with_capacity(statements.len());
 
     for statement in statements {
         let result = match statement {
-            db_query::Statement::Query(query) => execute_query(&mut transaction, query).await,
-            db_query::Statement::DataDefinition(ddl) => execute_ddl(&mut transaction, ddl).await,
+            db_query::Statement::Query(query) => {
+                execute_query(&mut transaction, engine.reconciler.as_ref(), query).await
+            }
+            db_query::Statement::DataDefinition(ddl) => {
+                execute_ddl(&mut transaction, engine.reconciler.as_ref(), ddl).await
+            }
         };
         match result {
             Ok(result) => results.push(result),
@@ -46,22 +56,47 @@ where
     Ok(results)
 }
 
-async fn execute_query<T>(transaction: &mut T, query: Query) -> EngineResult<QueryResult>
+async fn ensure_catalog<T>(transaction: &mut T) -> EngineResult<()>
 where
     T: KernelTransaction,
 {
+    for table in [
+        ENGINE_TABLES,
+        ENGINE_TABLE_FIELDS,
+        ENGINE_INDICES,
+        ENGINE_INDEX_FIELDS,
+    ] {
+        transaction.ensure_table(table).await?;
+    }
+    Ok(())
+}
+
+async fn execute_query<T, R>(
+    transaction: &mut T,
+    reconciler: &R,
+    query: Query,
+) -> EngineResult<QueryResult>
+where
+    T: KernelTransaction,
+    R: RowReconciler<T>,
+{
     match query {
-        Query::Insert(insert) => insert_row(transaction, insert).await,
-        Query::Select(select) => select_rows(transaction, select).await,
+        Query::Insert(insert) => insert_row(transaction, reconciler, insert).await,
+        Query::Select(select) => select_rows(transaction, reconciler, select).await,
         Query::Update(_) | Query::Delete(_) => Err(EngineError::Unsupported(
             "only INSERT and simple SELECT are supported",
         )),
     }
 }
 
-async fn execute_ddl<T>(transaction: &mut T, ddl: DataDefinition) -> EngineResult<QueryResult>
+async fn execute_ddl<T, R>(
+    transaction: &mut T,
+    reconciler: &R,
+    ddl: DataDefinition,
+) -> EngineResult<QueryResult>
 where
     T: KernelTransaction,
+    R: RowReconciler<T>,
 {
     match ddl {
         DataDefinition::CreateTable {
@@ -70,7 +105,7 @@ where
         } => {
             let table_key = Row::new(vec![Value::from(schema.name.as_str())]);
             if transaction
-                .get_record(ENGINE_TABLES, &table_key)
+                .get_entry(ENGINE_TABLES, &table_key)
                 .await?
                 .is_some()
             {
@@ -79,7 +114,7 @@ where
                 }
                 return Err(EngineError::InvalidQuery("Table already exists"));
             }
-            transaction.create_table(&schema.name).await?;
+            reconciler.ensure_table(transaction, &schema.name).await?;
             create_table(transaction, schema).await?;
             Ok(QueryResult::default())
         }
@@ -92,7 +127,7 @@ where
     T: KernelTransaction,
 {
     transaction
-        .put_record(
+        .put_entry(
             ENGINE_TABLES,
             Row::new(vec![table_schema.name.clone().into()]),
             Row::new(vec![table_schema.name.clone().into()]),
@@ -101,7 +136,7 @@ where
 
     for (column_index, column_schema) in table_schema.columns.iter().enumerate() {
         transaction
-            .put_record(
+            .put_entry(
                 ENGINE_TABLE_FIELDS,
                 Row::new(vec![
                     table_schema.name.clone().into(),
@@ -121,9 +156,14 @@ where
     Ok(())
 }
 
-async fn insert_row<T>(transaction: &mut T, insert: QueryInsert) -> EngineResult<QueryResult>
+async fn insert_row<T, R>(
+    transaction: &mut T,
+    reconciler: &R,
+    insert: QueryInsert,
+) -> EngineResult<QueryResult>
 where
     T: KernelTransaction,
+    R: RowReconciler<T>,
 {
     if insert.returning.is_some() {
         return Err(EngineError::Unsupported("INSERT RETURNING"));
@@ -137,14 +177,21 @@ where
     }
 
     let key = primary_key(&schema, &insert.row)?;
-    transaction.put_row(&insert.table, key, insert.row).await?;
+    reconciler
+        .put_row(transaction, &insert.table, key, insert.row)
+        .await?;
 
     Ok(QueryResult::default())
 }
 
-async fn select_rows<T>(transaction: &T, select: QuerySelect) -> EngineResult<QueryResult>
+async fn select_rows<T, R>(
+    transaction: &T,
+    reconciler: &R,
+    select: QuerySelect,
+) -> EngineResult<QueryResult>
 where
     T: KernelTransaction,
+    R: RowReconciler<T>,
 {
     if !select.from.joins.is_empty()
         || select.predicate.is_some()
@@ -160,7 +207,7 @@ where
 
     let schema = table_schema(transaction, &select.from.table).await?;
     let projection = projection(&schema, &select.from.table, &select.projection)?;
-    let stream = transaction.scan_rows(&select.from.table);
+    let stream = reconciler.scan_rows(transaction, &select.from.table);
     pin_mut!(stream);
     let mut rows = Vec::new();
 
@@ -186,14 +233,14 @@ where
 {
     let table_key = Row::new(vec![Value::from(name)]);
     if transaction
-        .get_record(ENGINE_TABLES, &table_key)
+        .get_entry(ENGINE_TABLES, &table_key)
         .await?
         .is_none()
     {
         return Err(EngineError::InvalidQuery("Table not found"));
     }
 
-    let stream = transaction.scan_records(ENGINE_TABLE_FIELDS);
+    let stream = transaction.scan_entries(ENGINE_TABLE_FIELDS);
     pin_mut!(stream);
     let mut columns = Vec::new();
 

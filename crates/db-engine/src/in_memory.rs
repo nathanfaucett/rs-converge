@@ -92,11 +92,8 @@ impl InMemoryKernelTransaction {
 }
 
 impl KernelTransaction for InMemoryKernelTransaction {
-    async fn create_table(&mut self, name: &str) -> EngineResult<()> {
-        if self.tables.contains_key(name) {
-            return Err(EngineError::InvalidQuery("Table already exists"));
-        }
-        self.tables.insert(String::from(name), BTreeMap::new());
+    async fn ensure_table(&mut self, name: &str) -> EngineResult<()> {
+        self.tables.entry(String::from(name)).or_default();
         Ok(())
     }
 
@@ -107,37 +104,20 @@ impl KernelTransaction for InMemoryKernelTransaction {
             .ok_or_else(|| EngineError::custom("Table not found"))
     }
 
-    async fn get_record(&self, table: &str, key: &Row) -> EngineResult<Option<Row>> {
+    async fn get_entry(&self, table: &str, key: &Row) -> EngineResult<Option<Row>> {
         Ok(self.table(table)?.get(key).cloned())
     }
 
-    fn scan_records(&self, table: &str) -> impl Stream<Item = EngineResult<(Row, Row)>> {
+    fn scan_entries(&self, table: &str) -> impl Stream<Item = EngineResult<(Row, Row)>> {
         stream::iter(self.scan(table))
     }
 
-    async fn put_record(&mut self, table: &str, key: Row, value: Row) -> EngineResult<()> {
+    async fn put_entry(&mut self, table: &str, key: Row, value: Row) -> EngineResult<()> {
         self.table_mut(table)?.insert(key, value);
         Ok(())
     }
 
-    async fn remove_record(&mut self, table: &str, key: &Row) -> EngineResult<Option<Row>> {
-        Ok(self.table_mut(table)?.remove(key))
-    }
-
-    async fn get_row(&self, table: &str, key: &Row) -> EngineResult<Option<Row>> {
-        Ok(self.table(table)?.get(key).cloned())
-    }
-
-    fn scan_rows(&self, table: &str) -> impl Stream<Item = EngineResult<(Row, Row)>> {
-        stream::iter(self.scan(table))
-    }
-
-    async fn put_row(&mut self, table: &str, key: Row, value: Row) -> EngineResult<()> {
-        self.table_mut(table)?.insert(key, value);
-        Ok(())
-    }
-
-    async fn remove_row(&mut self, table: &str, key: &Row) -> EngineResult<Option<Row>> {
+    async fn remove_entry(&mut self, table: &str, key: &Row) -> EngineResult<Option<Row>> {
         Ok(self.table_mut(table)?.remove(key))
     }
 

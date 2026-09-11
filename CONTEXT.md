@@ -6,7 +6,11 @@ One transaction owns one complete read snapshot or write set for an engine opera
 
 ## Logical Row
 
-Every user-table row is one Automerge document with stable column-index keys. The engine is the only path for applying local or incoming Automerge changes to an engine-managed Logical Row. A same-column Automerge conflict rejects the full Engine Transaction before it updates any Index Record.
+A Logical Row is the row value the Engine reads, writes, and indexes. Its stored representation is selected by the Row Reconciler.
+
+## Row Reconciler
+
+A Row Reconciler stores and resolves Logical Rows through an Engine Transaction. The Automerge Row Reconciler uses one Automerge document per Logical Row with stable column-index keys. The Engine is the only path for applying local or incoming Automerge changes to an engine-managed Logical Row. A same-column Automerge conflict rejects the full Engine Transaction before it updates any Index Record.
 
 ## Primary-Key Mapping
 
