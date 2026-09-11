@@ -56,6 +56,14 @@ required-features = ["in-memory"]
 name = "in_memory_cli"
 required-features = ["in-memory"]
 
+[[example]]
+name = "redb_automerge"
+required-features = ["redb-automerge"]
+
+[[example]]
+name = "redb_automerge_cli"
+required-features = ["redb-automerge"]
+
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
