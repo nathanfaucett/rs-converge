@@ -12,4 +12,4 @@ mod kernel;
 pub use engine::{Engine, EngineError, EngineResult};
 #[cfg(feature = "in-memory")]
 pub use in_memory::{InMemoryKernel, InMemoryKernelTransaction};
-pub use kernel::Kernel;
+pub use kernel::{Kernel, KernelTransaction};

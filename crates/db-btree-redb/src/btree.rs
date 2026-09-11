@@ -98,6 +98,7 @@ mod test {
     use db_btree::{BTree, BTreeRead, BTreeTransaction};
 
     use super::*;
+    use crate::RedbDatabase;
 
     fn tmp_path() -> std::path::PathBuf {
         let mut path = std::env::temp_dir();
@@ -258,6 +259,42 @@ mod test {
                 .expect("get failed")
                 .expect("key missing");
             assert_eq!(value, "third", "should overwrite previous values");
+        });
+    }
+
+    #[test]
+    fn database_transaction_commits_multiple_tables_once() {
+        block_on(async {
+            let db = Arc::new(Database::create(tmp_path()).expect("failed to create database"));
+            let database = RedbDatabase::new(db.clone());
+
+            let transaction = database.transaction().expect("failed to begin transaction");
+            let mut first = transaction.table::<String, String>("first");
+            first
+                .insert("key".into(), "first".into())
+                .await
+                .expect("failed to insert first value");
+            first.commit().await.expect("scoped commit failed");
+            let mut second = transaction.table::<String, String>("second");
+            second
+                .insert("key".into(), "second".into())
+                .await
+                .expect("failed to insert second value");
+            second.commit().await.expect("scoped commit failed");
+            transaction
+                .commit()
+                .expect("failed to commit database transaction");
+
+            let first = RedbBTree::<String, String>::new(db.clone(), "first");
+            let second = RedbBTree::<String, String>::new(db, "second");
+            assert_eq!(
+                first.get(&"key".into()).await.expect("get failed"),
+                Some("first".into())
+            );
+            assert_eq!(
+                second.get(&"key".into()).await.expect("get failed"),
+                Some("second".into())
+            );
         });
     }
 

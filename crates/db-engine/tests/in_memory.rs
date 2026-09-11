@@ -61,3 +61,45 @@ fn creates_inserts_and_selects_rows() {
         assert_eq!(results[0].rows, vec![Row::new(vec![Value::from("Ada")])]);
     });
 }
+
+#[test]
+fn rolls_back_the_full_statement_batch() {
+    block_on(async {
+        let engine = Engine::new(InMemoryKernel::new());
+        let schema = TableSchema {
+            name: "users".into(),
+            columns: vec![ColumnSchema {
+                name: "id".into(),
+                r#type: ValueType::Integer,
+                primary_key: true,
+            }],
+        };
+
+        let result = engine
+            .execute(vec![
+                Statement::DataDefinition(DataDefinition::CreateTable {
+                    schema,
+                    if_not_exists: false,
+                }),
+                Statement::Query(Query::Insert(QueryInsert {
+                    table: "users".into(),
+                    row: Row::new(vec![]),
+                    returning: None,
+                })),
+            ])
+            .await;
+        assert!(result.is_err());
+
+        let result = engine
+            .execute(vec![Statement::Query(Query::Select(QuerySelect {
+                from: QueryFrom {
+                    table: "users".into(),
+                    joins: vec![],
+                },
+                projection: vec![QueryColumn::new("users".into(), "id".into())],
+                ..Default::default()
+            }))])
+            .await;
+        assert!(result.is_err());
+    });
+}

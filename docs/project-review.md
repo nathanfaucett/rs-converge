@@ -15,7 +15,7 @@ SQL or programmatic query AST
 
 The repository currently contains useful lower-level pieces: ordered key/value storage, an in-memory B-tree, a Redb adapter, an Automerge document adapter, database values, schemas, and a SQL parser/translator.
 
-The in-memory path now supports a narrow end-to-end slice: create a table, insert a primary-keyed row, and perform a simple single-table projection. Redb and Automerge are B-tree adapters rather than engine backends. Joins, predicates, mutations beyond insert, indexes, transaction atomicity, and several SQL clauses remain unsupported.
+The in-memory path now supports a narrow transactional slice: create a table, insert a primary-keyed row, and perform a simple single-table projection in one atomic statement batch. Redb and Automerge are B-tree adapters rather than engine backends. Joins, predicates, mutations beyond insert, indexes, and several SQL clauses remain unsupported.
 
 ## What It Is Trying To Do
 
@@ -38,7 +38,7 @@ The design document makes a stronger claim than the current code: every read/wri
 | ------------------------------------ | ------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `db`                                 | Top-level facade and feature selection                             | Re-exports the engine, SQL translator, and optional B-tree adapters.                                                             | Backend adapters are opt-in; the in-memory engine feature is available for examples.                                                                                                |
 | `db-btree`                           | Backend-neutral ordered storage contract                           | Defines read, range, transaction, commit, rollback, and error traits.                                                            | The abstraction is real and usable. Its transaction semantics and conflict behavior are not specified.                                                                              |
-| `db-engine` in-memory implementation | Test and example backend                                           | Provides a feature-gated named-table kernel backed by in-memory B-trees.                                                         | Supports the narrow create/insert/simple-select slice; its kernel transaction does not provide rollback or atomic multi-table changes.                                              |
+| `db-engine` in-memory implementation | Test and example backend                                           | Provides a feature-gated named-table kernel backed by staged in-memory ordered maps.                                             | Supports the narrow create/insert/simple-select slice with snapshot reads, atomic statement batches, rollback, and commit-conflict detection.                                       |
 | `db-btree-redb`                      | Persistent Redb implementation of the B-tree contract              | Implements Redb-backed reads, ranges, transactions, codecs, and table access.                                                    | A B-tree adapter only; it has no engine or catalog concern. Blocking Redb calls occur inside async methods, and unsafe `Send` implementations need tighter bounds or justification. |
 | `db-btree-automerge`                 | Document-oriented B-tree adapter                                   | Reconstructs documents from snapshots and deltas, updates documents, and compacts history.                                       | A B-tree adapter only; removing a document deletes its history rather than recording a tombstone.                                                                                   |
 | `db-value`                           | Database scalar, row, and JSON value model                         | Defines values, ordering, hashing, JSON conversion, and optional Redb/Automerge codecs.                                          | Core value support exists. Backend codec concerns are coupled into the value crate; JSON number edge cases need explicit tests, especially NaN behavior.                            |
@@ -56,8 +56,8 @@ The design document makes a stronger claim than the current code: every read/wri
 | ------------------------------ | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Async-first API                | **Partly**                  | Public traits are async, but Redb operations and commits are synchronous calls made inside async functions.                                                                                                            |
 | Pluggable backends             | **Partly**                  | `db-engine` is backend-neutral. Redb and Automerge are independent B-tree adapters; only the in-memory kernel currently implements the engine contract.                                                                |
-| Strict ACID engine transaction | **No**                      | The in-memory kernel transaction is a lightweight wrapper; child B-tree commits and table creation are not coordinated.                                                                                                |
-| Atomic catalog changes         | **No**                      | `create_table` updates catalog tables through separate lower-level transactions. A later failure can leave partial metadata.                                                                                           |
+| Strict ACID engine transaction | **Partly**                  | The in-memory kernel owns staged catalog and row changes for one statement batch. Persistent adapters do not yet implement the redesigned transaction seam.                                                            |
+| Atomic catalog changes         | **Partly**                  | In-memory CREATE TABLE stages physical-table and catalog changes together. A persistent kernel has not yet been implemented.                                                                                           |
 | Query execution                | **Partly**                  | The executor supports CREATE TABLE, INSERT, and simple single-table SELECT. Other query and DDL forms return explicit unsupported errors.                                                                              |
 | Joins and aggregations         | **No**                      | The AST has fields for them, but the executor is absent and SQL translation emits no aggregates or grouping.                                                                                                           |
 | SQL parameters                 | **No**                      | Translation accepts `QueryParams`, but translation functions ignore them.                                                                                                                                              |
@@ -77,9 +77,9 @@ The next executor milestone should add one semantic capability at a time, with p
 
 ### 2. The transaction boundary is only an interface
 
-The design requires one transaction to cover all catalog, table, and index changes. The current in-memory kernel creates tables immediately, and nested B-tree transactions commit independently. `KernelTransaction::commit` and `rollback` cannot coordinate those writes.
+The engine contract now gives `KernelTransaction` ownership of record and logical-row operations; it no longer exposes child B-tree transactions. The in-memory kernel stages every named table in one snapshot and commits it once. No persistent kernel implements this contract yet.
 
-This is a correctness issue, not just missing polish. A failed multi-table operation can leave the catalog inconsistent. The kernel should own the backend transaction for its entire lifetime, or the abstraction should explicitly be redesigned around composable backend transactions.
+The remaining correctness work is to provide a persistent transaction owner that enlists Redb catalog/index records and Automerge change records in one native transaction. Until then, strict ACID behavior is established only for the in-memory backend.
 
 ### 3. Translator success can hide data loss
 
@@ -100,12 +100,12 @@ The root README contains only badges. The WASM README and generated package desc
 The current tests do not cover the most important public behavior:
 
 - no engine execution tests beyond CREATE TABLE, INSERT, and simple SELECT;
-- no engine transaction tests for rollback, isolation, or multi-table atomicity;
-- no catalog consistency tests for failed create/drop operations;
+- no persistent-engine transaction tests for rollback, isolation, or multi-table atomicity;
+- no catalog consistency tests for failed create/drop operations beyond the in-memory statement-batch rollback test;
 - no SQL translator tests for parameters and silently dropped clauses;
 - no join or aggregation execution tests;
 - no Automerge persistence or compaction tests; basic reconstruction, malformed-document isolation, and deletion are covered;
-- no in-memory engine tests beyond the create/insert/simple-select slice;
+- no in-memory engine tests beyond create/insert/simple-select and statement-batch rollback;
 - no WASM build/API synchronization test;
 - no concurrency tests for backend transactions or async executor blocking.
 
@@ -115,12 +115,12 @@ The current tests do not cover the most important public behavior:
 
 1. Add public API tests for in-memory rollback, duplicate keys, schema validation, and unsupported query shapes.
 2. Make unsupported SQL fail explicitly; then implement parameters and mutation/pagination semantics incrementally.
-3. Redesign `KernelTransaction` to own table creation and child B-tree writes atomically.
-4. Add index/catalog behavior and validate schema invariants.
+3. Implement the redesigned `KernelTransaction` for a Redb-backed record store and an Automerge-backed logical-row store sharing one native transaction.
+4. Add primary-key mappings, tombstones, index behavior, and schema invariants.
 5. Define a generic composition path for persistent B-tree adapters without coupling them to `db-engine`.
 6. Either regenerate the WASM package from a real Rust API or mark it as stale and remove unsupported claims.
 7. Add `db-proto` to the workspace, or document why it is standalone.
 
 ## Bottom Line
 
-The repository now has a tested in-memory engine slice and clean B-tree-adapter layering, but it is not yet a general database engine. The highest-value next step is strengthening transaction ownership and extending execution semantics incrementally through public tests.
+The repository now has a tested transactional in-memory engine slice and clean B-tree-adapter layering, but it is not yet a general database engine. The highest-value next step is implementing the same transaction ownership for a Redb-backed record store and Automerge-backed logical rows.

@@ -13,6 +13,7 @@ default = ["std"]
 std = ["db-sql-translator/std"]
 redb = ["dep:db-btree-redb", "std"]
 automerge = ["dep:db-btree-automerge", "std"]
+redb-automerge = ["dep:db-engine-redb-automerge", "std"]
 in-memory = ["db-engine/in-memory"]
 
 [lib]
@@ -24,6 +25,7 @@ db-engine = { path = "crates/db-engine", default-features = false, features = [
 ] }
 db-btree-automerge = { path = "crates/db-btree-automerge", default-features = false, features = [], optional = true }
 db-btree-redb = { path = "crates/db-btree-redb", default-features = false, features = [], optional = true }
+db-engine-redb-automerge = { path = "crates/db-engine-redb-automerge", default-features = false, features = [], optional = true }
 db-sql-translator = { path = "crates/db-sql-translator", default-features = false, features = [
 ] }
 
@@ -36,6 +38,7 @@ db-examples-util = { path = "crates/db-examples-util" }
 [workspace]
 members = [
   "crates/db-engine",
+  "crates/db-engine-redb-automerge",
   "crates/db-btree-redb",
   "crates/db-btree-automerge",
   "crates/db-sql-translator",

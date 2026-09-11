@@ -8,4 +8,6 @@ pub use db_btree_automerge as automerge;
 #[cfg(feature = "redb")]
 pub use db_btree_redb as redb;
 pub use db_engine as engine;
+#[cfg(feature = "redb-automerge")]
+pub use db_engine_redb_automerge as redb_automerge;
 pub use db_sql_translator as sql_translator;

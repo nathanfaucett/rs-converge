@@ -382,6 +382,7 @@ dependencies = [
  "db-btree-automerge",
  "db-btree-redb",
  "db-engine",
+ "db-engine-redb-automerge",
  "db-examples-util",
  "db-sql-translator",
  "redb",
@@ -435,7 +436,6 @@ name = "db-engine"
 version = "0.1.0"
 dependencies = [
  "async-lock",
- "db-btree",
  "db-query",
  "db-schema",
  "db-value",
@@ -447,6 +447,24 @@ dependencies = [
  "tsify",
  "uuid",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "db-engine-redb-automerge"
+version = "0.1.0"
+dependencies = [
+ "async-stream",
+ "automerge 0.9.0",
+ "db-btree",
+ "db-btree-automerge",
+ "db-btree-redb",
+ "db-engine",
+ "db-query",
+ "db-schema",
+ "db-value",
+ "futures",
+ "postcard",
+ "redb",
 ]
 
 [[package]]

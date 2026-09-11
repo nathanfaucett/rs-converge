@@ -30,7 +30,7 @@ impl<T> AutomergeBTreeTransaction<T>
 where
     T: BTreeTransaction<DocumentChangeKey, Vec<u8>>,
 {
-    pub(crate) fn new(inner_tx: T, policy: ThresholdPolicy) -> Self {
+    pub fn new(inner_tx: T, policy: ThresholdPolicy) -> Self {
         Self { inner_tx, policy }
     }
 }

@@ -1,0 +1,33 @@
+[package]
+name = "db-engine-redb-automerge"
+version.workspace = true
+publish = false
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "db_engine_redb_automerge"
+path = "src/lib.rs"
+
+[dependencies]
+# internal dependencies
+db-btree = { path = "../db-btree", default-features = false, features = [] }
+db-btree-automerge = { path = "../db-btree-automerge", default-features = false, features = [] }
+db-btree-redb = { path = "../db-btree-redb", default-features = false, features = [] }
+db-engine = { path = "../db-engine", default-features = false, features = ["std"] }
+db-value = { path = "../db-value", default-features = false, features = ["redb", "std"] }
+
+# external dependencies
+automerge = { version = "0.9", default-features = false, features = [] }
+async-stream = { version = "0.3", default-features = false, features = [] }
+futures = { version = "0.3", default-features = false, features = ["std"] }
+postcard = { version = "1.1", default-features = false, features = ["alloc"] }
+redb = { version = "4.1", default-features = false, features = ["uuid"] }
+
+[dev-dependencies]
+# internal dependencies
+db-query = { path = "../db-query", default-features = false, features = [] }
+db-schema = { path = "../db-schema", default-features = false, features = [] }

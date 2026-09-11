@@ -1,24 +1,46 @@
-use db_btree::{BTree, BTreeRead};
 use db_value::Row;
+use futures::Stream;
 
 use crate::EngineResult;
 
-pub trait KernelRead {
-    type ReadTable: BTreeRead<Row, Row>;
+pub trait KernelTransaction {
+    fn create_table(&mut self, name: &str) -> impl Future<Output = EngineResult<()>>;
+    fn drop_table(&mut self, name: &str) -> impl Future<Output = EngineResult<()>>;
 
-    fn read_table(&self, name: &str) -> impl Future<Output = EngineResult<Self::ReadTable>>;
-}
+    fn get_record(&self, table: &str, key: &Row)
+    -> impl Future<Output = EngineResult<Option<Row>>>;
+    fn scan_records(&self, table: &str) -> impl Stream<Item = EngineResult<(Row, Row)>>;
+    fn put_record(
+        &mut self,
+        table: &str,
+        key: Row,
+        value: Row,
+    ) -> impl Future<Output = EngineResult<()>>;
+    fn remove_record(
+        &mut self,
+        table: &str,
+        key: &Row,
+    ) -> impl Future<Output = EngineResult<Option<Row>>>;
 
-pub trait KernelTransaction: KernelRead {
-    type WriteTable: BTree<Row, Row>;
-
-    fn write_table(&self, name: &str) -> impl Future<Output = EngineResult<Self::WriteTable>>;
+    fn get_row(&self, table: &str, key: &Row) -> impl Future<Output = EngineResult<Option<Row>>>;
+    fn scan_rows(&self, table: &str) -> impl Stream<Item = EngineResult<(Row, Row)>>;
+    fn put_row(
+        &mut self,
+        table: &str,
+        key: Row,
+        value: Row,
+    ) -> impl Future<Output = EngineResult<()>>;
+    fn remove_row(
+        &mut self,
+        table: &str,
+        key: &Row,
+    ) -> impl Future<Output = EngineResult<Option<Row>>>;
 
     fn commit(self) -> impl Future<Output = EngineResult<()>>;
     fn rollback(self) -> impl Future<Output = EngineResult<()>>;
 }
 
-pub trait Kernel: KernelRead {
+pub trait Kernel {
     type Transaction: KernelTransaction;
 
     fn transaction(&self) -> impl Future<Output = EngineResult<Self::Transaction>>;

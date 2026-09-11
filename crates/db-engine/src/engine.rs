@@ -3,6 +3,7 @@ use alloc::{
     boxed::Box,
     string::{String, ToString},
     sync::Arc,
+    vec,
     vec::Vec,
 };
 use db_schema::{ColumnSchema, ColumnSchemaIndex, IndexSchema, TableSchema};
@@ -13,7 +14,6 @@ use std::sync::Arc;
 
 use thiserror::Error;
 
-use db_btree::{BTree, BTreeError, BTreeTransaction};
 use db_query::{
     Query, QueryColumn, QueryExpr, QueryExprValue, QueryFrom, QueryJoin, QueryJoinKind,
     QueryOrderBy, QueryParams, QueryResult, QuerySelect, QuerySortDirection, Statement,
@@ -38,9 +38,6 @@ use crate::{
 pub enum EngineError {
     #[error("Translate error: {0}")]
     TranslateError(#[from] TranslateError),
-
-    #[error("BTree error: {0}")]
-    BTreeError(#[from] BTreeError),
 
     #[error("Unsupported query shape for MVP executor: {0}")]
     Unsupported(&'static str),
@@ -287,71 +284,39 @@ where
     }
 
     pub async fn create_table(&self, table_schema: TableSchema) -> EngineResult<()> {
-        let etx = self.kernel.transaction().await?;
-        {
-            let tables = etx.write_table(ENGINE_TABLES).await?;
-            let mut tx = tables.transaction().await?;
-
-            tx.insert(
-                Row::new(vec![table_schema.name.clone().into()]),
-                Row::new(vec![table_schema.name.clone().into()]),
-            )
-            .await?;
-
-            tx.commit().await?;
-        }
-        {
-            let table_fields = etx.write_table(ENGINE_TABLE_FIELDS).await?;
-            let mut tx = table_fields.transaction().await?;
-
-            for (column_index, column_schema) in table_schema.columns.iter().enumerate() {
-                tx.insert(
-                    Row::new(vec![
-                        table_schema.name.clone().into(),
-                        column_schema.name.clone().into(),
-                    ]),
-                    Row::new(vec![
-                        table_schema.name.clone().into(),
-                        column_schema.name.clone().into(),
-                        column_schema.r#type.into(),
-                        (column_index as i64).into(),
-                        column_schema.primary_key.into(),
-                    ]),
-                )
-                .await?;
-            }
-
-            tx.commit().await?;
-        }
-        etx.commit().await?;
+        self.execute(vec![Statement::DataDefinition(
+            db_query::DataDefinition::CreateTable {
+                schema: table_schema,
+                if_not_exists: false,
+            },
+        )])
+        .await?;
         Ok(())
     }
 
     pub async fn drop_table(&self, table_name: &str) -> EngineResult<()> {
-        let etx = self.kernel.transaction().await?;
-        {
-            let tables = etx.write_table(ENGINE_TABLES).await?;
-            let mut tx = tables.transaction().await?;
+        let mut transaction = self.kernel.transaction().await?;
+        let table_key = Row::new(vec![table_name.into()]);
+        transaction.remove_record(ENGINE_TABLES, &table_key).await?;
 
-            tx.remove(&Row::new(vec![table_name.into()])).await?;
-
-            tx.commit().await?;
-        }
-        {
-            let table_fields = etx.write_table(ENGINE_TABLE_FIELDS).await?;
-            let mut tx = table_fields.transaction().await?;
-            {
-                let range = tx.remove_range(Row::new(vec![table_name.into()])..);
-                pin_mut!(range);
-
-                while let Some(item) = range.next().await {
-                    let _ = item?;
+        let field_keys = {
+            let fields = transaction.scan_records(ENGINE_TABLE_FIELDS);
+            pin_mut!(fields);
+            let mut field_keys = Vec::new();
+            while let Some(item) = fields.next().await {
+                let (key, _) = item?;
+                if key.values.first().and_then(|value| value.as_text()) == Some(table_name) {
+                    field_keys.push(key);
                 }
             }
-            tx.commit().await?;
+            field_keys
+        };
+        for key in field_keys {
+            transaction.remove_record(ENGINE_TABLE_FIELDS, &key).await?;
         }
-        etx.commit().await?;
-        Ok(())
+
+        transaction.drop_table(table_name).await?;
+        transaction.commit().await
     }
 
     pub async fn translate_and_execute_with_params<T>(

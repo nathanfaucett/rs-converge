@@ -6,7 +6,7 @@ use async_stream::stream;
 use automerge::AutoCommit;
 use futures::{Stream, StreamExt, pin_mut};
 
-use db_btree::{BTree, BTreeRead, BTreeResult, BTreeTransaction};
+use db_btree::{BTree, BTreeRead, BTreeResult};
 
 use crate::{
     AutomergeBTreeTransaction, DocumentChangeKey, ThresholdPolicy, document_change_key::DocumentId,
@@ -50,15 +50,9 @@ where
     async fn get(&self, key: &DocumentId) -> BTreeResult<Option<AutoCommit>> {
         let inner_guard = self.inner.read().await;
         let mut tx = inner_guard.transaction().await?;
-        if let Some((result, compacted)) = tx_get_document(&mut tx, key, true, &self.policy).await?
-        {
-            if compacted {
-                tx.commit().await?;
-            }
-            Ok(Some(result))
-        } else {
-            Ok(None)
-        }
+        Ok(tx_get_document(&mut tx, key, false, &self.policy)
+            .await?
+            .map(|(document, _)| document))
     }
 
     fn range<R>(&self, range: R) -> impl Stream<Item = BTreeResult<(DocumentId, AutoCommit)>>

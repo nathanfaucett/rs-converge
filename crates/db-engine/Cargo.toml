@@ -21,16 +21,14 @@ std = [
   "serde/std",
   "serde_json/std",
   "db-schema/std",
-  "db-btree/std",
   "db-value/std",
   "db-query/std"
 ]
-in-memory = ["db-btree/in-memory"]
+in-memory = []
 wasm = ["dep:tsify", "dep:serde-wasm-bindgen", "dep:wasm-bindgen", "db-value/wasm", "db-query/wasm", "db-schema/wasm"]
 
 [dependencies]
 # internal dependencies
-db-btree = { path = "../db-btree", default-features = false, features = [] }
 db-value = { path = "../db-value", default-features = false, features = [] }
 db-query = { path = "../db-query", default-features = false, features = [] }
 db-schema = { path = "../db-schema", default-features = false, features = [] }

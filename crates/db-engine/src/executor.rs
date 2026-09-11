@@ -1,6 +1,5 @@
-use alloc::{string::String, vec::Vec};
+use alloc::{string::String, vec, vec::Vec};
 
-use db_btree::{BTree, BTreeRead, BTreeTransaction};
 use db_query::{
     DataDefinition, Query, QueryColumn, QueryInsert, QueryResult, QueryResultColumn, QuerySelect,
 };
@@ -26,67 +25,111 @@ pub async fn execute_statement<K>(
 where
     K: Kernel,
 {
+    let mut transaction = engine.kernel.transaction().await?;
     let mut results = Vec::with_capacity(statements.len());
+
     for statement in statements {
-        match statement {
-            db_query::Statement::Query(query) => results.push(execute_query(engine, query).await?),
-            db_query::Statement::DataDefinition(ddl) => {
-                results.push(execute_ddl(engine, ddl).await?)
+        let result = match statement {
+            db_query::Statement::Query(query) => execute_query(&mut transaction, query).await,
+            db_query::Statement::DataDefinition(ddl) => execute_ddl(&mut transaction, ddl).await,
+        };
+        match result {
+            Ok(result) => results.push(result),
+            Err(error) => {
+                transaction.rollback().await?;
+                return Err(error);
             }
         }
     }
+
+    transaction.commit().await?;
     Ok(results)
 }
 
-async fn execute_query<K>(engine: &Engine<K>, query: Query) -> EngineResult<QueryResult>
+async fn execute_query<T>(transaction: &mut T, query: Query) -> EngineResult<QueryResult>
 where
-    K: Kernel,
+    T: KernelTransaction,
 {
     match query {
-        Query::Insert(insert) => insert_row(engine, insert).await,
-        Query::Select(select) => select_rows(engine, select).await,
+        Query::Insert(insert) => insert_row(transaction, insert).await,
+        Query::Select(select) => select_rows(transaction, select).await,
         Query::Update(_) | Query::Delete(_) => Err(EngineError::Unsupported(
             "only INSERT and simple SELECT are supported",
         )),
     }
 }
 
-async fn execute_ddl<K>(engine: &Engine<K>, ddl: DataDefinition) -> EngineResult<QueryResult>
+async fn execute_ddl<T>(transaction: &mut T, ddl: DataDefinition) -> EngineResult<QueryResult>
 where
-    K: Kernel,
+    T: KernelTransaction,
 {
     match ddl {
         DataDefinition::CreateTable {
             schema,
             if_not_exists,
         } => {
-            let table = engine.kernel.read_table(&schema.name).await;
-            if table.is_ok() {
+            let table_key = Row::new(vec![Value::from(schema.name.as_str())]);
+            if transaction
+                .get_record(ENGINE_TABLES, &table_key)
+                .await?
+                .is_some()
+            {
                 if if_not_exists {
                     return Ok(QueryResult::default());
                 }
                 return Err(EngineError::InvalidQuery("Table already exists"));
             }
-
-            let transaction = engine.kernel.transaction().await?;
-            transaction.write_table(&schema.name).await?;
-            transaction.commit().await?;
-            engine.create_table(schema).await?;
+            transaction.create_table(&schema.name).await?;
+            create_table(transaction, schema).await?;
             Ok(QueryResult::default())
         }
         _ => Err(EngineError::Unsupported("only CREATE TABLE is supported")),
     }
 }
 
-async fn insert_row<K>(engine: &Engine<K>, insert: QueryInsert) -> EngineResult<QueryResult>
+async fn create_table<T>(transaction: &mut T, table_schema: TableSchema) -> EngineResult<()>
 where
-    K: Kernel,
+    T: KernelTransaction,
+{
+    transaction
+        .put_record(
+            ENGINE_TABLES,
+            Row::new(vec![table_schema.name.clone().into()]),
+            Row::new(vec![table_schema.name.clone().into()]),
+        )
+        .await?;
+
+    for (column_index, column_schema) in table_schema.columns.iter().enumerate() {
+        transaction
+            .put_record(
+                ENGINE_TABLE_FIELDS,
+                Row::new(vec![
+                    table_schema.name.clone().into(),
+                    column_schema.name.clone().into(),
+                ]),
+                Row::new(vec![
+                    table_schema.name.clone().into(),
+                    column_schema.name.clone().into(),
+                    column_schema.r#type.into(),
+                    (column_index as i64).into(),
+                    column_schema.primary_key.into(),
+                ]),
+            )
+            .await?;
+    }
+
+    Ok(())
+}
+
+async fn insert_row<T>(transaction: &mut T, insert: QueryInsert) -> EngineResult<QueryResult>
+where
+    T: KernelTransaction,
 {
     if insert.returning.is_some() {
         return Err(EngineError::Unsupported("INSERT RETURNING"));
     }
 
-    let schema = table_schema(engine, &insert.table).await?;
+    let schema = table_schema(transaction, &insert.table).await?;
     if insert.row.values.len() != schema.columns.len() {
         return Err(EngineError::InvalidQuery(
             "INSERT row has the wrong column count",
@@ -94,19 +137,14 @@ where
     }
 
     let key = primary_key(&schema, &insert.row)?;
-    let transaction = engine.kernel.transaction().await?;
-    let table = transaction.write_table(&insert.table).await?;
-    let mut table_transaction = table.transaction().await?;
-    table_transaction.insert(key, insert.row).await?;
-    table_transaction.commit().await?;
-    transaction.commit().await?;
+    transaction.put_row(&insert.table, key, insert.row).await?;
 
     Ok(QueryResult::default())
 }
 
-async fn select_rows<K>(engine: &Engine<K>, select: QuerySelect) -> EngineResult<QueryResult>
+async fn select_rows<T>(transaction: &T, select: QuerySelect) -> EngineResult<QueryResult>
 where
-    K: Kernel,
+    T: KernelTransaction,
 {
     if !select.from.joins.is_empty()
         || select.predicate.is_some()
@@ -120,10 +158,9 @@ where
         return Err(EngineError::Unsupported("complex SELECT"));
     }
 
-    let schema = table_schema(engine, &select.from.table).await?;
+    let schema = table_schema(transaction, &select.from.table).await?;
     let projection = projection(&schema, &select.from.table, &select.projection)?;
-    let table = engine.kernel.read_table(&select.from.table).await?;
-    let stream = table.range(..);
+    let stream = transaction.scan_rows(&select.from.table);
     pin_mut!(stream);
     let mut rows = Vec::new();
 
@@ -143,24 +180,20 @@ where
     ))
 }
 
-async fn table_schema<K>(engine: &Engine<K>, name: &str) -> EngineResult<TableSchema>
+async fn table_schema<T>(transaction: &T, name: &str) -> EngineResult<TableSchema>
 where
-    K: Kernel,
+    T: KernelTransaction,
 {
     let table_key = Row::new(vec![Value::from(name)]);
-    if engine
-        .kernel
-        .read_table(ENGINE_TABLES)
-        .await?
-        .get(&table_key)
+    if transaction
+        .get_record(ENGINE_TABLES, &table_key)
         .await?
         .is_none()
     {
         return Err(EngineError::InvalidQuery("Table not found"));
     }
 
-    let fields = engine.kernel.read_table(ENGINE_TABLE_FIELDS).await?;
-    let stream = fields.range(..);
+    let stream = transaction.scan_records(ENGINE_TABLE_FIELDS);
     pin_mut!(stream);
     let mut columns = Vec::new();
 
