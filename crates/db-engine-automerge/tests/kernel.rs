@@ -5,7 +5,8 @@ use std::{
 };
 
 use db_engine::{ChangeReplication, DirectRowCodec, Engine, Kernel, KernelTransaction, RowCodec};
-use db_engine_redb_automerge::{AutomergeRowCodec, RedbKernel};
+use db_engine_automerge::AutomergeRowCodec;
+use db_engine_redb::RedbKernel;
 use db_query::{
     AlterTableOperation, DataDefinition, Query, QueryColumn, QueryDelete, QueryExpr,
     QueryExprValue, QueryFrom, QueryInsert, QuerySelect, QueryUpdate, QueryUpdateAssignment,
@@ -20,7 +21,7 @@ fn database_path() -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    std::env::temp_dir().join(format!("db-engine-redb-automerge-{nanos}.redb"))
+    std::env::temp_dir().join(format!("db-engine-automerge-{nanos}.redb"))
 }
 
 fn people_schema() -> TableSchema {

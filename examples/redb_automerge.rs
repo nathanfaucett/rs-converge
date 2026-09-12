@@ -4,9 +4,7 @@ use std::{
 };
 
 use db::{
-    engine::Engine,
-    redb_automerge::{AutomergeRowCodec, RedbKernel},
-    sql_translator::SqlTranslator,
+    automerge::AutomergeRowCodec, engine::Engine, redb::RedbKernel, sql_translator::SqlTranslator,
 };
 
 fn database_path() -> std::path::PathBuf {

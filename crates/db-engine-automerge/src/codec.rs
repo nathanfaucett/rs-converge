@@ -4,17 +4,14 @@ use async_stream::stream;
 use automerge::transaction::Transactable;
 use automerge::{ActorId, AutoCommit, ROOT, ReadDoc, ScalarValue, Value as AutomergeValue};
 use db_btree::{BTreeRead, BTreeTransaction};
-use db_btree_automerge::{AutomergeBTreeTransaction, DocumentId, ThresholdPolicy};
+use db_btree_automerge::{AutomergeBTreeTransaction, DocumentId, ThresholdPolicy, get_document};
 use db_engine::{
     ENGINE_TABLE_FIELDS_FIELD_COLUMN_ID, EngineError, EngineResult, KernelTransaction, RowCodec,
 };
 use db_value::{Row, Value};
 use futures::{Stream, StreamExt, pin_mut};
 
-use crate::{
-    change_log::{ChangeKey, RedbChangeLogTransaction},
-    kernel::RedbKernelTransaction,
-};
+use crate::change_log::{ChangeLogRead, ChangeLogTransaction};
 
 const REPLICA_METADATA: &str = "__db_engine_replica_metadata";
 const REPLICA_ACTOR: &str = "actor";
@@ -52,19 +49,12 @@ impl AutomergeRowCodec {
         Ok(id)
     }
 
-    fn replica_metadata(
-        transaction: &RedbKernelTransaction,
-    ) -> db_btree_redb::RedbBTreeScopedTransaction<'_, Row, Row> {
-        transaction.entries(REPLICA_METADATA)
-    }
-
-    async fn actor(transaction: &RedbKernelTransaction) -> EngineResult<ActorId> {
+    async fn actor<T>(transaction: &T) -> EngineResult<ActorId>
+    where
+        T: KernelTransaction,
+    {
         let key = Row::new(vec![Value::from(REPLICA_ACTOR)]);
-        let Some(row) = Self::replica_metadata(transaction)
-            .get(&key)
-            .await
-            .map_err(EngineError::custom)?
-        else {
+        let Some(row) = transaction.get_entry(REPLICA_METADATA, &key).await? else {
             return Err(EngineError::custom("Missing replica actor"));
         };
         let Some(Value::Blob(actor)) = row.values.first() else {
@@ -73,23 +63,16 @@ impl AutomergeRowCodec {
         Ok(ActorId::from(actor.clone()))
     }
 
-    fn mapping(
-        transaction: &RedbKernelTransaction,
-    ) -> db_btree_redb::RedbBTreeScopedTransaction<'_, Row, Row> {
-        transaction.entries(ROW_MAPPINGS)
-    }
-
-    async fn row_document_id(
-        transaction: &RedbKernelTransaction,
+    async fn row_document_id<T>(
+        transaction: &T,
         table: &str,
         key: &Row,
-    ) -> EngineResult<Option<(DocumentId, usize)>> {
+    ) -> EngineResult<Option<(DocumentId, usize)>>
+    where
+        T: KernelTransaction,
+    {
         let mapping_key = Self::row_key(table, key);
-        let Some(mapping) = Self::mapping(transaction)
-            .get(&mapping_key)
-            .await
-            .map_err(EngineError::custom)?
-        else {
+        let Some(mapping) = transaction.get_entry(ROW_MAPPINGS, &mapping_key).await? else {
             return Ok(None);
         };
         let (Some(Value::Blob(id)), Some(Value::Integer(column_count))) =
@@ -102,13 +85,15 @@ impl AutomergeRowCodec {
         Ok(Some((id.clone(), column_count)))
     }
 
-    async fn columns(
-        transaction: &RedbKernelTransaction,
+    async fn columns<T>(
+        transaction: &T,
         table: &str,
         fallback_count: usize,
-    ) -> EngineResult<Vec<Column>> {
-        let entries = transaction.entries(ENGINE_TABLE_FIELDS);
-        let fields = entries.range(..);
+    ) -> EngineResult<Vec<Column>>
+    where
+        T: KernelTransaction,
+    {
+        let fields = transaction.scan_entries(ENGINE_TABLE_FIELDS);
         pin_mut!(fields);
         let mut columns = Vec::new();
         while let Some(field) = fields.next().await {
@@ -150,13 +135,31 @@ impl AutomergeRowCodec {
         Ok(columns.into_iter().map(|(_, column)| column).collect())
     }
 
-    fn changes<'a>(
-        transaction: &'a RedbKernelTransaction,
+    async fn document<T>(
+        transaction: &T,
         table: &str,
-    ) -> AutomergeBTreeTransaction<RedbChangeLogTransaction<'a>> {
-        let changes = transaction.database.table(Self::change_table(table));
+        id: &DocumentId,
+    ) -> EngineResult<Option<AutoCommit>>
+    where
+        T: KernelTransaction,
+    {
+        get_document(
+            &ChangeLogRead::new(transaction, Self::change_table(table)),
+            id,
+        )
+        .await
+        .map_err(EngineError::custom)
+    }
+
+    fn changes<'a, T>(
+        transaction: &'a mut T,
+        table: &'a str,
+    ) -> AutomergeBTreeTransaction<ChangeLogTransaction<'a, T>>
+    where
+        T: KernelTransaction + Send,
+    {
         AutomergeBTreeTransaction::new(
-            RedbChangeLogTransaction::new(changes),
+            ChangeLogTransaction::new(transaction, Self::change_table(table)),
             ThresholdPolicy::default(),
         )
     }
@@ -255,46 +258,36 @@ impl AutomergeRowCodec {
     }
 }
 
-impl RowCodec<RedbKernelTransaction> for AutomergeRowCodec {
-    async fn ensure_table(
-        &self,
-        transaction: &mut RedbKernelTransaction,
-        table: &str,
-    ) -> EngineResult<()> {
-        transaction
-            .database
-            .create_table::<ChangeKey, Vec<u8>>(&Self::change_table(table))
-            .map_err(EngineError::custom)?;
+impl<T> RowCodec<T> for AutomergeRowCodec
+where
+    T: KernelTransaction + Send,
+{
+    async fn ensure_table(&self, transaction: &mut T, table: &str) -> EngineResult<()> {
+        transaction.ensure_table(&Self::change_table(table)).await?;
         transaction.ensure_table(REPLICA_METADATA).await?;
         let actor_key = Row::new(vec![Value::from(REPLICA_ACTOR)]);
-        if Self::replica_metadata(transaction)
-            .get(&actor_key)
-            .await
-            .map_err(EngineError::custom)?
+        if transaction
+            .get_entry(REPLICA_METADATA, &actor_key)
+            .await?
             .is_none()
         {
-            Self::replica_metadata(transaction)
-                .insert(
+            transaction
+                .put_entry(
+                    REPLICA_METADATA,
                     actor_key,
                     Row::new(vec![Value::Blob(uuid::Uuid::now_v7().as_bytes().to_vec())]),
                 )
-                .await
-                .map_err(EngineError::custom)?;
+                .await?;
         }
         transaction.ensure_table(ROW_MAPPINGS).await?;
         transaction.ensure_table(TOMBSTONES).await?;
         transaction.ensure_table(ENGINE_TABLE_FIELDS).await
     }
 
-    async fn drop_table(
-        &self,
-        transaction: &mut RedbKernelTransaction,
-        table: &str,
-    ) -> EngineResult<()> {
+    async fn drop_table(&self, transaction: &mut T, table: &str) -> EngineResult<()> {
         for entries_table in [ROW_MAPPINGS, TOMBSTONES] {
             let keys = {
-                let entries = transaction.entries(entries_table);
-                let entries = entries.range(..);
+                let entries = transaction.scan_entries(entries_table);
                 pin_mut!(entries);
                 let mut keys = Vec::new();
                 while let Some(entry) = entries.next().await {
@@ -306,31 +299,16 @@ impl RowCodec<RedbKernelTransaction> for AutomergeRowCodec {
                 keys
             };
             for key in keys {
-                transaction
-                    .entries(entries_table)
-                    .remove(&key)
-                    .await
-                    .map_err(EngineError::custom)?;
+                transaction.remove_entry(entries_table, &key).await?;
             }
         }
-        transaction
-            .database
-            .drop_table::<ChangeKey, Vec<u8>>(&Self::change_table(table))
-            .map(|_| ())
-            .map_err(EngineError::custom)
+        transaction.drop_table(&Self::change_table(table)).await
     }
 
-    async fn get_row(
-        &self,
-        transaction: &RedbKernelTransaction,
-        table: &str,
-        key: &Row,
-    ) -> EngineResult<Option<Row>> {
+    async fn get_row(&self, transaction: &T, table: &str, key: &Row) -> EngineResult<Option<Row>> {
         if transaction
-            .entries(TOMBSTONES)
-            .get(&Self::row_key(table, key))
-            .await
-            .map_err(EngineError::custom)?
+            .get_entry(TOMBSTONES, &Self::row_key(table, key))
+            .await?
             .is_some()
         {
             return Ok(None);
@@ -338,11 +316,7 @@ impl RowCodec<RedbKernelTransaction> for AutomergeRowCodec {
         let Some((id, column_count)) = Self::row_document_id(transaction, table, key).await? else {
             return Ok(None);
         };
-        let Some(document) = Self::changes(transaction, table)
-            .get(&id)
-            .await
-            .map_err(EngineError::custom)?
-        else {
+        let Some(document) = Self::document(transaction, table, &id).await? else {
             return Err(EngineError::custom(
                 "Primary-key mapping has no logical row",
             ));
@@ -353,23 +327,21 @@ impl RowCodec<RedbKernelTransaction> for AutomergeRowCodec {
 
     fn scan_rows(
         &self,
-        transaction: &RedbKernelTransaction,
+        transaction: &T,
         table: &str,
     ) -> impl Stream<Item = EngineResult<(Row, Row)>> {
         let table = table.to_owned();
         stream! {
-            let entries = transaction.entries(ROW_MAPPINGS);
-            let mappings = entries.range(..);
+            let mappings = transaction.scan_entries(ROW_MAPPINGS);
             for await entry in mappings {
                 let (mapping_key, mapping) = entry.map_err(EngineError::custom)?;
                 if mapping_key.values.first().and_then(Value::as_text) != Some(table.as_str()) {
                     continue;
                 }
                 let key = Row::new(mapping_key.values[1..].to_vec());
-                if transaction.entries(TOMBSTONES)
-                    .get(&Self::row_key(&table, &key))
-                    .await
-                    .map_err(EngineError::custom)?
+                if transaction
+                    .get_entry(TOMBSTONES, &Self::row_key(&table, &key))
+                    .await?
                     .is_some()
                 {
                     continue;
@@ -384,10 +356,7 @@ impl RowCodec<RedbKernelTransaction> for AutomergeRowCodec {
                     yield Err(EngineError::custom("Invalid primary-key mapping"));
                     continue;
                 };
-                let Some(document) = Self::changes(transaction, &table)
-                    .get(id)
-                    .await
-                    .map_err(EngineError::custom)?
+                let Some(document) = Self::document(transaction, &table, id).await?
                 else {
                     yield Err(EngineError::custom("Primary-key mapping has no logical row"));
                     continue;
@@ -406,17 +375,15 @@ impl RowCodec<RedbKernelTransaction> for AutomergeRowCodec {
 
     async fn encode_row(
         &self,
-        transaction: &RedbKernelTransaction,
+        transaction: &T,
         table: &str,
         key: &Row,
         row: &Row,
         changed_columns: &[usize],
     ) -> EngineResult<Vec<u8>> {
         let id = Self::document_id(table, key)?;
-        let mut document = Self::changes(transaction, table)
-            .get(&id)
-            .await
-            .map_err(EngineError::custom)?
+        let mut document = Self::document(transaction, table, &id)
+            .await?
             .unwrap_or_else(AutoCommit::new)
             .with_actor(Self::actor(transaction).await?);
         let columns = Self::columns(transaction, table, row.values.len()).await?;
@@ -426,16 +393,14 @@ impl RowCodec<RedbKernelTransaction> for AutomergeRowCodec {
 
     async fn merge_row(
         &self,
-        transaction: &mut RedbKernelTransaction,
+        transaction: &mut T,
         table: &str,
         key: Row,
         value: &[u8],
     ) -> EngineResult<Row> {
         if transaction
-            .entries(TOMBSTONES)
-            .get(&Self::row_key(table, &key))
-            .await
-            .map_err(EngineError::custom)?
+            .get_entry(TOMBSTONES, &Self::row_key(table, &key))
+            .await?
             .is_some()
         {
             return Err(EngineError::InvalidQuery("Logical row is tombstoned"));
@@ -445,37 +410,37 @@ impl RowCodec<RedbKernelTransaction> for AutomergeRowCodec {
         let id = match Self::row_document_id(transaction, table, &key).await? {
             Some((id, existing_column_count)) => {
                 if column_count > existing_column_count {
-                    Self::mapping(transaction)
-                        .insert(
+                    transaction
+                        .put_entry(
+                            ROW_MAPPINGS,
                             Self::row_key(table, &key),
                             Row::new(vec![
                                 Value::Blob(id.clone()),
                                 Value::Integer(column_count as i64),
                             ]),
                         )
-                        .await
-                        .map_err(EngineError::custom)?;
+                        .await?;
                 }
                 id
             }
             None => {
                 let id = Self::document_id(table, &key)?;
-                Self::mapping(transaction)
-                    .insert(
+                transaction
+                    .put_entry(
+                        ROW_MAPPINGS,
                         Self::row_key(table, &key),
                         Row::new(vec![
                             Value::Blob(id.clone()),
                             Value::Integer(column_count as i64),
                         ]),
                     )
-                    .await
-                    .map_err(EngineError::custom)?;
+                    .await?;
                 id
             }
         };
 
-        let mut changes = Self::changes(transaction, table);
-        let existing = changes.get(&id).await.map_err(EngineError::custom)?;
+        let existing = Self::document(transaction, table, &id).await?;
+        let has_existing = existing.is_some();
         let mut document = existing.unwrap_or_else(AutoCommit::new);
         document
             .load_incremental(incremental)
@@ -483,12 +448,8 @@ impl RowCodec<RedbKernelTransaction> for AutomergeRowCodec {
         let columns = Self::columns(transaction, table, column_count).await?;
         let row = Self::decode_row(&document, &columns)?;
 
-        if changes
-            .get(&id)
-            .await
-            .map_err(EngineError::custom)?
-            .is_some()
-        {
+        let mut changes = Self::changes(transaction, table);
+        if has_existing {
             changes.remove(&id).await.map_err(EngineError::custom)?;
         }
         changes
@@ -500,16 +461,14 @@ impl RowCodec<RedbKernelTransaction> for AutomergeRowCodec {
 
     async fn put_row(
         &self,
-        transaction: &mut RedbKernelTransaction,
+        transaction: &mut T,
         table: &str,
         key: Row,
         value: Row,
     ) -> EngineResult<()> {
         if transaction
-            .entries(TOMBSTONES)
-            .get(&Self::row_key(table, &key))
-            .await
-            .map_err(EngineError::custom)?
+            .get_entry(TOMBSTONES, &Self::row_key(table, &key))
+            .await?
             .is_some()
         {
             return Err(EngineError::InvalidQuery("Logical row is tombstoned"));
@@ -518,31 +477,31 @@ impl RowCodec<RedbKernelTransaction> for AutomergeRowCodec {
         let id = match Self::row_document_id(transaction, table, &key).await? {
             Some((id, column_count)) => {
                 if columns.len() > column_count {
-                    Self::mapping(transaction)
-                        .insert(
+                    transaction
+                        .put_entry(
+                            ROW_MAPPINGS,
                             Self::row_key(table, &key),
                             Row::new(vec![
                                 Value::Blob(id.clone()),
                                 Value::Integer(columns.len() as i64),
                             ]),
                         )
-                        .await
-                        .map_err(EngineError::custom)?;
+                        .await?;
                 }
                 id
             }
             None => {
                 let id = Self::document_id(table, &key)?;
-                Self::mapping(transaction)
-                    .insert(
+                transaction
+                    .put_entry(
+                        ROW_MAPPINGS,
                         Self::row_key(table, &key),
                         Row::new(vec![
                             Value::Blob(id.clone()),
                             Value::Integer(columns.len() as i64),
                         ]),
                     )
-                    .await
-                    .map_err(EngineError::custom)?;
+                    .await?;
                 id
             }
         };
@@ -582,22 +541,17 @@ impl RowCodec<RedbKernelTransaction> for AutomergeRowCodec {
 
     async fn remove_row(
         &self,
-        transaction: &mut RedbKernelTransaction,
+        transaction: &mut T,
         table: &str,
         key: &Row,
     ) -> EngineResult<Option<Row>> {
         let row = self.get_row(transaction, table, key).await?;
         if row.is_some() {
             let mapping_key = Self::row_key(table, key);
-            Self::mapping(transaction)
-                .remove(&mapping_key)
-                .await
-                .map_err(EngineError::custom)?;
+            transaction.remove_entry(ROW_MAPPINGS, &mapping_key).await?;
             transaction
-                .entries(TOMBSTONES)
-                .insert(mapping_key, Row::default())
-                .await
-                .map_err(EngineError::custom)?;
+                .put_entry(TOMBSTONES, mapping_key, Row::default())
+                .await?;
         }
         Ok(row)
     }

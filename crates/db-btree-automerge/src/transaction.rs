@@ -13,6 +13,15 @@ use crate::{
     util::{tx_insert_snapshot, tx_remove_document, tx_update},
 };
 
+pub async fn get_document<T>(transaction: &T, key: &DocumentId) -> BTreeResult<Option<AutoCommit>>
+where
+    T: BTreeRead<DocumentChangeKey, Vec<u8>>,
+{
+    Ok(reconstruct_document(transaction, key)
+        .await?
+        .and_then(|document| document.doc))
+}
+
 pub struct AutomergeBTreeTransaction<T>
 where
     T: BTreeTransaction<DocumentChangeKey, Vec<u8>>,
@@ -40,9 +49,7 @@ where
     T: BTreeTransaction<DocumentChangeKey, Vec<u8>>,
 {
     async fn get(&self, key: &DocumentId) -> BTreeResult<Option<AutoCommit>> {
-        Ok(reconstruct_document(&self.inner_tx, key)
-            .await?
-            .and_then(|document| document.doc))
+        get_document(&self.inner_tx, key).await
     }
 
     fn range<R>(&self, range: R) -> impl Stream<Item = BTreeResult<(DocumentId, AutoCommit)>>
