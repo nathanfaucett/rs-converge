@@ -82,5 +82,8 @@ jobs:
       - name: Show rustc/cargo
         run: rustc --version && cargo --version
 
+      - name: Test SQL behavior
+        run: just test-sql
+
       - name: Test feature combinations
         run: just crap-summary

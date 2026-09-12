@@ -133,6 +133,25 @@ where
     })
 }
 
+pub fn reconstruct_document_values<S>(
+    source: S,
+) -> impl Stream<Item = BTreeResult<(DocumentId, AutoCommit)>>
+where
+    S: Stream<Item = BTreeResult<(DocumentChangeKey, Vec<u8>)>>,
+{
+    stream!({
+        let documents = reconstruct_documents(source);
+        pin_mut!(documents);
+
+        while let Some(document) = documents.next().await {
+            let mut document = document.result?;
+            if let Some(doc) = document.doc.take() {
+                yield Ok((document.id, doc));
+            }
+        }
+    })
+}
+
 pub async fn reconstruct_document<T>(
     tx: &T,
     key: &DocumentId,

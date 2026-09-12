@@ -282,6 +282,7 @@ fn translate_expr(aliases: &BTreeMap<String, String>, expr: Expr) -> TranslateRe
                 .unwrap_or_else(|| idents[0].value.clone()),
             idents[1].value.clone(),
         )),
+        Expr::Nested(inner) => translate_expr(aliases, *inner),
         Expr::IsNull(inner) => Ok(QueryExpr::IsNull(Box::new(translate_expr(
             aliases, *inner,
         )?))),

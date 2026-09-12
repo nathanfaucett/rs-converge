@@ -886,7 +886,6 @@ where
     R: RowCodec<T>,
 {
     if !select.from.joins.is_empty()
-        || select.predicate.is_some()
         || !select.aggregates.is_empty()
         || !select.group_by.is_empty()
         || !select.order_by.is_empty()
@@ -907,6 +906,9 @@ where
     while let Some(item) = stream.next().await {
         let (_, row) = item?;
         let row = materialize_defaults(&schema, row);
+        if !predicate_matches(&schema, &select.from.table, &row, select.predicate.as_ref())? {
+            continue;
+        }
         rows.push(Row::new(
             projection
                 .iter()
@@ -918,6 +920,85 @@ where
     Ok(QueryResult::new_with_columns(
         rows,
         projection.into_iter().map(|(_, column)| column).collect(),
+    ))
+}
+
+fn predicate_matches(
+    schema: &TableSchema,
+    table: &str,
+    row: &Row,
+    predicate: Option<&QueryExpr>,
+) -> EngineResult<bool> {
+    match predicate {
+        Some(predicate) => Ok(matches!(
+            evaluate_expr(schema, table, row, predicate)?,
+            Value::Bool(true)
+        )),
+        None => Ok(true),
+    }
+}
+
+fn evaluate_expr(
+    schema: &TableSchema,
+    table: &str,
+    row: &Row,
+    expr: &QueryExpr,
+) -> EngineResult<Value> {
+    match expr {
+        QueryExpr::Value(QueryExprValue::Value(value)) => Ok(value.clone()),
+        QueryExpr::Value(QueryExprValue::Column(column)) => Ok(row.values
+            [column_index(schema, table, column, "Unknown predicate column")?]
+        .clone()),
+        QueryExpr::IsNull(expr) => Ok(Value::Bool(matches!(
+            evaluate_expr(schema, table, row, expr)?,
+            Value::Null
+        ))),
+        QueryExpr::IsNotNull(expr) => Ok(Value::Bool(!matches!(
+            evaluate_expr(schema, table, row, expr)?,
+            Value::Null
+        ))),
+        QueryExpr::Equals(left, right) => {
+            compare_expr(schema, table, row, left, right, |left, right| left == right)
+        }
+        QueryExpr::NotEquals(left, right) => {
+            compare_expr(schema, table, row, left, right, |left, right| left != right)
+        }
+        QueryExpr::LessThan(left, right) => {
+            compare_expr(schema, table, row, left, right, |left, right| left < right)
+        }
+        QueryExpr::LessThanOrEquals(left, right) => {
+            compare_expr(schema, table, row, left, right, |left, right| left <= right)
+        }
+        QueryExpr::GreaterThan(left, right) => {
+            compare_expr(schema, table, row, left, right, |left, right| left > right)
+        }
+        QueryExpr::GreaterThanOrEquals(left, right) => {
+            compare_expr(schema, table, row, left, right, |left, right| left >= right)
+        }
+        QueryExpr::And(left, right) => Ok(Value::Bool(
+            matches!(evaluate_expr(schema, table, row, left)?, Value::Bool(true))
+                && matches!(evaluate_expr(schema, table, row, right)?, Value::Bool(true)),
+        )),
+        QueryExpr::Or(left, right) => Ok(Value::Bool(
+            matches!(evaluate_expr(schema, table, row, left)?, Value::Bool(true))
+                || matches!(evaluate_expr(schema, table, row, right)?, Value::Bool(true)),
+        )),
+        _ => Err(EngineError::Unsupported("SELECT predicate")),
+    }
+}
+
+fn compare_expr(
+    schema: &TableSchema,
+    table: &str,
+    row: &Row,
+    left: &QueryExpr,
+    right: &QueryExpr,
+    compare: impl FnOnce(&Value, &Value) -> bool,
+) -> EngineResult<Value> {
+    let left = evaluate_expr(schema, table, row, left)?;
+    let right = evaluate_expr(schema, table, row, right)?;
+    Ok(Value::Bool(
+        !matches!(left, Value::Null) && !matches!(right, Value::Null) && compare(&left, &right),
     ))
 }
 

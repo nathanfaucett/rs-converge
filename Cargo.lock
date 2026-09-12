@@ -384,6 +384,7 @@ dependencies = [
  "db-engine-redb",
  "db-examples-util",
  "db-sql-translator",
+ "db-test",
  "redb",
  "tokio",
  "uuid",
@@ -532,6 +533,19 @@ dependencies = [
  "tsify",
  "uuid",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "db-test"
+version = "0.1.0"
+dependencies = [
+ "db-engine",
+ "db-engine-automerge",
+ "db-engine-redb",
+ "db-sql-translator",
+ "db-value",
+ "futures",
+ "redb",
 ]
 
 [[package]]

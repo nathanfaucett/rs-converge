@@ -4,7 +4,10 @@ use async_stream::stream;
 use automerge::transaction::Transactable;
 use automerge::{ActorId, AutoCommit, ROOT, ReadDoc, ScalarValue, Value as AutomergeValue};
 use db_btree::{BTreeRead, BTreeTransaction};
-use db_btree_automerge::{AutomergeBTreeTransaction, DocumentId, ThresholdPolicy, get_document};
+use db_btree_automerge::{
+    AutomergeBTreeTransaction, DocumentId, ThresholdPolicy, get_document,
+    reconstruct_document_values,
+};
 use db_engine::{
     ENGINE_TABLE_FIELDS_FIELD_COLUMN_ID, EngineError, EngineResult, KernelTransaction, RowCodec,
     RowGenerationId, TableGenerationId,
@@ -14,7 +17,6 @@ use futures::{Stream, StreamExt, pin_mut};
 
 use crate::change_log::{ChangeLogRead, ChangeLogTransaction};
 
-const ROW_MAPPINGS: &str = "__db_engine_row_mappings";
 const TOMBSTONES: &str = "__db_engine_tombstones";
 const COLUMN_COUNT_BYTES: usize = size_of::<u32>();
 const ENGINE_TABLE_FIELDS: &str = "table_fields";
@@ -56,9 +58,10 @@ impl AutomergeRowCodec {
         Row::new(values)
     }
 
-    fn document_id(table: impl AsRef<str>, key: &Row) -> EngineResult<DocumentId> {
+    fn document_id(table: impl AsRef<str>, row: &RowGenerationId) -> EngineResult<DocumentId> {
         let table = table.as_ref();
-        let key = postcard::to_allocvec(key).map_err(EngineError::custom)?;
+        let key = postcard::to_allocvec(&Row::new(vec![Value::Uuid(row.0)]))
+            .map_err(EngineError::custom)?;
         let mut id = Vec::with_capacity(table.len() + key.len() + 4);
         id.extend_from_slice(&(table.len() as u32).to_be_bytes());
         id.extend_from_slice(table.as_bytes());
@@ -66,26 +69,28 @@ impl AutomergeRowCodec {
         Ok(id)
     }
 
-    async fn row_document_id<T>(
-        transaction: &T,
-        table: impl AsRef<str>,
-        key: &Row,
-    ) -> EngineResult<Option<(DocumentId, usize)>>
-    where
-        T: KernelTransaction,
-    {
-        let mapping_key = Self::row_key(table, key);
-        let Some(mapping) = transaction.get_entry(ROW_MAPPINGS, &mapping_key).await? else {
-            return Ok(None);
+    fn row_generation_id(table: &str, id: &[u8]) -> EngineResult<RowGenerationId> {
+        let Some((table_len, id)) = id.split_at_checked(size_of::<u32>()) else {
+            return Err(EngineError::custom("Invalid Automerge document ID"));
         };
-        let (Some(Value::Blob(id)), Some(Value::Integer(column_count))) =
-            (mapping.values.first(), mapping.values.get(1))
-        else {
-            return Err(EngineError::custom("Invalid primary-key mapping"));
+        let table_len = u32::from_be_bytes(
+            table_len
+                .try_into()
+                .map_err(|_| EngineError::custom("Invalid Automerge document ID"))?,
+        ) as usize;
+        let Some((document_table, key)) = id.split_at_checked(table_len) else {
+            return Err(EngineError::custom("Invalid Automerge document ID"));
         };
-        let column_count = usize::try_from(*column_count)
-            .map_err(|_| EngineError::custom("Invalid primary-key mapping"))?;
-        Ok(Some((id.clone(), column_count)))
+        if document_table != table.as_bytes() {
+            return Err(EngineError::custom(
+                "Automerge document belongs to another table",
+            ));
+        }
+        let key: Row = postcard::from_bytes(key).map_err(EngineError::custom)?;
+        match key.values.as_slice() {
+            [Value::Uuid(row)] => Ok(RowGenerationId(*row)),
+            _ => Err(EngineError::custom("Invalid Automerge row document ID")),
+        }
     }
 
     async fn columns<T>(
@@ -291,46 +296,24 @@ impl AutomergeRowCodec {
         (entry.0.values.first().and_then(Value::as_text) == Some(table)).then_some(entry.0)
     }
 
-    async fn put_row_mapping<T>(
-        transaction: &mut T,
+    async fn document_columns<T>(
+        transaction: &T,
         table: &str,
-        key: &Row,
-        id: DocumentId,
-        column_count: usize,
-    ) -> EngineResult<()>
+        document: &AutoCommit,
+    ) -> EngineResult<Vec<Column>>
     where
         T: KernelTransaction,
     {
-        transaction
-            .put_entry(
-                ROW_MAPPINGS,
-                Self::row_key(table, key),
-                Row::new(vec![Value::Blob(id), Value::Integer(column_count as i64)]),
-            )
-            .await
-    }
-
-    async fn ensure_row_mapping<T>(
-        transaction: &mut T,
-        table: &str,
-        key: &Row,
-        column_count: usize,
-    ) -> EngineResult<DocumentId>
-    where
-        T: KernelTransaction,
-    {
-        match Self::row_document_id(transaction, table, key).await? {
-            Some((id, existing_count)) if existing_count >= column_count => Ok(id),
-            Some((id, _)) => {
-                Self::put_row_mapping(transaction, table, key, id.clone(), column_count).await?;
-                Ok(id)
-            }
-            None => {
-                let id = Self::document_id(table, key)?;
-                Self::put_row_mapping(transaction, table, key, id.clone(), column_count).await?;
-                Ok(id)
-            }
+        let columns = Self::columns(transaction, table, 0).await?;
+        if columns.is_empty() {
+            return Ok((0..document.keys(ROOT).count())
+                .map(|index| Column {
+                    id: index.to_string(),
+                    default: Value::Null,
+                })
+                .collect());
         }
+        Ok(columns)
     }
 
     async fn table_entry_keys<T>(
@@ -430,14 +413,12 @@ where
             .ensure_table(&Self::change_table(table.0.to_string()))
             .await?;
 
-        transaction.ensure_table(ROW_MAPPINGS).await?;
         transaction.ensure_table(TOMBSTONES).await?;
         transaction.ensure_table(ENGINE_TABLE_FIELDS).await
     }
 
     async fn drop_table(&self, transaction: &mut T, table: TableGenerationId) -> EngineResult<()> {
         let table = table.0.to_string();
-        Self::remove_table_entries(transaction, ROW_MAPPINGS, &table).await?;
         Self::remove_table_entries(transaction, TOMBSTONES, &table).await?;
         transaction.drop_table(&Self::change_table(table)).await
     }
@@ -457,16 +438,11 @@ where
         {
             return Ok(None);
         }
-        let Some((id, column_count)) = Self::row_document_id(transaction, &table, &key).await?
-        else {
+        let id = Self::document_id(table, row)?;
+        let Some(document) = Self::document(transaction, table, &id).await? else {
             return Ok(None);
         };
-        let Some(document) = Self::document(transaction, &table, &id).await? else {
-            return Err(EngineError::custom(
-                "Primary-key mapping has no logical row",
-            ));
-        };
-        let columns = Self::columns(transaction, &table, column_count).await?;
+        let columns = Self::document_columns(transaction, table, &document).await?;
         Self::decode_row(&document, &columns).map(Some)
     }
 
@@ -477,17 +453,14 @@ where
     ) -> impl Stream<Item = EngineResult<(RowGenerationId, Row)>> {
         let table = table.0.to_string();
         stream! {
-            let mappings = transaction.scan_entries(ROW_MAPPINGS);
-            for await entry in mappings {
-                let (mapping_key, mapping) = entry.map_err(EngineError::custom)?;
-                if mapping_key.values.first().and_then(Value::as_text) != Some(table.as_str()) {
-                    continue;
-                }
-                let key = Row::new(mapping_key.values[1..].to_vec());
-                let Some(row) = key.values.first().and_then(Value::as_uuid).copied() else {
-                    yield Err(EngineError::custom("Invalid row-generation mapping"));
-                    continue;
-                };
+            let changes = ChangeLogRead::new(transaction, Self::change_table(&table));
+            let documents = reconstruct_document_values(changes.range(..));
+            pin_mut!(documents);
+
+            while let Some(document) = documents.next().await {
+                let (id, document) = document.map_err(EngineError::custom)?;
+                let row = Self::row_generation_id(&table, &id)?;
+                let key = Row::new(vec![Value::Uuid(row.0)]);
                 if transaction
                     .get_entry(TOMBSTONES, &Self::row_key(&table, &key))
                     .await?
@@ -495,29 +468,8 @@ where
                 {
                     continue;
                 }
-                let (Some(Value::Blob(id)), Some(Value::Integer(column_count))) =
-                    (mapping.values.first(), mapping.values.get(1))
-                else {
-                    yield Err(EngineError::custom("Invalid primary-key mapping"));
-                    continue;
-                };
-                let Ok(column_count) = usize::try_from(*column_count) else {
-                    yield Err(EngineError::custom("Invalid primary-key mapping"));
-                    continue;
-                };
-                let Some(document) = Self::document(transaction, &table, id).await?
-                else {
-                    yield Err(EngineError::custom("Primary-key mapping has no logical row"));
-                    continue;
-                };
-                let columns = match Self::columns(transaction, &table, column_count).await {
-                    Ok(columns) => columns,
-                    Err(error) => {
-                        yield Err(error);
-                        continue;
-                    }
-                };
-                yield Self::decode_row(&document, &columns).map(|value| (RowGenerationId(row), value));
+                let columns = Self::document_columns(transaction, &table, &document).await?;
+                yield Self::decode_row(&document, &columns).map(|value| (row, value));
             }
         }
     }
@@ -531,8 +483,7 @@ where
         changed_columns: &[usize],
     ) -> EngineResult<Vec<u8>> {
         let table = table.0.to_string();
-        let key = Row::new(vec![Value::Uuid(row_id.0)]);
-        let id = Self::document_id(&table, &key)?;
+        let id = Self::document_id(&table, row_id)?;
         let mut document = Self::document(transaction, &table, &id)
             .await?
             .unwrap_or_else(AutoCommit::new)
@@ -554,17 +505,13 @@ where
         row: &RowGenerationId,
     ) -> EngineResult<Vec<usize>> {
         let table = table.0.to_string();
-        let key = Row::new(vec![Value::Uuid(row.0)]);
-        let Some((id, column_count)) = Self::row_document_id(transaction, &table, &key).await?
-        else {
-            return Ok(Vec::new());
-        };
+        let id = Self::document_id(&table, row)?;
         let Some(document) = Self::document(transaction, &table, &id).await? else {
             return Ok(Vec::new());
         };
         Self::conflicted_columns(
             &document,
-            &Self::columns(transaction, &table, column_count).await?,
+            &Self::document_columns(transaction, &table, &document).await?,
         )
     }
 
@@ -577,8 +524,7 @@ where
         changed_columns: &[usize],
     ) -> EngineResult<Vec<u8>> {
         let table = table.0.to_string();
-        let key = Row::new(vec![Value::Uuid(row_id.0)]);
-        let id = Self::document_id(&table, &key)?;
+        let id = Self::document_id(&table, row_id)?;
         let mut document = Self::document(transaction, &table, &id)
             .await?
             .unwrap_or_else(AutoCommit::new)
@@ -606,37 +552,7 @@ where
         }
 
         let (column_count, incremental) = Self::decode_incremental(value)?;
-        let id = match Self::row_document_id(transaction, table, &key).await? {
-            Some((id, existing_column_count)) => {
-                if column_count > existing_column_count {
-                    transaction
-                        .put_entry(
-                            ROW_MAPPINGS,
-                            Self::row_key(table, &key),
-                            Row::new(vec![
-                                Value::Blob(id.clone()),
-                                Value::Integer(column_count as i64),
-                            ]),
-                        )
-                        .await?;
-                }
-                id
-            }
-            None => {
-                let id = Self::document_id(table, &key)?;
-                transaction
-                    .put_entry(
-                        ROW_MAPPINGS,
-                        Self::row_key(table, &key),
-                        Row::new(vec![
-                            Value::Blob(id.clone()),
-                            Value::Integer(column_count as i64),
-                        ]),
-                    )
-                    .await?;
-                id
-            }
-        };
+        let id = Self::document_id(table, &row)?;
 
         let existing = Self::document(transaction, table, &id).await?;
         let has_existing = existing.is_some();
@@ -665,10 +581,7 @@ where
         row: &RowGenerationId,
     ) -> EngineResult<Option<Vec<u8>>> {
         let table = table.0.to_string();
-        let key = Row::new(vec![Value::Uuid(row.0)]);
-        let Some((id, _)) = Self::row_document_id(transaction, &table, &key).await? else {
-            return Ok(None);
-        };
+        let id = Self::document_id(&table, row)?;
         Self::document(transaction, &table, &id)
             .await?
             .map(|mut document| Ok(document.save()))
@@ -692,7 +605,7 @@ where
             return Ok(None);
         }
         let mut incoming = AutoCommit::load(state).map_err(EngineError::custom)?;
-        let id = Self::document_id(&table, &key)?;
+        let id = Self::document_id(&table, &row)?;
         let existing = Self::document(transaction, &table, &id).await?;
         let mut document = existing.clone().unwrap_or_else(AutoCommit::new);
         if existing.is_some() {
@@ -700,18 +613,8 @@ where
         } else {
             document = incoming;
         }
-        let columns = Self::columns(transaction, &table, 0).await?;
+        let columns = Self::document_columns(transaction, &table, &document).await?;
         let row_value = Self::decode_row(&document, &columns)?;
-        transaction
-            .put_entry(
-                ROW_MAPPINGS,
-                Self::row_key(&table, &key),
-                Row::new(vec![
-                    Value::Blob(id.clone()),
-                    Value::Integer(columns.len() as i64),
-                ]),
-            )
-            .await?;
         let mut changes = Self::changes(transaction, &table);
         if existing.is_some() {
             changes.remove(&id).await.map_err(EngineError::custom)?;
@@ -732,10 +635,9 @@ where
         let value = self.get_row(transaction, table, row).await?;
         let table = table.0.to_string();
         let key = Row::new(vec![Value::Uuid(row.0)]);
-        let mapping_key = Self::row_key(&table, &key);
-        transaction.remove_entry(ROW_MAPPINGS, &mapping_key).await?;
+        let tombstone_key = Self::row_key(&table, &key);
         transaction
-            .put_entry(TOMBSTONES, mapping_key, Row::default())
+            .put_entry(TOMBSTONES, tombstone_key, Row::default())
             .await?;
         Ok(value)
     }
@@ -784,7 +686,7 @@ where
             return Err(EngineError::InvalidQuery("Logical row is tombstoned"));
         }
         let columns = Self::columns(transaction, table, value.values.len()).await?;
-        let id = Self::ensure_row_mapping(transaction, table, &key, columns.len()).await?;
+        let id = Self::document_id(table, &row)?;
         self.store_row(transaction, table, id, &columns, &value)
             .await
     }

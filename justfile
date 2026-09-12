@@ -9,6 +9,7 @@ help:
     @printf "  build-release  Build all workspace crates in release mode\n"
     @printf "  check          Check all workspace crates\n"
     @printf "  test           Run workspace tests\n"
+    @printf "  test-sql            Run SQL behavior tests\n"
     @printf "  hack-test      Run feature-powerset coverage tests\n"
     @printf "  clippy         Run clippy for all targets and workspace crates\n"
     @printf "  clippy-fix     Run clippy with --fix for all targets and workspace crates\n"
@@ -30,6 +31,9 @@ check:
 
 test:
     cargo hack test --feature-powerset --workspace --all-targets
+
+test-sql:
+    cargo test --test sql_select
 
 clippy:
     cargo clippy --workspace --all-targets -- -D warnings
