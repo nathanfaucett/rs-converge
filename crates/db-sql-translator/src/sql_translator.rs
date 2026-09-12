@@ -11,12 +11,12 @@ use alloc::{
 use std::collections::BTreeMap;
 
 use db_query::{
-    AlterIndexOperation, DataDefinition, Query, QueryColumn, QueryDelete, QueryExpr,
-    QueryExprValue, QueryFrom, QueryInsert, QueryJoin, QueryJoinKind, QueryParams, QuerySelect,
-    QueryUpdate, Statement, TranslateError, TranslateResult, Translator,
+    AlterIndexOperation, AlterTableOperation, DataDefinition, Query, QueryColumn, QueryDelete,
+    QueryExpr, QueryExprValue, QueryFrom, QueryInsert, QueryJoin, QueryJoinKind, QueryParams,
+    QuerySelect, QueryUpdate, Statement, TranslateError, TranslateResult, Translator,
 };
 
-use db_schema::{IndexSchema, TableSchema};
+use db_schema::TableSchema;
 use db_value::{Row, Value, ValueType};
 use sqlparser::{
     ast::{
@@ -363,6 +363,7 @@ fn translate_expr(aliases: &BTreeMap<String, String>, expr: Expr) -> TranslateRe
                 }
                 ast::Value::SingleQuotedString(s) => Value::Text(s),
                 ast::Value::Boolean(b) => Value::Bool(b),
+                ast::Value::Null => Value::Null,
                 _ => Value::Text(format!("{:?}", value)),
             };
             Ok(QueryExpr::Value(QueryExprValue::Value(db_value)))
@@ -530,23 +531,42 @@ fn translate_column_data_type(data_type: &ast::DataType) -> TranslateResult<Valu
     }
 }
 
+fn translate_column_schema(column: &ast::ColumnDef) -> TranslateResult<db_schema::ColumnSchema> {
+    let default = column
+        .options
+        .iter()
+        .find_map(|option| match &option.option {
+            ast::ColumnOption::Default(expr) => Some(expr.clone()),
+            _ => None,
+        })
+        .map(|expr| match translate_expr(&BTreeMap::new(), expr)? {
+            QueryExpr::Value(QueryExprValue::Value(value)) => Ok(value),
+            _ => Err(TranslateError::custom(
+                "Column default must be a literal value",
+            )),
+        })
+        .transpose()?
+        .unwrap_or_default();
+
+    Ok(db_schema::ColumnSchema {
+        name: column.name.value.clone(),
+        r#type: translate_column_data_type(&column.data_type)?,
+        default,
+        primary_key: column
+            .options
+            .iter()
+            .any(|option| matches!(option.option, ast::ColumnOption::PrimaryKey(_))),
+    })
+}
+
 fn translate_create_table(create_table: ast::CreateTable) -> TranslateResult<Statement> {
     let table_name = object_name_to_string(&create_table.name)?;
 
-    let columns = {
-        let mut columns = Vec::with_capacity(create_table.columns.len());
-        for col_def in &create_table.columns {
-            columns.push(db_schema::ColumnSchema {
-                name: col_def.name.value.clone(),
-                r#type: translate_column_data_type(&col_def.data_type)?,
-                primary_key: col_def
-                    .options
-                    .iter()
-                    .any(|opt| matches!(opt.option, ast::ColumnOption::PrimaryKey(_))),
-            });
-        }
-        columns
-    };
+    let columns = create_table
+        .columns
+        .iter()
+        .map(translate_column_schema)
+        .collect::<TranslateResult<Vec<_>>>()?;
 
     let schema = TableSchema {
         name: table_name,
@@ -570,10 +590,7 @@ fn translate_drop(
     let name = object_name_to_string(&names[0])?;
 
     match object_type {
-        ast::ObjectType::Table => Ok(Statement::DataDefinition(DataDefinition::DropTable {
-            table_name: name,
-            if_exists,
-        })),
+        ast::ObjectType::Table => Err(TranslateError::custom("DROP TABLE is not supported")),
         ast::ObjectType::Index => Ok(Statement::DataDefinition(DataDefinition::DropIndex {
             index_name: name,
             if_exists,
@@ -587,9 +604,18 @@ fn translate_drop(
 
 fn translate_alter_table(alter_table: ast::AlterTable) -> TranslateResult<Statement> {
     let table_name = object_name_to_string(&alter_table.name)?;
-
-    // TODO: proper mapping of operations
-    let operations = vec![];
+    let operations = alter_table
+        .operations
+        .iter()
+        .map(|operation| match operation {
+            ast::AlterTableOperation::AddColumn { column_def, .. } => Ok(
+                AlterTableOperation::AddColumn(translate_column_schema(column_def)?),
+            ),
+            _ => Err(TranslateError::custom(
+                "Only ALTER TABLE ADD COLUMN is supported",
+            )),
+        })
+        .collect::<TranslateResult<Vec<_>>>()?;
 
     Ok(Statement::DataDefinition(DataDefinition::AlterTable {
         table_name,
@@ -601,28 +627,39 @@ fn translate_alter_table(alter_table: ast::AlterTable) -> TranslateResult<Statem
 fn translate_create_index(create_index: ast::CreateIndex) -> TranslateResult<Statement> {
     let index_name = create_index
         .name
-        .map(|n| object_name_to_string(&n))
-        .unwrap_or(Ok(String::new()))?;
-
+        .as_ref()
+        .ok_or(TranslateError::custom(
+            "CREATE INDEX requires an index name",
+        ))
+        .and_then(object_name_to_string)?;
     let table_name = object_name_to_string(&create_index.table_name)?;
-
-    let column_indices: Vec<u32> = create_index
+    let column_names = create_index
         .columns
-        .into_iter()
-        .map(|_| 0u32) // TODO: proper mapping to actual column indices
-        .collect();
+        .iter()
+        .map(|column| match &column.column.expr {
+            Expr::Identifier(identifier)
+                if column.operator_class.is_none()
+                    && column.column.options.asc.is_none()
+                    && column.column.options.nulls_first.is_none()
+                    && column.column.with_fill.is_none() =>
+            {
+                Ok(identifier.value.clone())
+            }
+            _ => Err(TranslateError::custom(
+                "CREATE INDEX only supports bare identifier columns",
+            )),
+        })
+        .collect::<TranslateResult<Vec<_>>>()?;
 
-    let schema = IndexSchema {
-        name: index_name,
-        table_name,
-        column_indices,
-        unique: create_index.unique,
-    };
-
-    Ok(Statement::DataDefinition(DataDefinition::CreateIndex {
-        schema,
-        if_not_exists: create_index.if_not_exists,
-    }))
+    Ok(Statement::DataDefinition(
+        DataDefinition::CreateIndexUnresolved {
+            index_name,
+            table_name,
+            column_names,
+            unique: create_index.unique,
+            if_not_exists: create_index.if_not_exists,
+        },
+    ))
 }
 
 fn translate_alter_index(
@@ -649,6 +686,68 @@ mod tests {
     use futures::executor::block_on;
 
     use super::*;
+
+    #[test]
+    fn translates_alter_table_add_column_with_default() {
+        block_on(async {
+            let statements = SqlTranslator
+                .translate_with_params(
+                    "ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'member'",
+                    None,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                statements,
+                vec![Statement::DataDefinition(DataDefinition::AlterTable {
+                    table_name: "users".into(),
+                    operations: vec![AlterTableOperation::AddColumn(db_schema::ColumnSchema {
+                        name: "role".into(),
+                        r#type: ValueType::Text,
+                        default: Value::from("member"),
+                        primary_key: false,
+                    })],
+                    if_exists: false,
+                })]
+            );
+        });
+    }
+
+    #[test]
+    fn translates_create_index() {
+        block_on(async {
+            let statements = SqlTranslator
+                .translate_with_params(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS users_email ON users (email)",
+                    None,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                statements,
+                vec![Statement::DataDefinition(
+                    DataDefinition::CreateIndexUnresolved {
+                        index_name: "users_email".into(),
+                        table_name: "users".into(),
+                        column_names: vec!["email".into()],
+                        unique: true,
+                        if_not_exists: true,
+                    }
+                )]
+            );
+        });
+    }
+
+    #[test]
+    fn rejects_create_index_expressions() {
+        block_on(async {
+            let error = SqlTranslator
+                .translate_with_params("CREATE INDEX users_email ON users (lower(email))", None)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("bare identifier columns"));
+        });
+    }
 
     #[test]
     fn test_simple_select() {

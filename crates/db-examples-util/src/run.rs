@@ -1,10 +1,10 @@
-use db_engine::{Engine, Kernel, RowReconciler};
+use db_engine::{Engine, Kernel, RowCodec};
 use db_query::Translator;
 
 pub async fn run<K, R, T>(engine: Engine<K, R>, translator: T)
 where
     K: Kernel,
-    R: RowReconciler<K::Transaction>,
+    R: RowCodec<K::Transaction>,
     T: Translator,
 {
     // Create tables via SQL using the facade.

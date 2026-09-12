@@ -3,7 +3,7 @@ use alloc::{boxed::Box, format, string::ToString};
 #[cfg(not(feature = "std"))]
 use alloc::{string::String, vec::Vec};
 
-use db_value::ValueType;
+use db_value::{Value, ValueType};
 
 pub type ColumnSchemaIndex = u32;
 
@@ -16,6 +16,7 @@ pub type ColumnSchemaIndex = u32;
 pub struct ColumnSchema {
     pub name: String,
     pub r#type: ValueType,
+    pub default: Value,
     pub primary_key: bool,
 }
 

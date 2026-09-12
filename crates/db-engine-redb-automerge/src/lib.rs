@@ -3,4 +3,4 @@ mod kernel;
 mod reconciler;
 
 pub use kernel::{RedbKernel, RedbKernelTransaction};
-pub use reconciler::AutomergeRowReconciler;
+pub use reconciler::AutomergeRowCodec;

@@ -305,10 +305,7 @@ mod test {
 
             let results = tree.range(..).collect::<Vec<_>>().await;
 
-            for result in results {
-                let (_, _) = result.expect("range error");
-                unreachable!("should not have items");
-            }
+            assert!(results.is_empty());
         });
     }
 }

@@ -316,6 +316,13 @@ pub enum DataDefinition {
         schema: IndexSchema,
         if_not_exists: bool,
     },
+    CreateIndexUnresolved {
+        index_name: String,
+        table_name: String,
+        column_names: Vec<String>,
+        unique: bool,
+        if_not_exists: bool,
+    },
     AlterIndex {
         index_name: String,
         operation: AlterIndexOperation,
