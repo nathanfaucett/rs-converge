@@ -1,18 +1,15 @@
-use alloc::{string::String, vec, vec::Vec};
+use alloc::{vec, vec::Vec};
 
 use db_schema::{ColumnSchemaIndex, IndexSchema};
 use db_value::{Row, Value};
 use futures::{StreamExt, pin_mut};
 
 use crate::{
-    EngineError, EngineResult, KernelTransaction, RowCodec,
-    catalog::{
-        ENGINE_INDEX_FIELD_COLUMN_COUNT, ENGINE_INDEX_FIELD_INDEX_NAME,
-        ENGINE_INDEX_FIELD_TABLE_NAME, ENGINE_INDEX_FIELD_UNIQUE, ENGINE_INDEX_FIELDS,
-        ENGINE_INDEX_FIELDS_FIELD_COLUMN_INDEX, ENGINE_INDEX_FIELDS_FIELD_FIELD_ORDER,
-        ENGINE_INDICES,
-    },
-    executor::{materialize_defaults, table_schema},
+    ColumnGenerationId, EngineError, EngineResult, IndexGenerationId, KernelTransaction, RowCodec,
+    TableGenerationId,
+    catalog::ENGINE_INDICES,
+    executor::{materialize_defaults, primary_key},
+    schema::{columns, table_label, table_schema_for},
 };
 
 pub(crate) const ENGINE_INDEX_RECORDS: &str = "__db_index_records";
@@ -24,6 +21,102 @@ where
     transaction.ensure_table(ENGINE_INDEX_RECORDS).await
 }
 
+async fn index<T>(transaction: &T, name: &str) -> EngineResult<Option<(IndexGenerationId, Row)>>
+where
+    T: KernelTransaction,
+{
+    let entries = transaction.scan_entries(ENGINE_INDICES);
+    pin_mut!(entries);
+    let mut winner = None;
+    while let Some(entry) = entries.next().await {
+        let (key, value) = entry?;
+        let Some(id) = key.values.first().and_then(Value::as_uuid).copied() else {
+            return Err(EngineError::custom("Invalid index generation"));
+        };
+        if value.values.first().and_then(Value::as_text) != Some(name) {
+            continue;
+        }
+        let tombstone = Row::new(vec![Value::from("index"), Value::Uuid(id)]);
+        if transaction
+            .get_entry("__db_schema_tombstones", &tombstone)
+            .await?
+            .is_some()
+        {
+            continue;
+        }
+        if winner
+            .as_ref()
+            .is_none_or(|(current, _): &(uuid::Uuid, Row)| id < *current)
+        {
+            winner = Some((id, value));
+        }
+    }
+    Ok(winner.map(|(id, value)| (IndexGenerationId(id), value)))
+}
+
+pub(crate) async fn index_generation_id<T>(
+    transaction: &T,
+    name: &str,
+) -> EngineResult<IndexGenerationId>
+where
+    T: KernelTransaction,
+{
+    index(transaction, name)
+        .await?
+        .map(|(id, _)| id)
+        .ok_or(EngineError::InvalidQuery("Index not found"))
+}
+
+async fn schema_for<T>(
+    transaction: &T,
+    id: IndexGenerationId,
+    value: Row,
+) -> EngineResult<IndexSchema>
+where
+    T: KernelTransaction,
+{
+    let label = value
+        .values
+        .first()
+        .and_then(Value::to_text)
+        .ok_or(EngineError::custom("Invalid index label"))?;
+    let table = value
+        .values
+        .get(1)
+        .and_then(Value::as_uuid)
+        .copied()
+        .map(TableGenerationId)
+        .ok_or(EngineError::custom("Invalid index table"))?;
+    let unique = value
+        .values
+        .get(2)
+        .and_then(Value::to_bool)
+        .ok_or(EngineError::custom("Invalid index uniqueness"))?;
+    let columns = columns(transaction, table).await?;
+    let mut positions = Vec::new();
+    for column in value.values.iter().skip(3) {
+        let column = column
+            .as_uuid()
+            .copied()
+            .map(ColumnGenerationId)
+            .ok_or(EngineError::custom("Invalid index column"))?;
+        positions.push(
+            columns
+                .iter()
+                .position(|(id, _)| *id == column)
+                .ok_or(EngineError::InvalidQuery("Index column not found"))?
+                as ColumnSchemaIndex,
+        );
+    }
+    let _ = id;
+    Ok(IndexSchema {
+        name: label,
+        table_name: table_label(transaction, table).await?,
+        column_indices: positions,
+        unique,
+    })
+}
+
 pub(crate) async fn index_schema<T>(
     transaction: &T,
     name: &str,
@@ -31,149 +124,197 @@ pub(crate) async fn index_schema<T>(
 where
     T: KernelTransaction,
 {
-    let index_key = Row::new(vec![Value::from(name)]);
-    let Some(index) = transaction.get_entry(ENGINE_INDICES, &index_key).await? else {
+    let Some((id, value)) = index(transaction, name).await? else {
         return Ok(None);
     };
-    let table_name = index
-        .values
-        .get(1)
-        .and_then(Value::to_text)
-        .ok_or(EngineError::InvalidQuery(ENGINE_INDEX_FIELD_TABLE_NAME))?;
-    let unique = index
-        .values
-        .get(2)
-        .and_then(Value::to_bool)
-        .ok_or(EngineError::InvalidQuery(ENGINE_INDEX_FIELD_UNIQUE))?;
-    let column_count = index
-        .values
-        .get(3)
-        .and_then(Value::to_integer)
-        .ok_or(EngineError::InvalidQuery(ENGINE_INDEX_FIELD_COLUMN_COUNT))?;
-    let column_count = usize::try_from(column_count)
-        .map_err(|_| EngineError::InvalidQuery(ENGINE_INDEX_FIELD_COLUMN_COUNT))?;
-
-    let entries = transaction.scan_entries(ENGINE_INDEX_FIELDS);
-    pin_mut!(entries);
-    let mut fields = Vec::new();
-    while let Some(entry) = entries.next().await {
-        let (_, field) = entry?;
-        if field.values.first().and_then(Value::as_text) != Some(name) {
-            continue;
-        }
-        let order =
-            field
-                .values
-                .get(1)
-                .and_then(Value::to_integer)
-                .ok_or(EngineError::InvalidQuery(
-                    ENGINE_INDEX_FIELDS_FIELD_FIELD_ORDER,
-                ))?;
-        let column =
-            field
-                .values
-                .get(2)
-                .and_then(Value::to_integer)
-                .ok_or(EngineError::InvalidQuery(
-                    ENGINE_INDEX_FIELDS_FIELD_COLUMN_INDEX,
-                ))?;
-        fields.push((order, column));
-    }
-    fields.sort_by_key(|(order, _)| *order);
-    if fields.len() != column_count {
-        return Ok(None);
-    }
-
-    Ok(Some(IndexSchema {
-        name: String::from(name),
-        table_name,
-        column_indices: fields
-            .into_iter()
-            .map(|(_, column)| {
-                ColumnSchemaIndex::try_from(column)
-                    .map_err(|_| EngineError::InvalidQuery("Invalid index column"))
-            })
-            .collect::<EngineResult<Vec<_>>>()?,
-        unique,
-    }))
+    schema_for(transaction, id, value).await.map(Some)
 }
 
-async fn indexes_for_table<T>(transaction: &T, table: &str) -> EngineResult<Vec<IndexSchema>>
+async fn indexes_for_table<T>(
+    transaction: &T,
+    table: TableGenerationId,
+) -> EngineResult<Vec<(IndexGenerationId, IndexSchema)>>
 where
     T: KernelTransaction,
 {
     let entries = transaction.scan_entries(ENGINE_INDICES);
     pin_mut!(entries);
-    let mut names = Vec::new();
+    let mut facts = Vec::new();
     while let Some(entry) = entries.next().await {
-        let (_, index) = entry?;
-        if index.values.get(1).and_then(Value::as_text) == Some(table) {
-            let name = index
-                .values
-                .first()
-                .and_then(Value::to_text)
-                .ok_or(EngineError::InvalidQuery(ENGINE_INDEX_FIELD_INDEX_NAME))?;
-            names.push(name);
+        let (key, value) = entry?;
+        let Some(id) = key.values.first().and_then(Value::as_uuid).copied() else {
+            continue;
+        };
+        facts.push((IndexGenerationId(id), value));
+    }
+
+    let mut visible = Vec::new();
+    for (id, value) in facts {
+        let tombstone = Row::new(vec![Value::from("index"), Value::Uuid(id.0)]);
+        if transaction
+            .get_entry("__db_schema_tombstones", &tombstone)
+            .await?
+            .is_none()
+        {
+            visible.push((id, value));
         }
     }
-    let mut schemas = Vec::with_capacity(names.len());
-    for name in names {
-        if let Some(schema) = index_schema(transaction, &name).await? {
-            schemas.push(schema);
+
+    let mut result = Vec::new();
+    for (id, value) in &visible {
+        if value.values.get(1).and_then(Value::as_uuid) != Some(&table.0) {
+            continue;
         }
+        let label = value
+            .values
+            .first()
+            .and_then(Value::as_text)
+            .ok_or(EngineError::custom("Invalid index label"))?;
+        let winner = visible
+            .iter()
+            .filter(|(_, candidate)| {
+                candidate.values.first().and_then(Value::as_text) == Some(label)
+            })
+            .map(|(candidate, _)| *candidate)
+            .min()
+            .ok_or(EngineError::custom("Missing index generation"))?;
+        if *id != winner {
+            continue;
+        }
+        result.push((*id, schema_for(transaction, *id, value.clone()).await?));
     }
-    Ok(schemas)
+    Ok(result)
 }
 
-fn record_key(schema: &IndexSchema, primary_key: &Row, row: &Row) -> EngineResult<Row> {
+fn record_key(
+    id: IndexGenerationId,
+    schema: &IndexSchema,
+    primary_key: &Row,
+    row: &Row,
+) -> EngineResult<Row> {
     let mut values = Vec::with_capacity(schema.column_indices.len() + primary_key.values.len() + 1);
-    values.push(Value::from(schema.name.as_str()));
+    values.push(Value::Uuid(id.0));
     for column in &schema.column_indices {
-        let value = row
-            .values
-            .get(*column as usize)
-            .ok_or(EngineError::InvalidQuery(
-                "Index column is missing from row",
-            ))?;
-        values.push(value.clone());
+        values.push(
+            row.values
+                .get(*column as usize)
+                .cloned()
+                .ok_or(EngineError::InvalidQuery(
+                    "Index column is missing from row",
+                ))?,
+        );
     }
     values.extend(primary_key.values.clone());
     Ok(Row::new(values))
 }
 
-async fn insert_record<T>(
-    transaction: &mut T,
+pub(crate) async fn lookup<T, R>(
+    transaction: &T,
+    codec: &R,
+    name: &str,
+    values: &Row,
+) -> EngineResult<Option<Row>>
+where
+    T: KernelTransaction,
+    R: RowCodec<T>,
+{
+    let Some((id, value)) = index(transaction, name).await? else {
+        return Err(EngineError::InvalidQuery("Index not found"));
+    };
+    let schema = schema_for(transaction, id, value).await?;
+    if values.values.len() != schema.column_indices.len() {
+        return Err(EngineError::InvalidQuery(
+            "Index key has the wrong column count",
+        ));
+    }
+    let entries = transaction.scan_entries(ENGINE_INDEX_RECORDS);
+    pin_mut!(entries);
+    let mut winner = None;
+    while let Some(entry) = entries.next().await {
+        let (key, value) = entry?;
+        if key.values.first().and_then(Value::as_uuid) != Some(&id.0)
+            || key.values.get(1..=values.values.len()) != Some(values.values.as_slice())
+        {
+            continue;
+        }
+        winner = Some(winner.map_or(value.clone(), |current: Row| current.min(value)));
+    }
+    let Some(key) = winner else {
+        return Ok(None);
+    };
+    let table = table_id_from_index(&schema, transaction).await?;
+    let mapping = crate::change::row_generation_id(transaction, table, &key).await?;
+    let Some(row) = mapping else {
+        return Ok(None);
+    };
+    codec.get_row(transaction, &table, &row).await
+}
+
+async fn table_id_from_index<T>(
     schema: &IndexSchema,
-    key: &Row,
-    row: &Row,
-) -> EngineResult<()>
+    transaction: &T,
+) -> EngineResult<TableGenerationId>
 where
     T: KernelTransaction,
 {
-    let record_key = record_key(schema, key, row)?;
-    if schema.unique {
-        let prefix_len = schema.column_indices.len() + 1;
-        let records = transaction.scan_entries(ENGINE_INDEX_RECORDS);
-        pin_mut!(records);
-        while let Some(entry) = records.next().await {
-            let (existing_key, existing_value) = entry?;
-            if existing_key.values.get(..prefix_len) == record_key.values.get(..prefix_len)
-                && existing_value != *key
+    crate::schema::table_id(transaction, &schema.table_name).await
+}
+
+pub(crate) async fn rebuild_table<T, R>(
+    transaction: &mut T,
+    codec: &R,
+    table: TableGenerationId,
+) -> EngineResult<()>
+where
+    T: KernelTransaction,
+    R: RowCodec<T>,
+{
+    ensure_index_records(transaction).await?;
+    let indexes = indexes_for_table(transaction, table).await?;
+    let ids: Vec<_> = indexes.iter().map(|(id, _)| id.0).collect();
+    let stale = {
+        let entries = transaction.scan_entries(ENGINE_INDEX_RECORDS);
+        pin_mut!(entries);
+        let mut stale = Vec::new();
+        while let Some(entry) = entries.next().await {
+            let (key, _) = entry?;
+            if key
+                .values
+                .first()
+                .and_then(Value::as_uuid)
+                .is_some_and(|id| ids.contains(id))
             {
-                return Err(EngineError::InvalidQuery(
-                    "Unique index constraint violated",
-                ));
+                stale.push(key);
             }
         }
+        stale
+    };
+    for key in stale {
+        transaction.remove_entry(ENGINE_INDEX_RECORDS, &key).await?;
     }
-    transaction
-        .put_entry(ENGINE_INDEX_RECORDS, record_key, key.clone())
-        .await
+
+    let schema =
+        table_schema_for(transaction, table, table_label(transaction, table).await?).await?;
+    let rows_to_index = {
+        let rows = codec.scan_rows(transaction, &table);
+        pin_mut!(rows);
+        let mut rows_to_index = Vec::new();
+        while let Some(row) = rows.next().await {
+            rows_to_index.push(row?);
+        }
+        rows_to_index
+    };
+    for (_, row) in rows_to_index {
+        let row = materialize_defaults(&schema, row);
+        let key = primary_key(&schema, &row)?;
+        update_row(transaction, table, &key, None, Some(&row)).await?;
+    }
+    Ok(())
 }
 
 pub(crate) async fn update_row<T>(
     transaction: &mut T,
-    table: &str,
+    table: TableGenerationId,
     key: &Row,
     old: Option<&Row>,
     new: Option<&Row>,
@@ -182,86 +323,26 @@ where
     T: KernelTransaction,
 {
     ensure_index_records(transaction).await?;
-    let schemas = indexes_for_table(transaction, table).await?;
-    if schemas.is_empty() {
-        return Ok(());
-    }
-    let table_schema = table_schema(transaction, table).await?;
-    let old = old.map(|row| materialize_defaults(&table_schema, row.clone()));
-    let new = new.map(|row| materialize_defaults(&table_schema, row.clone()));
-    for schema in schemas {
-        if let Some(row) = &old {
+    let schema =
+        table_schema_for(transaction, table, table_label(transaction, table).await?).await?;
+    for (id, index) in indexes_for_table(transaction, table).await? {
+        if let Some(row) = old {
             transaction
-                .remove_entry(ENGINE_INDEX_RECORDS, &record_key(&schema, key, row)?)
+                .remove_entry(
+                    ENGINE_INDEX_RECORDS,
+                    &record_key(id, &index, key, &materialize_defaults(&schema, row.clone()))?,
+                )
                 .await?;
         }
-        if let Some(row) = &new {
-            insert_record(transaction, &schema, key, row).await?;
+        if let Some(row) = new {
+            transaction
+                .put_entry(
+                    ENGINE_INDEX_RECORDS,
+                    record_key(id, &index, key, &materialize_defaults(&schema, row.clone()))?,
+                    key.clone(),
+                )
+                .await?;
         }
-    }
-    Ok(())
-}
-
-pub(crate) async fn remove<T>(transaction: &mut T, name: &str) -> EngineResult<()>
-where
-    T: KernelTransaction,
-{
-    let keys = {
-        let records = transaction.scan_entries(ENGINE_INDEX_RECORDS);
-        pin_mut!(records);
-        let mut keys = Vec::new();
-        while let Some(entry) = records.next().await {
-            let (key, _) = entry?;
-            if key.values.first().and_then(Value::as_text) == Some(name) {
-                keys.push(key);
-            }
-        }
-        keys
-    };
-    for key in keys {
-        transaction.remove_entry(ENGINE_INDEX_RECORDS, &key).await?;
-    }
-    Ok(())
-}
-
-pub(crate) async fn rebuild<T, R>(transaction: &mut T, codec: &R, name: &str) -> EngineResult<()>
-where
-    T: KernelTransaction,
-    R: RowCodec<T>,
-{
-    ensure_index_records(transaction).await?;
-    let Some(schema) = index_schema(transaction, name).await? else {
-        return Ok(());
-    };
-    let keys = {
-        let records = transaction.scan_entries(ENGINE_INDEX_RECORDS);
-        pin_mut!(records);
-        let mut keys = Vec::new();
-        while let Some(entry) = records.next().await {
-            let (key, _) = entry?;
-            if key.values.first().and_then(Value::as_text) == Some(name) {
-                keys.push(key);
-            }
-        }
-        keys
-    };
-    for key in keys {
-        transaction.remove_entry(ENGINE_INDEX_RECORDS, &key).await?;
-    }
-
-    let rows = {
-        let rows = codec.scan_rows(transaction, &schema.table_name);
-        pin_mut!(rows);
-        let mut result = Vec::new();
-        while let Some(row) = rows.next().await {
-            result.push(row?);
-        }
-        result
-    };
-    let table_schema = table_schema(transaction, &schema.table_name).await?;
-    for (key, row) in rows {
-        let row = materialize_defaults(&table_schema, row);
-        insert_record(transaction, &schema, &key, &row).await?;
     }
     Ok(())
 }

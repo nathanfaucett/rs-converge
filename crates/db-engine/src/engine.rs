@@ -6,7 +6,8 @@ use alloc::{
     vec::Vec,
 };
 use db_schema::{IndexSchema, TableSchema};
-use futures::{StreamExt, pin_mut};
+use db_value::{Row, Value};
+
 #[cfg(feature = "std")]
 use std::sync::Arc;
 
@@ -15,13 +16,22 @@ use thiserror::Error;
 use db_query::{QueryParams, QueryResult, Statement, TranslateError, Translator};
 
 use crate::{
+    Checkpoint, ColumnGenerationId, EnvelopeId, EnvelopeOutcome, Frontier, IndexGenerationId,
+    TableGenerationId, TransactionEnvelope,
     catalog::{
-        ENGINE_CHANGES, ENGINE_INDEX_FIELDS, ENGINE_INDICES, ENGINE_TABLE_FIELDS, ENGINE_TABLES,
+        ENGINE_INDEX_FIELDS, ENGINE_INDICES, ENGINE_ROW_MAPPINGS, ENGINE_SCHEMA_TOMBSTONES,
+        ENGINE_TABLE_FIELDS, ENGINE_TABLES,
     },
-    change::{Change, ChangeReplication, apply_change, ensure_change_log},
     codec::RowCodec,
-    executor::execute_statement,
-    index::{ENGINE_INDEX_RECORDS, index_schema},
+    envelope::{
+        checkpoint, ensure_envelope_log, envelopes_missing, frontier, import as import_envelope,
+        import_checkpoint, outcome, outcomes, quarantine,
+    },
+    executor::{
+        execute_statement, resolve_row as resolve_conflicted_row,
+        row_conflicts as conflicted_row_columns,
+    },
+    index::{ENGINE_INDEX_RECORDS, index_generation_id, index_schema, lookup as index_lookup},
     kernel::{Kernel, KernelTransaction},
 };
 
@@ -84,11 +94,44 @@ where
         schema.ok_or(EngineError::InvalidQuery("Index not found"))
     }
 
+    pub async fn index_lookup(&self, name: &str, values: &Row) -> EngineResult<Option<Row>> {
+        let transaction = self.kernel.transaction().await?;
+        let row = index_lookup(&transaction, self.reconciler.as_ref(), name, values).await?;
+        transaction.rollback().await?;
+        Ok(row)
+    }
+
     pub async fn table_schema(&self, name: &str) -> EngineResult<TableSchema> {
         let transaction = self.kernel.transaction().await?;
         let schema = crate::executor::table_schema(&transaction, name).await?;
         transaction.rollback().await?;
         Ok(schema)
+    }
+
+    pub async fn table_generation_id(&self, name: &str) -> EngineResult<TableGenerationId> {
+        let transaction = self.kernel.transaction().await?;
+        let id = crate::executor::table_generation_id(&transaction, name).await?;
+        transaction.rollback().await?;
+        Ok(id)
+    }
+
+    pub async fn column_generation_id(
+        &self,
+        table_name: &str,
+        column_name: &str,
+    ) -> EngineResult<ColumnGenerationId> {
+        let transaction = self.kernel.transaction().await?;
+        let id =
+            crate::executor::column_generation_id(&transaction, table_name, column_name).await?;
+        transaction.rollback().await?;
+        Ok(id)
+    }
+
+    pub async fn index_generation_id(&self, name: &str) -> EngineResult<IndexGenerationId> {
+        let transaction = self.kernel.transaction().await?;
+        let id = index_generation_id(&transaction, name).await?;
+        transaction.rollback().await?;
+        Ok(id)
     }
 
     pub async fn create_table(&self, table_schema: TableSchema) -> EngineResult<()> {
@@ -102,8 +145,15 @@ where
         Ok(())
     }
 
-    pub async fn drop_table(&self, _table_name: &str) -> EngineResult<()> {
-        Err(EngineError::Unsupported("DROP TABLE is not supported"))
+    pub async fn drop_table(&self, table_name: &str) -> EngineResult<()> {
+        self.execute(vec![Statement::DataDefinition(
+            db_query::DataDefinition::DropTable {
+                table_name: String::from(table_name),
+                if_exists: false,
+            },
+        )])
+        .await?;
+        Ok(())
     }
 
     pub async fn translate_and_execute_with_params<T>(
@@ -135,68 +185,142 @@ where
         execute_statement(self, statements).await
     }
 
-    pub async fn apply_changes(&self, changes: Vec<Change>) -> EngineResult<()> {
+    pub async fn frontier(&self) -> EngineResult<Frontier> {
         let mut transaction = self.kernel.transaction().await?;
-        for table in [
-            ENGINE_TABLES,
-            ENGINE_TABLE_FIELDS,
-            ENGINE_INDICES,
-            ENGINE_INDEX_FIELDS,
-            ENGINE_INDEX_RECORDS,
-        ] {
-            transaction.ensure_table(table).await?;
+        ensure_replication_tables(&mut transaction).await?;
+        let result = frontier(&transaction).await?;
+        transaction.commit().await?;
+        Ok(result)
+    }
+
+    pub async fn export_checkpoint(&self) -> EngineResult<Checkpoint> {
+        let mut transaction = self.kernel.transaction().await?;
+        ensure_replication_tables(&mut transaction).await?;
+        let result = checkpoint(&transaction, self.reconciler.as_ref()).await?;
+        transaction.commit().await?;
+        Ok(result)
+    }
+
+    pub async fn import_checkpoint(&self, checkpoint: Checkpoint) -> EngineResult<()> {
+        let mut transaction = self.kernel.transaction().await?;
+        ensure_replication_tables(&mut transaction).await?;
+        let result =
+            import_checkpoint(&mut transaction, self.reconciler.as_ref(), checkpoint).await;
+        match result {
+            Ok(()) => transaction.commit().await,
+            Err(error) => {
+                transaction.rollback().await?;
+                Err(error)
+            }
         }
-        ensure_change_log(&mut transaction).await?;
-        for change in changes {
-            apply_change(&mut transaction, self.reconciler.as_ref(), change).await?;
+    }
+
+    pub async fn missing_envelopes(
+        &self,
+        frontier: &Frontier,
+    ) -> EngineResult<Vec<TransactionEnvelope>> {
+        let mut transaction = self.kernel.transaction().await?;
+        ensure_replication_tables(&mut transaction).await?;
+        let result = envelopes_missing(&transaction, frontier).await?;
+        transaction.commit().await?;
+        Ok(result)
+    }
+
+    pub async fn envelope_outcome(&self, id: EnvelopeId) -> EngineResult<Option<EnvelopeOutcome>> {
+        let mut transaction = self.kernel.transaction().await?;
+        ensure_replication_tables(&mut transaction).await?;
+        let result = outcome(&transaction, id).await?;
+        transaction.commit().await?;
+        Ok(result)
+    }
+
+    pub async fn envelope_outcomes(&self) -> EngineResult<Vec<(EnvelopeId, EnvelopeOutcome)>> {
+        let mut transaction = self.kernel.transaction().await?;
+        ensure_replication_tables(&mut transaction).await?;
+        let outcomes = outcomes(&transaction).await?;
+        transaction.commit().await?;
+        Ok(outcomes)
+    }
+
+    pub async fn row_conflicts(&self, table_name: &str, key: &Row) -> EngineResult<Vec<String>> {
+        let transaction = self.kernel.transaction().await?;
+        let result =
+            conflicted_row_columns(&transaction, self.reconciler.as_ref(), table_name, key).await?;
+        transaction.rollback().await?;
+        Ok(result)
+    }
+
+    pub async fn resolve_row(
+        &self,
+        table_name: &str,
+        key: &Row,
+        values: Vec<(String, Value)>,
+    ) -> EngineResult<()> {
+        let mut transaction = self.kernel.transaction().await?;
+        ensure_replication_tables(&mut transaction).await?;
+        let result = resolve_conflicted_row(
+            &mut transaction,
+            self.reconciler.as_ref(),
+            table_name,
+            key,
+            values,
+        )
+        .await;
+        match result {
+            Ok(()) => transaction.commit().await,
+            Err(error) => {
+                transaction.rollback().await?;
+                Err(error)
+            }
         }
-        transaction.commit().await
+    }
+
+    pub async fn import_envelope(
+        &self,
+        envelope: TransactionEnvelope,
+    ) -> EngineResult<EnvelopeOutcome> {
+        let mut transaction = self.kernel.transaction().await?;
+        ensure_replication_tables(&mut transaction).await?;
+        let outcome = import_envelope(&mut transaction, self.reconciler.as_ref(), envelope).await?;
+        transaction.commit().await?;
+        Ok(outcome)
+    }
+
+    pub async fn import_envelope_bytes(&self, bytes: Vec<u8>) -> EngineResult<EnvelopeOutcome> {
+        let envelope = match TransactionEnvelope::decode(&bytes) {
+            Ok(envelope) => envelope,
+            Err(error) => return self.quarantine_envelope(bytes, error.to_string()).await,
+        };
+        self.import_envelope(envelope).await
+    }
+
+    async fn quarantine_envelope(
+        &self,
+        bytes: Vec<u8>,
+        reason: String,
+    ) -> EngineResult<EnvelopeOutcome> {
+        let mut transaction = self.kernel.transaction().await?;
+        ensure_replication_tables(&mut transaction).await?;
+        let outcome = quarantine(&mut transaction, bytes, reason).await?;
+        transaction.commit().await?;
+        Ok(outcome)
     }
 }
 
-impl<K, R> ChangeReplication for Engine<K, R>
+async fn ensure_replication_tables<T>(transaction: &mut T) -> EngineResult<()>
 where
-    K: Kernel,
-    R: RowCodec<K::Transaction>,
+    T: KernelTransaction,
 {
-    type Cursor = i64;
-
-    async fn changes_since(
-        &self,
-        cursor: Option<&Self::Cursor>,
-    ) -> EngineResult<(Self::Cursor, Vec<Change>)> {
-        let transaction = self.kernel.transaction().await?;
-        let mut changes = Vec::new();
-        let mut next = cursor.copied().unwrap_or_default();
-        {
-            let entries = transaction.scan_entries(ENGINE_CHANGES);
-            pin_mut!(entries);
-            while let Some(entry) = entries.next().await {
-                let (key, value) = entry?;
-                let Some(sequence) = key.values.first().and_then(db_value::Value::to_integer)
-                else {
-                    return Err(EngineError::custom("Invalid canonical change sequence"));
-                };
-                if cursor.is_some_and(|cursor| sequence <= *cursor) {
-                    continue;
-                }
-                let Some(bytes) = value.values.first().and_then(db_value::Value::as_blob) else {
-                    return Err(EngineError::custom("Invalid canonical change"));
-                };
-                let change: Change = postcard::from_bytes(bytes).map_err(EngineError::custom)?;
-                next = next.max(sequence);
-                changes.push((sequence, change));
-            }
-        }
-        changes.sort_by_key(|(sequence, _)| *sequence);
-        transaction.rollback().await?;
-        Ok((
-            next,
-            changes.into_iter().map(|(_, change)| change).collect(),
-        ))
+    for table in [
+        ENGINE_TABLES,
+        ENGINE_TABLE_FIELDS,
+        ENGINE_INDICES,
+        ENGINE_INDEX_FIELDS,
+        ENGINE_INDEX_RECORDS,
+        ENGINE_ROW_MAPPINGS,
+        ENGINE_SCHEMA_TOMBSTONES,
+    ] {
+        transaction.ensure_table(table).await?;
     }
-
-    async fn apply_changes(&self, changes: Vec<Change>) -> EngineResult<()> {
-        Engine::apply_changes(self, changes).await
-    }
+    ensure_envelope_log(transaction).await
 }

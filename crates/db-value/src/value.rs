@@ -321,6 +321,7 @@ impl Row {
     feature = "automerge",
     derive(autosurgeon::Hydrate, autosurgeon::Reconcile)
 )]
+#[repr(u8)]
 pub enum ValueType {
     Null,
     Type,
@@ -335,17 +336,7 @@ pub enum ValueType {
 
 impl ValueType {
     pub fn rank(&self) -> u8 {
-        match self {
-            ValueType::Null => 0,
-            ValueType::Type => 1,
-            ValueType::Uuid => 2,
-            ValueType::Bool => 3,
-            ValueType::Integer => 4,
-            ValueType::Float => 5,
-            ValueType::Text => 6,
-            ValueType::Json => 7,
-            ValueType::Blob => 8,
-        }
+        *self as u8
     }
 }
 

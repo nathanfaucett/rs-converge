@@ -37,4 +37,4 @@
 ## CRAP (Complexity, Risk, and Priority)
 
 - Assess new features and changes for complexity, risk, and priority before implementation.
-- Use `cargo crap --all-targets` to evaluate code complexity and identify areas for refactoring.
+- Use `just crap` to evaluate code complexity and identify areas for refactoring.

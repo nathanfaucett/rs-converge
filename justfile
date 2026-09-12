@@ -38,7 +38,7 @@ clippy-fix:
     cargo clippy --workspace --all-targets --fix --allow-dirty --broken-code -- -D warnings
 
 crap *args:
-    RUST_MIN_STACK=67108864 cargo hack llvm-cov --workspace --lcov --output-path /tmp/lcov.info && cargo crap --workspace --lcov /tmp/lcov.info  {{ args }}
+    RUST_MIN_STACK=67108864 cargo llvm-cov --workspace --all-targets --lcov --output-path /tmp/lcov.info && cargo crap --workspace --lcov /tmp/lcov.info --fail-above {{ args }}
 
 crap-summary:
     just crap --summary

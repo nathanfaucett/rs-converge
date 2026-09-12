@@ -19,7 +19,7 @@ fn database_path() -> std::path::PathBuf {
 async fn main() {
     let path = database_path();
     let database = Arc::new(redb::Database::create(&path).expect("open Redb database"));
-    let engine = Engine::new(RedbKernel::new(database), AutomergeRowCodec);
+    let engine = Engine::new(RedbKernel::new(database), AutomergeRowCodec::new());
 
     db_examples_util::run(engine, SqlTranslator).await;
     std::fs::remove_file(path).expect("remove Redb database");

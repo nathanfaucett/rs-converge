@@ -25,58 +25,78 @@ pub enum JsonNumber {
 
 impl Eq for JsonNumber {}
 
+impl JsonNumber {
+    fn eq_i64(&self, value: i64) -> bool {
+        match self {
+            JsonNumber::I64(other) => value == *other,
+            JsonNumber::U64(other) => u64::try_from(value) == Ok(*other),
+            JsonNumber::F64(other) => (value as f64) == *other,
+        }
+    }
+
+    fn cmp_i64(&self, value: i64) -> Ordering {
+        match self {
+            JsonNumber::I64(other) => value.cmp(other),
+            JsonNumber::U64(other) => match u64::try_from(value) {
+                Ok(value) => value.cmp(other),
+                Err(_) => Ordering::Less,
+            },
+            JsonNumber::F64(other) => (value as f64).to_bits().cmp(&other.to_bits()),
+        }
+    }
+
+    fn eq_u64(&self, value: u64) -> bool {
+        match self {
+            JsonNumber::I64(other) => u64::try_from(*other) == Ok(value),
+            JsonNumber::U64(other) => value == *other,
+            JsonNumber::F64(other) => (value as f64) == *other,
+        }
+    }
+
+    fn cmp_u64(&self, value: u64) -> Ordering {
+        match self {
+            JsonNumber::I64(other) => match u64::try_from(*other) {
+                Ok(other) => value.cmp(&other),
+                Err(_) => Ordering::Greater,
+            },
+            JsonNumber::U64(other) => value.cmp(other),
+            JsonNumber::F64(other) => (value as f64).to_bits().cmp(&other.to_bits()),
+        }
+    }
+
+    fn eq_f64(&self, value: f64) -> bool {
+        match self {
+            JsonNumber::I64(other) => value == (*other as f64),
+            JsonNumber::U64(other) => value == (*other as f64),
+            JsonNumber::F64(other) => value == *other,
+        }
+    }
+
+    fn cmp_f64(&self, value: f64) -> Ordering {
+        match self {
+            JsonNumber::I64(other) => value.to_bits().cmp(&(*other as f64).to_bits()),
+            JsonNumber::U64(other) => value.to_bits().cmp(&(*other as f64).to_bits()),
+            JsonNumber::F64(other) => value.to_bits().cmp(&other.to_bits()),
+        }
+    }
+}
+
 impl PartialEq for JsonNumber {
     fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (JsonNumber::I64(i1), JsonNumber::I64(i2)) => i1 == i2,
-            (JsonNumber::U64(u1), JsonNumber::U64(u2)) => u1 == u2,
-            (JsonNumber::F64(f1), JsonNumber::F64(f2)) => f1 == f2,
-            (JsonNumber::I64(i), JsonNumber::U64(u)) => {
-                if *i < 0 {
-                    false
-                } else {
-                    (*i as u64) == *u
-                }
-            }
-            (JsonNumber::U64(u), JsonNumber::I64(i)) => {
-                if *i < 0 {
-                    false
-                } else {
-                    *u == (*i as u64)
-                }
-            }
-            (JsonNumber::I64(i), JsonNumber::F64(f)) => (*i as f64) == *f,
-            (JsonNumber::F64(f), JsonNumber::I64(i)) => *f == (*i as f64),
-            (JsonNumber::U64(u), JsonNumber::F64(f)) => (*u as f64) == *f,
-            (JsonNumber::F64(f), JsonNumber::U64(u)) => *f == (*u as f64),
+        match self {
+            JsonNumber::I64(value) => other.eq_i64(*value),
+            JsonNumber::U64(value) => other.eq_u64(*value),
+            JsonNumber::F64(value) => other.eq_f64(*value),
         }
     }
 }
 
 impl Ord for JsonNumber {
     fn cmp(&self, other: &Self) -> Ordering {
-        match (self, other) {
-            (JsonNumber::I64(i1), JsonNumber::I64(i2)) => i1.cmp(i2),
-            (JsonNumber::U64(u1), JsonNumber::U64(u2)) => u1.cmp(u2),
-            (JsonNumber::F64(f1), JsonNumber::F64(f2)) => f1.to_bits().cmp(&f2.to_bits()),
-            (JsonNumber::I64(i), JsonNumber::U64(u)) => {
-                if *i < 0 {
-                    Ordering::Less
-                } else {
-                    (*i as u64).cmp(u)
-                }
-            }
-            (JsonNumber::U64(u), JsonNumber::I64(i)) => {
-                if *i < 0 {
-                    Ordering::Greater
-                } else {
-                    u.cmp(&(*i as u64))
-                }
-            }
-            (JsonNumber::I64(i), JsonNumber::F64(f)) => (*i as f64).to_bits().cmp(&f.to_bits()),
-            (JsonNumber::F64(f), JsonNumber::I64(i)) => f.to_bits().cmp(&(*i as f64).to_bits()),
-            (JsonNumber::U64(u), JsonNumber::F64(f)) => (*u as f64).to_bits().cmp(&f.to_bits()),
-            (JsonNumber::F64(f), JsonNumber::U64(u)) => f.to_bits().cmp(&(*u as f64).to_bits()),
+        match self {
+            JsonNumber::I64(value) => other.cmp_i64(*value),
+            JsonNumber::U64(value) => other.cmp_u64(*value),
+            JsonNumber::F64(value) => other.cmp_f64(*value),
         }
     }
 }

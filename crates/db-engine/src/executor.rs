@@ -1,4 +1,4 @@
-use alloc::{string::String, vec, vec::Vec};
+use alloc::{string::String, vec::Vec};
 
 use db_query::{
     AlterTableOperation, DataDefinition, Query, QueryColumn, QueryDelete, QueryExpr,
@@ -11,17 +11,18 @@ use futures::{StreamExt, pin_mut};
 use uuid::Uuid;
 
 use crate::{
-    Change, EngineError, EngineResult,
-    catalog::{
-        ENGINE_INDEX_FIELDS, ENGINE_INDICES, ENGINE_TABLE_FIELDS,
-        ENGINE_TABLE_FIELDS_FIELD_COLUMN_ID, ENGINE_TABLE_FIELDS_FIELD_COLUMN_INDEX,
-        ENGINE_TABLE_FIELDS_FIELD_COLUMN_NAME, ENGINE_TABLE_FIELDS_FIELD_DEFAULT,
-        ENGINE_TABLE_FIELDS_FIELD_PRIMARY_KEY, ENGINE_TABLE_FIELDS_FIELD_VALUE_TYPE, ENGINE_TABLES,
-    },
-    change::{apply_change, ensure_change_log},
+    Change, ColumnGenerationId, EngineError, EngineResult, IndexGenerationId, RowGenerationId,
+    SchemaChange, TableGenerationId,
+    catalog::ENGINE_ROW_MAPPINGS,
+    change::{apply_local_change, ensure_change_log, row_generation_id},
     codec::RowCodec,
     engine::Engine,
+    envelope::record_local,
     kernel::{Kernel, KernelTransaction},
+    schema::{
+        column_id, columns as schema_columns, ensure as ensure_schema, table_id,
+        table_schema as schema_table_schema,
+    },
 };
 
 pub async fn execute_statement<K, R>(
@@ -41,15 +42,28 @@ where
         transaction.rollback().await?;
         return Err(error);
     }
+    let mut changes = Vec::new();
     let mut results = Vec::with_capacity(statements.len());
 
     for statement in statements {
         let result = match statement {
             db_query::Statement::Query(query) => {
-                execute_query(&mut transaction, engine.reconciler.as_ref(), query).await
+                execute_query(
+                    &mut transaction,
+                    engine.reconciler.as_ref(),
+                    &mut changes,
+                    query,
+                )
+                .await
             }
             db_query::Statement::DataDefinition(ddl) => {
-                execute_ddl(&mut transaction, engine.reconciler.as_ref(), ddl).await
+                execute_ddl(
+                    &mut transaction,
+                    engine.reconciler.as_ref(),
+                    &mut changes,
+                    ddl,
+                )
+                .await
             }
         };
         match result {
@@ -61,6 +75,7 @@ where
         }
     }
 
+    record_local(&mut transaction, changes).await?;
     transaction.commit().await?;
     Ok(results)
 }
@@ -69,20 +84,14 @@ async fn ensure_catalog<T>(transaction: &mut T) -> EngineResult<()>
 where
     T: KernelTransaction,
 {
-    for table in [
-        ENGINE_TABLES,
-        ENGINE_TABLE_FIELDS,
-        ENGINE_INDICES,
-        ENGINE_INDEX_FIELDS,
-    ] {
-        transaction.ensure_table(table).await?;
-    }
-    Ok(())
+    ensure_schema(transaction).await?;
+    transaction.ensure_table(ENGINE_ROW_MAPPINGS).await
 }
 
 async fn execute_query<T, R>(
     transaction: &mut T,
     reconciler: &R,
+    changes: &mut Vec<Change>,
     query: Query,
 ) -> EngineResult<QueryResult>
 where
@@ -90,16 +99,44 @@ where
     R: RowCodec<T>,
 {
     match query {
-        Query::Insert(insert) => insert_row(transaction, reconciler, insert).await,
+        Query::Insert(insert) => insert_row(transaction, reconciler, changes, insert).await,
         Query::Select(select) => select_rows(transaction, reconciler, select).await,
-        Query::Update(update) => update_rows(transaction, reconciler, update).await,
-        Query::Delete(delete) => delete_rows(transaction, reconciler, delete).await,
+        Query::Update(update) => update_rows(transaction, reconciler, changes, update).await,
+        Query::Delete(delete) => delete_rows(transaction, reconciler, changes, delete).await,
     }
 }
 
 async fn execute_ddl<T, R>(
     transaction: &mut T,
     reconciler: &R,
+    changes: &mut Vec<Change>,
+    ddl: DataDefinition,
+) -> EngineResult<QueryResult>
+where
+    T: KernelTransaction,
+    R: RowCodec<T>,
+{
+    match &ddl {
+        DataDefinition::CreateTable { .. }
+        | DataDefinition::DropTable { .. }
+        | DataDefinition::AlterTable { .. } => {
+            execute_table_ddl(transaction, reconciler, changes, ddl).await
+        }
+        DataDefinition::CreateIndex { .. }
+        | DataDefinition::CreateIndexUnresolved { .. }
+        | DataDefinition::DropIndex { .. } => {
+            execute_index_ddl(transaction, reconciler, changes, ddl).await
+        }
+        _ => Err(EngineError::Unsupported(
+            "only CREATE TABLE and ALTER TABLE ADD COLUMN are supported",
+        )),
+    }
+}
+
+async fn execute_table_ddl<T, R>(
+    transaction: &mut T,
+    codec: &R,
+    changes: &mut Vec<Change>,
     ddl: DataDefinition,
 ) -> EngineResult<QueryResult>
 where
@@ -111,36 +148,70 @@ where
             schema,
             if_not_exists,
         } => {
-            let table_key = Row::new(vec![Value::from(schema.name.as_str())]);
-            if transaction
-                .get_entry(ENGINE_TABLES, &table_key)
-                .await?
-                .is_some()
-            {
-                if if_not_exists {
-                    return Ok(QueryResult::default());
-                }
-                return Err(EngineError::InvalidQuery("Table already exists"));
+            if table_generation_id(transaction, &schema.name).await.is_ok() {
+                return if if_not_exists {
+                    Ok(QueryResult::default())
+                } else {
+                    Err(EngineError::InvalidQuery("Table already exists"))
+                };
             }
-            create_table(transaction, reconciler, schema).await?;
+            create_table(transaction, codec, changes, schema).await?;
             Ok(QueryResult::default())
         }
+        DataDefinition::DropTable {
+            table_name,
+            if_exists,
+        } => {
+            let table = match table_generation_id(transaction, &table_name).await {
+                Ok(table) => table,
+                Err(_) if if_exists => return Ok(QueryResult::default()),
+                Err(error) => return Err(error),
+            };
+            apply_local_change(
+                transaction,
+                codec,
+                changes,
+                Change::schema(Uuid::now_v7(), SchemaChange::TombstoneTable(table)),
+            )
+            .await?;
+            Ok(QueryResult::default())
+        }
+        DataDefinition::AlterTable {
+            table_name,
+            operations,
+            if_exists,
+        } => {
+            alter_table(
+                transaction,
+                codec,
+                changes,
+                table_name,
+                operations,
+                if_exists,
+            )
+            .await
+        }
+        _ => unreachable!(),
+    }
+}
+
+async fn execute_index_ddl<T, R>(
+    transaction: &mut T,
+    codec: &R,
+    changes: &mut Vec<Change>,
+    ddl: DataDefinition,
+) -> EngineResult<QueryResult>
+where
+    T: KernelTransaction,
+    R: RowCodec<T>,
+{
+    match ddl {
         DataDefinition::CreateIndex {
             schema,
             if_not_exists,
         } => {
-            let index_key = Row::new(vec![Value::from(schema.name.as_str())]);
-            if transaction
-                .get_entry(ENGINE_INDICES, &index_key)
-                .await?
-                .is_some()
-            {
-                if if_not_exists {
-                    return Ok(QueryResult::default());
-                }
-                return Err(EngineError::InvalidQuery("Index already exists"));
-            }
-            create_index(transaction, reconciler, schema).await?;
+            ensure_index_absent(transaction, &schema.name, if_not_exists).await?;
+            create_index(transaction, codec, changes, schema).await?;
             Ok(QueryResult::default())
         }
         DataDefinition::CreateIndexUnresolved {
@@ -150,94 +221,151 @@ where
             unique,
             if_not_exists,
         } => {
-            let index_key = Row::new(vec![Value::from(index_name.as_str())]);
-            if transaction
-                .get_entry(ENGINE_INDICES, &index_key)
-                .await?
-                .is_some()
-            {
-                if if_not_exists {
-                    return Ok(QueryResult::default());
-                }
-                return Err(EngineError::InvalidQuery("Index already exists"));
-            }
-            let table_schema = table_schema(transaction, &table_name).await?;
-            let column_indices = column_names
-                .iter()
-                .map(|column_name| {
-                    table_schema
-                        .columns
-                        .iter()
-                        .position(|column| column.name == *column_name)
-                        .map(|index| index as u32)
-                        .ok_or(EngineError::InvalidQuery("Index column not found"))
-                })
-                .collect::<EngineResult<Vec<_>>>()?;
-            create_index(
+            create_unresolved_index(
                 transaction,
-                reconciler,
-                db_schema::IndexSchema {
-                    name: index_name,
-                    table_name,
-                    column_indices,
-                    unique,
-                },
+                codec,
+                changes,
+                index_name,
+                table_name,
+                column_names,
+                unique,
+                if_not_exists,
             )
-            .await?;
-            Ok(QueryResult::default())
+            .await
         }
         DataDefinition::DropIndex {
             index_name,
             if_exists,
         } => {
-            drop_index(transaction, reconciler, &index_name, if_exists).await?;
+            drop_index(transaction, codec, changes, &index_name, if_exists).await?;
             Ok(QueryResult::default())
         }
-        DataDefinition::AlterTable {
+        _ => unreachable!(),
+    }
+}
+
+async fn ensure_index_absent<T>(
+    transaction: &T,
+    name: &str,
+    if_not_exists: bool,
+) -> EngineResult<()>
+where
+    T: KernelTransaction,
+{
+    if crate::index::index_generation_id(transaction, name)
+        .await
+        .is_ok()
+        && !if_not_exists
+    {
+        return Err(EngineError::InvalidQuery("Index already exists"));
+    }
+    Ok(())
+}
+
+async fn create_unresolved_index<T, R>(
+    transaction: &mut T,
+    codec: &R,
+    changes: &mut Vec<Change>,
+    index_name: String,
+    table_name: String,
+    column_names: Vec<String>,
+    unique: bool,
+    if_not_exists: bool,
+) -> EngineResult<QueryResult>
+where
+    T: KernelTransaction,
+    R: RowCodec<T>,
+{
+    if crate::index::index_generation_id(transaction, &index_name)
+        .await
+        .is_ok()
+    {
+        return if if_not_exists {
+            Ok(QueryResult::default())
+        } else {
+            Err(EngineError::InvalidQuery("Index already exists"))
+        };
+    }
+    let column_indices = unresolved_index_columns(transaction, &table_name, &column_names).await?;
+    create_index(
+        transaction,
+        codec,
+        changes,
+        db_schema::IndexSchema {
+            name: index_name,
             table_name,
-            operations,
-            if_exists,
-        } => {
-            let table_key = Row::new(vec![Value::from(table_name.as_str())]);
-            if transaction
-                .get_entry(ENGINE_TABLES, &table_key)
-                .await?
-                .is_none()
-            {
-                if if_exists {
-                    return Ok(QueryResult::default());
-                }
-                return Err(EngineError::InvalidQuery("Table not found"));
-            }
-            let schema = table_schema(transaction, &table_name).await?;
-            let mut column_names: Vec<_> = schema
+            column_indices,
+            unique,
+        },
+    )
+    .await?;
+    Ok(QueryResult::default())
+}
+
+async fn unresolved_index_columns<T>(
+    transaction: &T,
+    table_name: &str,
+    names: &[String],
+) -> EngineResult<Vec<u32>>
+where
+    T: KernelTransaction,
+{
+    let schema = table_schema(transaction, table_name).await?;
+    names
+        .iter()
+        .map(|name| {
+            schema
                 .columns
                 .iter()
-                .map(|column| column.name.clone())
-                .collect();
-            for (column_index, operation) in (column_names.len()..).zip(operations) {
-                let AlterTableOperation::AddColumn(column) = operation else {
-                    return Err(EngineError::Unsupported(
-                        "only ALTER TABLE ADD COLUMN is supported",
-                    ));
-                };
-                if column_names.iter().any(|name| name == &column.name) {
-                    return Err(EngineError::InvalidQuery("Column already exists"));
-                }
-                add_column(transaction, reconciler, &table_name, column_index, &column).await?;
-                column_names.push(column.name);
-            }
-            Ok(QueryResult::default())
+                .position(|column| column.name == *name)
+                .map(|index| index as u32)
+                .ok_or(EngineError::InvalidQuery("Index column not found"))
+        })
+        .collect()
+}
+
+async fn alter_table<T, R>(
+    transaction: &mut T,
+    codec: &R,
+    changes: &mut Vec<Change>,
+    table_name: String,
+    operations: Vec<AlterTableOperation>,
+    if_exists: bool,
+) -> EngineResult<QueryResult>
+where
+    T: KernelTransaction,
+    R: RowCodec<T>,
+{
+    let table = match table_generation_id(transaction, &table_name).await {
+        Ok(table) => table,
+        Err(_) if if_exists => return Ok(QueryResult::default()),
+        Err(error) => return Err(error),
+    };
+    let mut names: Vec<_> = table_schema(transaction, &table_name)
+        .await?
+        .columns
+        .into_iter()
+        .map(|column| column.name)
+        .collect();
+    for (position, operation) in (names.len()..).zip(operations) {
+        let AlterTableOperation::AddColumn(column) = operation else {
+            return Err(EngineError::Unsupported(
+                "only ALTER TABLE ADD COLUMN is supported",
+            ));
+        };
+        if names.iter().any(|name| name == &column.name) {
+            return Err(EngineError::InvalidQuery("Column already exists"));
         }
-        _ => Err(EngineError::Unsupported(
-            "only CREATE TABLE and ALTER TABLE ADD COLUMN are supported",
-        )),
+        add_column(transaction, codec, changes, table, position, &column).await?;
+        names.push(column.name);
     }
+    Ok(QueryResult::default())
 }
 
 async fn drop_index<T, R>(
     transaction: &mut T,
     codec: &R,
+    changes: &mut Vec<Change>,
     name: &str,
     if_exists: bool,
 ) -> EngineResult<()>
@@ -245,38 +373,16 @@ where
     T: KernelTransaction,
     R: RowCodec<T>,
 {
-    let key = Row::new(vec![Value::from(name)]);
-    if transaction.get_entry(ENGINE_INDICES, &key).await?.is_none() {
-        return if if_exists {
-            Ok(())
-        } else {
-            Err(EngineError::InvalidQuery("Index not found"))
-        };
-    }
-    let keys = {
-        let fields = transaction.scan_entries(ENGINE_INDEX_FIELDS);
-        pin_mut!(fields);
-        let mut keys = Vec::new();
-        while let Some(field) = fields.next().await {
-            let (key, value) = field?;
-            if value.values.first().and_then(Value::as_text) == Some(name) {
-                keys.push(key);
-            }
-        }
-        keys
+    let index = match crate::index::index_generation_id(transaction, name).await {
+        Ok(index) => index,
+        Err(_) if if_exists => return Ok(()),
+        Err(error) => return Err(error),
     };
-    for key in keys {
-        apply_change(
-            transaction,
-            codec,
-            Change::entry(Uuid::now_v7(), String::from(ENGINE_INDEX_FIELDS), key, None),
-        )
-        .await?;
-    }
-    apply_change(
+    apply_local_change(
         transaction,
         codec,
-        Change::entry(Uuid::now_v7(), String::from(ENGINE_INDICES), key, None),
+        changes,
+        Change::schema(Uuid::now_v7(), SchemaChange::TombstoneIndex(index)),
     )
     .await
 }
@@ -284,6 +390,7 @@ where
 async fn create_index<T, R>(
     transaction: &mut T,
     codec: &R,
+    changes: &mut Vec<Change>,
     schema: db_schema::IndexSchema,
 ) -> EngineResult<()>
 where
@@ -304,116 +411,95 @@ where
         return Err(EngineError::InvalidQuery("Index column is out of range"));
     }
 
-    let index_key = Row::new(vec![Value::from(schema.name.as_str())]);
-    let index_value = Row::new(vec![
-        Value::from(schema.name.as_str()),
-        Value::from(schema.table_name.as_str()),
-        Value::Bool(schema.unique),
-        Value::Integer(schema.column_indices.len() as i64),
-    ]);
-    apply_change(
+    let table = table_generation_id(transaction, &schema.table_name).await?;
+    let columns = schema_columns(transaction, table).await?;
+    let index_columns = schema
+        .column_indices
+        .iter()
+        .map(|position| {
+            columns
+                .get(*position as usize)
+                .map(|(id, _)| *id)
+                .ok_or(EngineError::InvalidQuery("Index column is out of range"))
+        })
+        .collect::<EngineResult<Vec<_>>>()?;
+    apply_local_change(
         transaction,
         codec,
-        Change::entry(
+        changes,
+        Change::schema(
             Uuid::now_v7(),
-            String::from(ENGINE_INDICES),
-            index_key,
-            Some(postcard::to_allocvec(&index_value).map_err(EngineError::custom)?),
+            SchemaChange::CreateIndex {
+                index: IndexGenerationId::fresh(),
+                label: schema.name,
+                table,
+                unique: schema.unique,
+                columns: index_columns,
+            },
         ),
     )
-    .await?;
-
-    for (order, column_index) in schema.column_indices.iter().enumerate() {
-        let key = Row::new(vec![
-            Value::from(schema.name.as_str()),
-            Value::Integer(order as i64),
-        ]);
-        let value = Row::new(vec![
-            Value::from(schema.name.as_str()),
-            Value::Integer(order as i64),
-            Value::Integer(i64::from(*column_index)),
-        ]);
-        apply_change(
-            transaction,
-            codec,
-            Change::entry(
-                Uuid::now_v7(),
-                String::from(ENGINE_INDEX_FIELDS),
-                key,
-                Some(postcard::to_allocvec(&value).map_err(EngineError::custom)?),
-            ),
-        )
-        .await?;
-    }
-    Ok(())
+    .await
 }
 
 async fn create_table<T, R>(
     transaction: &mut T,
     codec: &R,
+    changes: &mut Vec<Change>,
     table_schema: TableSchema,
 ) -> EngineResult<()>
 where
     T: KernelTransaction,
     R: RowCodec<T>,
 {
-    let table_key = Row::new(vec![table_schema.name.clone().into()]);
-    let table_value = Row::new(vec![table_schema.name.clone().into()]);
-    apply_change(
+    let table = TableGenerationId::fresh();
+    apply_local_change(
         transaction,
         codec,
-        Change::entry(
+        changes,
+        Change::schema(
             Uuid::now_v7(),
-            String::from(ENGINE_TABLES),
-            table_key,
-            Some(postcard::to_allocvec(&table_value).map_err(EngineError::custom)?),
+            SchemaChange::CreateTable {
+                table,
+                label: table_schema.name.clone(),
+            },
         ),
     )
     .await?;
-
-    for (column_index, column_schema) in table_schema.columns.iter().enumerate() {
-        add_column(
-            transaction,
-            codec,
-            &table_schema.name,
-            column_index,
-            column_schema,
-        )
-        .await?;
+    for (position, column) in table_schema.columns.iter().enumerate() {
+        add_column(transaction, codec, changes, table, position, column).await?;
     }
-
     Ok(())
 }
 
 async fn add_column<T, R>(
     transaction: &mut T,
     codec: &R,
-    table_name: &str,
-    column_index: usize,
-    column_schema: &ColumnSchema,
+    changes: &mut Vec<Change>,
+    table: TableGenerationId,
+    position: usize,
+    column: &ColumnSchema,
 ) -> EngineResult<()>
 where
     T: KernelTransaction,
     R: RowCodec<T>,
 {
-    let key = Row::new(vec![table_name.into(), column_schema.name.clone().into()]);
-    let value = Row::new(vec![
-        table_name.into(),
-        column_schema.name.clone().into(),
-        column_schema.r#type.into(),
-        column_schema.default.clone(),
-        (column_index as i64).into(),
-        column_schema.primary_key.into(),
-        Value::Uuid(Uuid::now_v7()),
-    ]);
-    apply_change(
+    let position =
+        u32::try_from(position).map_err(|_| EngineError::InvalidQuery("Too many columns"))?;
+    apply_local_change(
         transaction,
         codec,
-        Change::entry(
+        changes,
+        Change::schema(
             Uuid::now_v7(),
-            String::from(ENGINE_TABLE_FIELDS),
-            key,
-            Some(postcard::to_allocvec(&value).map_err(EngineError::custom)?),
+            SchemaChange::AddColumn {
+                table,
+                column: ColumnGenerationId::fresh(),
+                label: column.name.clone(),
+                value_type: column.r#type,
+                default: column.default.clone(),
+                position,
+                primary_key: column.primary_key,
+            },
         ),
     )
     .await
@@ -422,6 +508,7 @@ where
 async fn insert_row<T, R>(
     transaction: &mut T,
     reconciler: &R,
+    changes: &mut Vec<Change>,
     insert: QueryInsert,
 ) -> EngineResult<QueryResult>
 where
@@ -440,20 +527,20 @@ where
     }
 
     let key = primary_key(&schema, &insert.row)?;
+    let table = table_generation_id(transaction, &insert.table).await?;
+    if row_generation_id(transaction, table, &key).await?.is_some() {
+        return Err(EngineError::InvalidQuery("Primary key already exists"));
+    }
+    let row = RowGenerationId::fresh();
     let changed_columns: Vec<_> = (0..insert.row.values.len()).collect();
     let value = reconciler
-        .encode_row(
-            transaction,
-            &insert.table,
-            &key,
-            &insert.row,
-            &changed_columns,
-        )
+        .encode_row(transaction, &table, &row, &insert.row, &changed_columns)
         .await?;
-    apply_change(
+    apply_local_change(
         transaction,
         reconciler,
-        Change::row(Uuid::now_v7(), insert.table, key, Some(value)),
+        changes,
+        Change::row(Uuid::now_v7(), table, row, key, None, Some(value)),
     )
     .await?;
 
@@ -463,6 +550,7 @@ where
 async fn update_rows<T, R>(
     transaction: &mut T,
     reconciler: &R,
+    changes: &mut Vec<Change>,
     update: QueryUpdate,
 ) -> EngineResult<QueryResult>
 where
@@ -488,33 +576,29 @@ where
     )
     .await?;
 
-    for (old_key, mut row) in rows {
+    let table = table_generation_id(transaction, &update.from.table).await?;
+    for (old_key, row_id, mut row) in rows {
         for (index, value) in &assignments {
             row.values[*index] = value.clone();
         }
         let key = primary_key(&schema, &row)?;
         let changed_columns: Vec<_> = assignments.iter().map(|(index, _)| *index).collect();
         let value = reconciler
-            .encode_row(
-                transaction,
-                &update.from.table,
-                &key,
-                &row,
-                &changed_columns,
-            )
+            .encode_row(transaction, &table, &row_id, &row, &changed_columns)
             .await?;
-        if key != old_key {
-            apply_change(
-                transaction,
-                reconciler,
-                Change::row(Uuid::now_v7(), update.from.table.clone(), old_key, None),
-            )
-            .await?;
-        }
-        apply_change(
+        let previous_key = (key != old_key).then_some(old_key);
+        apply_local_change(
             transaction,
             reconciler,
-            Change::row(Uuid::now_v7(), update.from.table.clone(), key, Some(value)),
+            changes,
+            Change::row(
+                Uuid::now_v7(),
+                table,
+                row_id,
+                key,
+                previous_key,
+                Some(value),
+            ),
         )
         .await?;
     }
@@ -525,6 +609,7 @@ where
 async fn delete_rows<T, R>(
     transaction: &mut T,
     reconciler: &R,
+    changes: &mut Vec<Change>,
     delete: QueryDelete,
 ) -> EngineResult<QueryResult>
 where
@@ -549,11 +634,13 @@ where
     )
     .await?;
 
-    for (key, _) in rows {
-        apply_change(
+    let table = table_generation_id(transaction, &delete.from.table).await?;
+    for (key, row, _) in rows {
+        apply_local_change(
             transaction,
             reconciler,
-            Change::row(Uuid::now_v7(), delete.from.table.clone(), key, None),
+            changes,
+            Change::row(Uuid::now_v7(), table, row, key, None, None),
         )
         .await?;
     }
@@ -561,30 +648,157 @@ where
     Ok(QueryResult::default())
 }
 
-async fn matching_rows<T, R>(
+pub(crate) async fn row_conflicts<T, R>(
     transaction: &T,
     reconciler: &R,
-    table: &str,
-    schema: &TableSchema,
-    predicate: (usize, Value),
-) -> EngineResult<Vec<(Row, Row)>>
+    table_name: &str,
+    key: &Row,
+) -> EngineResult<Vec<String>>
 where
     T: KernelTransaction,
     R: RowCodec<T>,
 {
-    let stream = reconciler.scan_rows(transaction, table);
+    let table = table_generation_id(transaction, table_name).await?;
+    let row = row_generation_id(transaction, table, key)
+        .await?
+        .ok_or(EngineError::InvalidQuery("Row not found"))?;
+    let schema = table_schema(transaction, table_name).await?;
+    reconciler
+        .conflicted_columns(transaction, &table, &row)
+        .await?
+        .into_iter()
+        .map(|index| {
+            schema
+                .columns
+                .get(index)
+                .map(|column| column.name.clone())
+                .ok_or(EngineError::custom(
+                    "Conflicted column is missing from schema",
+                ))
+        })
+        .collect()
+}
+
+pub(crate) async fn resolve_row<T, R>(
+    transaction: &mut T,
+    reconciler: &R,
+    table_name: &str,
+    key: &Row,
+    values: Vec<(String, Value)>,
+) -> EngineResult<()>
+where
+    T: KernelTransaction,
+    R: RowCodec<T>,
+{
+    if values.is_empty() {
+        return Err(EngineError::InvalidQuery(
+            "Resolution requires an assignment",
+        ));
+    }
+    let table = table_generation_id(transaction, table_name).await?;
+    let row_id = row_generation_id(transaction, table, key)
+        .await?
+        .ok_or(EngineError::InvalidQuery("Row not found"))?;
+    let schema = table_schema(transaction, table_name).await?;
+    let conflicts = reconciler
+        .conflicted_columns(transaction, &table, &row_id)
+        .await?;
+    let mut row = reconciler
+        .get_row(transaction, &table, &row_id)
+        .await?
+        .ok_or(EngineError::InvalidQuery("Row not found"))?;
+    let mut changed_columns = Vec::with_capacity(values.len());
+    for (name, value) in values {
+        let index = schema
+            .columns
+            .iter()
+            .position(|column| column.name == name)
+            .ok_or(EngineError::InvalidQuery("Unknown resolution column"))?;
+        if !conflicts.contains(&index) {
+            return Err(EngineError::InvalidQuery(
+                "Resolution column is not conflicted",
+            ));
+        }
+        if changed_columns.contains(&index) {
+            return Err(EngineError::InvalidQuery("Resolution column is repeated"));
+        }
+        row.values[index] = value;
+        changed_columns.push(index);
+    }
+    let new_key = primary_key(&schema, &row)?;
+    let previous_key = (new_key != *key).then(|| key.clone());
+    let value = reconciler
+        .encode_resolution(transaction, &table, &row_id, &row, &changed_columns)
+        .await?;
+    let mut changes = Vec::new();
+    apply_local_change(
+        transaction,
+        reconciler,
+        &mut changes,
+        Change::row(
+            Uuid::now_v7(),
+            table,
+            row_id,
+            new_key,
+            previous_key,
+            Some(value),
+        ),
+    )
+    .await?;
+    record_local(transaction, changes).await?;
+    Ok(())
+}
+
+async fn matching_rows<T, R>(
+    transaction: &T,
+    reconciler: &R,
+    table_name: &str,
+    schema: &TableSchema,
+    predicate: (usize, Value),
+) -> EngineResult<Vec<(Row, RowGenerationId, Row)>>
+where
+    T: KernelTransaction,
+    R: RowCodec<T>,
+{
+    let table = table_generation_id(transaction, table_name).await?;
+    let stream = reconciler.scan_rows(transaction, &table);
     pin_mut!(stream);
     let mut rows = Vec::new();
 
     while let Some(item) = stream.next().await {
-        let (key, row) = item?;
+        let (row_id, row) = item?;
         let row = materialize_defaults(schema, row);
         if row.values.get(predicate.0) == Some(&predicate.1) {
-            rows.push((key, row));
+            let key = row_key_for_generation(transaction, table, row_id).await?;
+            rows.push((key, row_id, row));
         }
     }
 
     Ok(rows)
+}
+
+pub(crate) async fn row_key_for_generation<T>(
+    transaction: &T,
+    table: TableGenerationId,
+    row: RowGenerationId,
+) -> EngineResult<Row>
+where
+    T: KernelTransaction,
+{
+    let mappings = transaction.scan_entries(ENGINE_ROW_MAPPINGS);
+    pin_mut!(mappings);
+    while let Some(entry) = mappings.next().await {
+        let (key, value) = entry?;
+        if value.values.first().and_then(Value::as_uuid) != Some(&row.0)
+            || key.values.first().and_then(Value::as_uuid) != Some(&table.0)
+        {
+            continue;
+        }
+        return Ok(Row::new(key.values[1..].to_vec()));
+    }
+    Err(EngineError::custom(
+        "Row generation has no primary-key mapping",
+    ))
 }
 
 fn assignments(
@@ -685,7 +899,8 @@ where
 
     let schema = table_schema(transaction, &select.from.table).await?;
     let projection = projection(&schema, &select.from.table, &select.projection)?;
-    let stream = reconciler.scan_rows(transaction, &select.from.table);
+    let table = table_generation_id(transaction, &select.from.table).await?;
+    let stream = reconciler.scan_rows(transaction, &table);
     pin_mut!(stream);
     let mut rows = Vec::new();
 
@@ -706,85 +921,37 @@ where
     ))
 }
 
+pub(crate) async fn table_generation_id<T>(
+    transaction: &T,
+    name: &str,
+) -> EngineResult<TableGenerationId>
+where
+    T: KernelTransaction,
+{
+    table_id(transaction, name).await
+}
+
+pub(crate) async fn column_generation_id<T>(
+    transaction: &T,
+    table_name: &str,
+    column_name: &str,
+) -> EngineResult<ColumnGenerationId>
+where
+    T: KernelTransaction,
+{
+    column_id(
+        transaction,
+        table_generation_id(transaction, table_name).await?,
+        column_name,
+    )
+    .await
+}
+
 pub(crate) async fn table_schema<T>(transaction: &T, name: &str) -> EngineResult<TableSchema>
 where
     T: KernelTransaction,
 {
-    let table_key = Row::new(vec![Value::from(name)]);
-    if transaction
-        .get_entry(ENGINE_TABLES, &table_key)
-        .await?
-        .is_none()
-    {
-        return Err(EngineError::InvalidQuery("Table not found"));
-    }
-
-    let stream = transaction.scan_entries(ENGINE_TABLE_FIELDS);
-    pin_mut!(stream);
-    let mut columns = Vec::new();
-
-    while let Some(item) = stream.next().await {
-        let (_, row) = item?;
-        if row.values.first().and_then(Value::as_text) != Some(name) {
-            continue;
-        }
-        let column =
-            row.values
-                .get(1)
-                .and_then(Value::to_text)
-                .ok_or(EngineError::InvalidQuery(
-                    ENGINE_TABLE_FIELDS_FIELD_COLUMN_NAME,
-                ))?;
-        let value_type =
-            row.values
-                .get(2)
-                .and_then(Value::to_type)
-                .ok_or(EngineError::InvalidQuery(
-                    ENGINE_TABLE_FIELDS_FIELD_VALUE_TYPE,
-                ))?;
-        let default = row
-            .values
-            .get(3)
-            .cloned()
-            .ok_or(EngineError::InvalidQuery(ENGINE_TABLE_FIELDS_FIELD_DEFAULT))?;
-        let index =
-            row.values
-                .get(4)
-                .and_then(Value::to_integer)
-                .ok_or(EngineError::InvalidQuery(
-                    ENGINE_TABLE_FIELDS_FIELD_COLUMN_INDEX,
-                ))?;
-        let primary_key =
-            row.values
-                .get(5)
-                .and_then(Value::to_bool)
-                .ok_or(EngineError::InvalidQuery(
-                    ENGINE_TABLE_FIELDS_FIELD_PRIMARY_KEY,
-                ))?;
-        let id = row
-            .values
-            .get(6)
-            .and_then(Value::to_uuid)
-            .ok_or(EngineError::InvalidQuery(
-                ENGINE_TABLE_FIELDS_FIELD_COLUMN_ID,
-            ))?;
-        columns.push((
-            index,
-            id,
-            ColumnSchema {
-                name: column,
-                r#type: value_type,
-                default,
-                primary_key,
-            },
-        ));
-    }
-
-    columns.sort_by_key(|(index, id, _)| (*index, *id));
-    Ok(TableSchema {
-        name: String::from(name),
-        columns: columns.into_iter().map(|(_, _, column)| column).collect(),
-    })
+    schema_table_schema(transaction, name).await
 }
 
 #[cfg(all(test, feature = "in-memory"))]
@@ -852,7 +1019,7 @@ pub(crate) fn materialize_defaults(schema: &TableSchema, mut row: Row) -> Row {
     row
 }
 
-fn primary_key(schema: &TableSchema, row: &Row) -> EngineResult<Row> {
+pub(crate) fn primary_key(schema: &TableSchema, row: &Row) -> EngineResult<Row> {
     let values: Vec<_> = schema
         .columns
         .iter()

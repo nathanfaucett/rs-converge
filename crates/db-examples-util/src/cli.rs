@@ -10,64 +10,83 @@ where
     T: Translator,
 {
     println!("=== DB Engine CLI Interface (with Arrow Key History) ===");
-    println!(
-        "Type your SQL queries below. Press Up/Down arrows to scroll history. Type 'exit' to quit.\n"
-    );
+    println!("Type SQL below. Type 'exit' to quit.\n");
+    let mut editor = DefaultEditor::new().expect("Failed to initialize line reader");
+    while read_command(&mut editor, &engine, &translator).await {}
+}
 
-    // 2. Initialize the rustyline editor
-    let mut rl = DefaultEditor::new().expect("Failed to initialize line reader");
+async fn read_command<K, R, T>(
+    editor: &mut DefaultEditor,
+    engine: &Engine<K, R>,
+    translator: &T,
+) -> bool
+where
+    K: Kernel,
+    R: RowCodec<K::Transaction>,
+    T: Translator,
+{
+    match editor.readline("db_engine> ") {
+        Ok(line) => run_command(editor, engine, translator, line.trim()).await,
+        Err(ReadlineError::Interrupted) => {
+            println!("Ctrl-C detected. Type 'exit' or press Ctrl-D to quit.");
+            true
+        }
+        Err(ReadlineError::Eof) => {
+            println!("Goodbye!");
+            false
+        }
+        Err(error) => {
+            eprintln!("Error reading line: {error:?}");
+            false
+        }
+    }
+}
 
-    // Loop indefinitely
-    loop {
-        // 3. Prompt user and await input (rustyline handles the stdout flush automatically)
-        let readline = rl.readline("db_engine> ");
+async fn run_command<K, R, T>(
+    editor: &mut DefaultEditor,
+    engine: &Engine<K, R>,
+    translator: &T,
+    query: &str,
+) -> bool
+where
+    K: Kernel,
+    R: RowCodec<K::Transaction>,
+    T: Translator,
+{
+    if query.eq_ignore_ascii_case("exit") {
+        println!("Goodbye!");
+        return false;
+    }
+    if query.is_empty() {
+        return true;
+    }
+    execute(editor, engine, translator, query).await;
+    true
+}
 
-        match readline {
-            Ok(line) => {
-                let query = line.trim();
+async fn execute<K, R, T>(
+    editor: &mut DefaultEditor,
+    engine: &Engine<K, R>,
+    translator: &T,
+    query: &str,
+) where
+    K: Kernel,
+    R: RowCodec<K::Transaction>,
+    T: Translator,
+{
+    let _ = editor.add_history_entry(query);
+    match engine.translate_and_execute(query, translator).await {
+        Ok(results) => print_results(results),
+        Err(error) => eprintln!("SQL Error: {error:?}"),
+    }
+    println!();
+}
 
-                // Exit condition
-                if query.eq_ignore_ascii_case("exit") {
-                    println!("Goodbye!");
-                    break;
-                }
-
-                if query.is_empty() {
-                    continue;
-                }
-
-                // 4. Save the valid query to history so Up/Down arrows can recall it
-                let _ = rl.add_history_entry(query);
-
-                // 5. Execute the dynamic query
-                match engine.translate_and_execute(query, &translator).await {
-                    Ok(results) => {
-                        for result in results {
-                            println!("Execution successful. Rows returned: {}", result.rows.len());
-                            for (idx, row) in result.rows.iter().enumerate() {
-                                println!("[Row {}]: {:?}", idx + 1, row);
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        eprintln!("SQL Error: {:?}", err);
-                    }
-                }
-                println!();
-            }
-            // Handle Ctrl-C (interrupt) gracefully
-            Err(ReadlineError::Interrupted) => {
-                println!("Ctrl-C detected. Type 'exit' or press Ctrl-D to quit.");
-            }
-            // Handle Ctrl-D (EOF / end of input) gracefully
-            Err(ReadlineError::Eof) => {
-                println!("Goodbye!");
-                break;
-            }
-            Err(err) => {
-                eprintln!("Error reading line: {:?}", err);
-                break;
-            }
+fn print_results(results: Vec<db_query::QueryResult>) {
+    for result in results {
+        println!("Execution successful. Rows returned: {}", result.rows.len());
+        for (index, row) in result.rows.iter().enumerate() {
+            println!("[Row {}]: {row:?}", index + 1);
         }
     }
 }

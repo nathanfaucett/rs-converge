@@ -164,80 +164,68 @@ fn translate_query(query: ast::Query, _params: Option<&QueryParams>) -> Translat
 fn translate_from(
     from: &[TableWithJoins],
 ) -> TranslateResult<(QueryFrom, BTreeMap<String, String>)> {
-    if from.is_empty() {
-        return Err(TranslateError::custom("Missing FROM clause"));
-    }
-
+    let twj = from
+        .first()
+        .ok_or(TranslateError::custom("Missing FROM clause"))?;
+    let (table, alias) = translate_table_factor(
+        &twj.relation,
+        "Only simple table references supported in FROM",
+    )?;
     let mut aliases = BTreeMap::new();
+    insert_alias(&mut aliases, alias, &table);
 
-    let twj = &from[0];
-    let table = match &twj.relation {
-        TableFactor::Table { name, alias, .. } => {
-            let table_name = object_name_to_string(name)?;
-            let alias_name = alias.as_ref().map(|a| a.name.value.clone());
-            if let Some(alias) = alias_name {
-                aliases.insert(alias.clone(), table_name.clone());
-            }
-
-            table_name
-        }
-        _ => {
-            return Err(TranslateError::custom(
-                "Only simple table references supported in FROM",
-            ));
-        }
-    };
-
-    let mut joins = Vec::with_capacity(twj.joins.len());
     for join in &twj.joins {
-        let (table, alias) = match &join.relation {
-            TableFactor::Table { name, alias, .. } => (
-                object_name_to_string(name)?,
-                alias.as_ref().map(|a| a.name.value.clone()),
-            ),
-            _ => {
-                return Err(TranslateError::custom(
-                    "Complex table in JOIN not supported",
-                ));
-            }
-        };
-        if let Some(alias) = alias {
-            aliases.insert(alias, table.clone());
-        }
+        let (table, alias) =
+            translate_table_factor(&join.relation, "Complex table in JOIN not supported")?;
+        insert_alias(&mut aliases, alias, &table);
     }
-    for join in &twj.joins {
-        let (kind, on) = match &join.join_operator {
-            JoinOperator::Inner(join_constraint) => (
-                QueryJoinKind::Inner,
-                parse_join_constraint(&aliases, join_constraint)?,
-            ),
-            JoinOperator::Left(join_constraint) => (
-                QueryJoinKind::Left,
-                parse_join_constraint(&aliases, join_constraint)?,
-            ),
-            JoinOperator::Right(join_constraint) => (
-                QueryJoinKind::Right,
-                parse_join_constraint(&aliases, join_constraint)?,
-            ),
-            JoinOperator::FullOuter(join_constraint) => (
-                QueryJoinKind::Full,
-                parse_join_constraint(&aliases, join_constraint)?,
-            ),
-            _ => return Err(TranslateError::custom("Unsupported JOIN type")),
-        };
-        let table = match &join.relation {
-            TableFactor::Table { name, .. } => object_name_to_string(name)?,
-            _ => {
-                return Err(TranslateError::custom(
-                    "Complex table in JOIN not supported",
-                ));
-            }
-        };
 
-        joins.push(QueryJoin { kind, table, on });
-    }
+    let joins = twj
+        .joins
+        .iter()
+        .map(|join| translate_join(&aliases, join))
+        .collect::<TranslateResult<Vec<_>>>()?;
 
     Ok((QueryFrom { table, joins }, aliases))
+}
+
+fn translate_table_factor(
+    factor: &TableFactor,
+    error: &'static str,
+) -> TranslateResult<(String, Option<String>)> {
+    match factor {
+        TableFactor::Table { name, alias, .. } => Ok((
+            object_name_to_string(name)?,
+            alias.as_ref().map(|alias| alias.name.value.clone()),
+        )),
+        _ => Err(TranslateError::custom(error)),
+    }
+}
+
+fn insert_alias(aliases: &mut BTreeMap<String, String>, alias: Option<String>, table: &str) {
+    if let Some(alias) = alias {
+        aliases.insert(alias, table.into());
+    }
+}
+
+fn translate_join(
+    aliases: &BTreeMap<String, String>,
+    join: &ast::Join,
+) -> TranslateResult<QueryJoin> {
+    let (table, _) = translate_table_factor(&join.relation, "Complex table in JOIN not supported")?;
+    let (kind, constraint) = match &join.join_operator {
+        JoinOperator::Inner(constraint) => (QueryJoinKind::Inner, constraint),
+        JoinOperator::Left(constraint) => (QueryJoinKind::Left, constraint),
+        JoinOperator::Right(constraint) => (QueryJoinKind::Right, constraint),
+        JoinOperator::FullOuter(constraint) => (QueryJoinKind::Full, constraint),
+        _ => return Err(TranslateError::custom("Unsupported JOIN type")),
+    };
+
+    Ok(QueryJoin {
+        kind,
+        table,
+        on: parse_join_constraint(aliases, constraint)?,
+    })
 }
 
 fn parse_join_constraint(
@@ -256,118 +244,53 @@ fn translate_projection(
     aliases: &BTreeMap<String, String>,
     projection: &[SelectItem],
 ) -> TranslateResult<Vec<QueryColumn>> {
-    let mut cols = Vec::new();
-    for item in projection {
-        match item {
-            SelectItem::UnnamedExpr(expr) => {
-                if let Expr::Identifier(ident) = expr {
-                    cols.push(QueryColumn::new("".to_string(), ident.value.clone()));
-                } else if let Expr::CompoundIdentifier(idents) = expr {
-                    if idents.len() == 2 {
-                        let table = if let Some(real_table) = aliases.get(&idents[0].value) {
-                            real_table.clone()
-                        } else {
-                            idents[0].value.clone()
-                        };
-                        let column = idents[1].value.clone();
-                        cols.push(QueryColumn::new(table, column));
-                    } else {
-                        cols.push(QueryColumn::new("".to_string(), format!("{:?}", expr)));
-                    }
-                } else {
-                    cols.push(QueryColumn::new("".to_string(), format!("expr:{:?}", expr)));
-                }
+    projection
+        .iter()
+        .map(|item| match item {
+            SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } => {
+                Ok(translate_projection_expr(aliases, expr))
             }
-            SelectItem::Wildcard(_) => {
-                cols.push(QueryColumn::new("".to_string(), "*".to_string()));
-            }
-            SelectItem::ExprWithAlias { expr, .. } => {
-                if let Expr::Identifier(ident) = expr {
-                    cols.push(QueryColumn::new("".to_string(), ident.value.clone()));
-                } else if let Expr::CompoundIdentifier(idents) = expr {
-                    if idents.len() == 2 {
-                        let table = if let Some(real_table) = aliases.get(&idents[0].value) {
-                            real_table.clone()
-                        } else {
-                            idents[0].value.clone()
-                        };
-                        let column = idents[1].value.clone();
-                        cols.push(QueryColumn::new(table, column));
-                    } else {
-                        cols.push(QueryColumn::new("".to_string(), format!("{:?}", expr)));
-                    }
-                } else {
-                    cols.push(QueryColumn::new("".to_string(), format!("expr:{:?}", expr)));
-                }
-            }
-            _ => return Err(TranslateError::custom("Unsupported projection item")),
-        }
+            SelectItem::Wildcard(_) => Ok(QueryColumn::new("".to_string(), "*".to_string())),
+            _ => Err(TranslateError::custom("Unsupported projection item")),
+        })
+        .collect()
+}
+
+fn translate_projection_expr(aliases: &BTreeMap<String, String>, expr: &Expr) -> QueryColumn {
+    match expr {
+        Expr::Identifier(ident) => QueryColumn::new("".to_string(), ident.value.clone()),
+        Expr::CompoundIdentifier(idents) if idents.len() == 2 => QueryColumn::new(
+            aliases
+                .get(&idents[0].value)
+                .cloned()
+                .unwrap_or_else(|| idents[0].value.clone()),
+            idents[1].value.clone(),
+        ),
+        Expr::CompoundIdentifier(_) => QueryColumn::new("".to_string(), format!("{:?}", expr)),
+        _ => QueryColumn::new("".to_string(), format!("expr:{:?}", expr)),
     }
-    Ok(cols)
 }
 
 fn translate_expr(aliases: &BTreeMap<String, String>, expr: Expr) -> TranslateResult<QueryExpr> {
     match expr {
-        Expr::BinaryOp { left, op, right } => {
-            let left_val = Box::new(translate_expr(aliases, *left)?);
-            let right_val = Box::new(translate_expr(aliases, *right)?);
-
-            match op {
-                ast::BinaryOperator::Eq => Ok(QueryExpr::Equals(left_val, right_val)),
-                ast::BinaryOperator::NotEq => Ok(QueryExpr::NotEquals(left_val, right_val)),
-                ast::BinaryOperator::Lt => Ok(QueryExpr::LessThan(left_val, right_val)),
-                ast::BinaryOperator::LtEq => Ok(QueryExpr::LessThanOrEquals(left_val, right_val)),
-                ast::BinaryOperator::Gt => Ok(QueryExpr::GreaterThan(left_val, right_val)),
-                ast::BinaryOperator::GtEq => {
-                    Ok(QueryExpr::GreaterThanOrEquals(left_val, right_val))
-                }
-                ast::BinaryOperator::And => Ok(QueryExpr::And(left_val, right_val)),
-                ast::BinaryOperator::Or => Ok(QueryExpr::Or(left_val, right_val)),
-                _ => Err(TranslateError::custom(format!(
-                    "Unsupported binary operator: {:?}",
-                    op
-                ))),
-            }
-        }
-        Expr::Identifier(ident) => {
-            let col = QueryColumn::new("".into(), ident.value);
-            Ok(QueryExpr::Value(QueryExprValue::Column(col)))
-        }
-        Expr::CompoundIdentifier(idents) if idents.len() == 2 => {
-            let table = if let Some(real_table) = aliases.get(&idents[0].value) {
-                real_table.clone()
-            } else {
-                idents[0].value.clone()
-            };
-            let col = QueryColumn::new(table, idents[1].value.clone());
-            Ok(QueryExpr::Value(QueryExprValue::Column(col)))
-        }
+        Expr::BinaryOp { left, op, right } => translate_binary_expr(aliases, *left, op, *right),
+        Expr::Identifier(ident) => Ok(column_expr("".into(), ident.value)),
+        Expr::CompoundIdentifier(idents) if idents.len() == 2 => Ok(column_expr(
+            aliases
+                .get(&idents[0].value)
+                .cloned()
+                .unwrap_or_else(|| idents[0].value.clone()),
+            idents[1].value.clone(),
+        )),
         Expr::IsNull(inner) => Ok(QueryExpr::IsNull(Box::new(translate_expr(
             aliases, *inner,
         )?))),
         Expr::IsNotNull(inner) => Ok(QueryExpr::IsNotNull(Box::new(translate_expr(
             aliases, *inner,
         )?))),
-        Expr::Value(ast::ValueWithSpan { value, .. }) => {
-            let db_value = match value {
-                ast::Value::Number(n, _) => {
-                    if n.contains('.') {
-                        Value::Float(n.parse().map_err(|_| {
-                            TranslateError::custom(format!("Invalid float literal: {}", n))
-                        })?)
-                    } else {
-                        Value::Integer(n.parse().map_err(|_| {
-                            TranslateError::custom(format!("Invalid integer literal: {}", n))
-                        })?)
-                    }
-                }
-                ast::Value::SingleQuotedString(s) => Value::Text(s),
-                ast::Value::Boolean(b) => Value::Bool(b),
-                ast::Value::Null => Value::Null,
-                _ => Value::Text(format!("{:?}", value)),
-            };
-            Ok(QueryExpr::Value(QueryExprValue::Value(db_value)))
-        }
+        Expr::Value(ast::ValueWithSpan { value, .. }) => Ok(QueryExpr::Value(
+            QueryExprValue::Value(translate_value(value)?),
+        )),
         _ => Err(TranslateError::custom(format!(
             "Unsupported expression: {:?}",
             expr
@@ -375,79 +298,103 @@ fn translate_expr(aliases: &BTreeMap<String, String>, expr: Expr) -> TranslateRe
     }
 }
 
+fn column_expr(table: String, column: String) -> QueryExpr {
+    QueryExpr::Value(QueryExprValue::Column(QueryColumn::new(table, column)))
+}
+
+fn translate_binary_expr(
+    aliases: &BTreeMap<String, String>,
+    left: Expr,
+    op: ast::BinaryOperator,
+    right: Expr,
+) -> TranslateResult<QueryExpr> {
+    let left = Box::new(translate_expr(aliases, left)?);
+    let right = Box::new(translate_expr(aliases, right)?);
+
+    match op {
+        ast::BinaryOperator::Eq => Ok(QueryExpr::Equals(left, right)),
+        ast::BinaryOperator::NotEq => Ok(QueryExpr::NotEquals(left, right)),
+        ast::BinaryOperator::Lt => Ok(QueryExpr::LessThan(left, right)),
+        ast::BinaryOperator::LtEq => Ok(QueryExpr::LessThanOrEquals(left, right)),
+        ast::BinaryOperator::Gt => Ok(QueryExpr::GreaterThan(left, right)),
+        ast::BinaryOperator::GtEq => Ok(QueryExpr::GreaterThanOrEquals(left, right)),
+        ast::BinaryOperator::And => Ok(QueryExpr::And(left, right)),
+        ast::BinaryOperator::Or => Ok(QueryExpr::Or(left, right)),
+        _ => Err(TranslateError::custom(format!(
+            "Unsupported binary operator: {:?}",
+            op
+        ))),
+    }
+}
+
+fn translate_value(value: ast::Value) -> TranslateResult<Value> {
+    match value {
+        ast::Value::Number(number, _) if number.contains('.') => number
+            .parse()
+            .map(Value::Float)
+            .map_err(|_| TranslateError::custom(format!("Invalid float literal: {}", number))),
+        ast::Value::Number(number, _) => number
+            .parse()
+            .map(Value::Integer)
+            .map_err(|_| TranslateError::custom(format!("Invalid integer literal: {}", number))),
+        ast::Value::SingleQuotedString(value) => Ok(Value::Text(value)),
+        ast::Value::Boolean(value) => Ok(Value::Bool(value)),
+        ast::Value::Null => Ok(Value::Null),
+        value => Ok(Value::Text(format!("{:?}", value))),
+    }
+}
+
 fn translate_insert(
     insert: ast::Insert,
     _params: Option<&QueryParams>,
 ) -> TranslateResult<Statement> {
-    let table = table_name_to_string(&insert.table)?;
-
-    let values = if let Some(source) = insert.source {
-        if let ast::SetExpr::Values(mut values) = *source.body {
-            if values.rows.is_empty() {
-                return Err(TranslateError::custom("INSERT with no VALUES"));
-            }
-            let mut out = Vec::with_capacity(values.rows.len());
-            let ast::Parens { content, .. } = values.rows.remove(0);
-            for expr in content {
-                let value = match translate_expr(&BTreeMap::new(), expr)? {
-                    QueryExpr::Value(QueryExprValue::Value(val)) => val,
-                    _ => {
-                        return Err(TranslateError::custom("Unsupported expression in VALUES"));
-                    }
-                };
-                out.push(value);
-            }
-            out
-        } else {
-            vec![]
-        }
-    } else {
-        vec![]
-    };
-    let row = Row::new(values);
-
-    let returning = if let Some(returning_items) = insert.returning {
-        let mut returning = Vec::new();
-
-        for item in returning_items {
-            match item {
-                SelectItem::UnnamedExpr(expr) => {
-                    if let Expr::Identifier(ident) = expr {
-                        returning.push(ident.value.clone());
-                    } else if let Expr::CompoundIdentifier(idents) = expr {
-                        if idents.len() == 1 {
-                            let column = idents[0].value.clone();
-                            returning.push(column);
-                        } else {
-                            return Err(TranslateError::custom(format!(
-                                "Unsupported RETURNING identifier: {:?}",
-                                idents
-                            )));
-                        }
-                    } else {
-                        return Err(TranslateError::custom(format!(
-                            "Unsupported RETURNING expression: {:?}",
-                            expr
-                        )));
-                    }
-                }
-                SelectItem::Wildcard(_) => {
-                    returning.push("*".to_string());
-                }
-                _ => return Err(TranslateError::custom("Unsupported RETURNING item")),
-            }
-        }
-
-        Some(returning)
-    } else {
-        None
-    };
-
     Ok(Statement::Query(Query::Insert(QueryInsert {
-        table,
-        row,
-        returning,
+        table: table_name_to_string(&insert.table)?,
+        row: Row::new(translate_insert_values(insert.source)?),
+        returning: insert.returning.map(translate_returning).transpose()?,
     })))
+}
+
+fn translate_insert_values(source: Option<Box<ast::Query>>) -> TranslateResult<Vec<Value>> {
+    let Some(source) = source else {
+        return Ok(vec![]);
+    };
+    let ast::SetExpr::Values(mut values) = *source.body else {
+        return Ok(vec![]);
+    };
+    let Some(ast::Parens { content, .. }) = values.rows.get_mut(0) else {
+        return Err(TranslateError::custom("INSERT with no VALUES"));
+    };
+
+    content
+        .drain(..)
+        .map(|expr| match translate_expr(&BTreeMap::new(), expr)? {
+            QueryExpr::Value(QueryExprValue::Value(value)) => Ok(value),
+            _ => Err(TranslateError::custom("Unsupported expression in VALUES")),
+        })
+        .collect()
+}
+
+fn translate_returning(items: Vec<SelectItem>) -> TranslateResult<Vec<String>> {
+    items.into_iter().map(translate_returning_item).collect()
+}
+
+fn translate_returning_item(item: SelectItem) -> TranslateResult<String> {
+    match item {
+        SelectItem::UnnamedExpr(Expr::Identifier(ident)) => Ok(ident.value),
+        SelectItem::UnnamedExpr(Expr::CompoundIdentifier(idents)) if idents.len() == 1 => {
+            Ok(idents[0].value.clone())
+        }
+        SelectItem::UnnamedExpr(Expr::CompoundIdentifier(idents)) => Err(TranslateError::custom(
+            format!("Unsupported RETURNING identifier: {:?}", idents),
+        )),
+        SelectItem::UnnamedExpr(expr) => Err(TranslateError::custom(format!(
+            "Unsupported RETURNING expression: {:?}",
+            expr
+        ))),
+        SelectItem::Wildcard(_) => Ok("*".to_string()),
+        _ => Err(TranslateError::custom("Unsupported RETURNING item")),
+    }
 }
 
 fn translate_update(
@@ -747,6 +694,78 @@ mod tests {
                 .unwrap_err();
             assert!(error.to_string().contains("bare identifier columns"));
         });
+    }
+
+    fn translate(sql: &str) -> Vec<Statement> {
+        block_on(async {
+            SqlTranslator
+                .translate_with_params(sql, None)
+                .await
+                .unwrap()
+        })
+    }
+
+    #[test]
+    fn translates_remaining_statement_types() {
+        assert!(matches!(
+            translate("INSERT INTO users VALUES (1, 'Ada', TRUE, NULL) RETURNING id, *")[0],
+            Statement::Query(Query::Insert(_))
+        ));
+        assert!(matches!(
+            translate("UPDATE users SET name = 'Ada' WHERE id <> 1")[0],
+            Statement::Query(Query::Update(_))
+        ));
+        let error = block_on(async {
+            SqlTranslator
+                .translate_with_params("DELETE FROM users WHERE id <= 1", None)
+                .await
+                .unwrap_err()
+        });
+        assert!(error.to_string().contains("No tables in DELETE"));
+        assert!(matches!(
+            translate("DROP INDEX IF EXISTS users_name")[0],
+            Statement::DataDefinition(DataDefinition::DropIndex { .. })
+        ));
+        assert!(matches!(
+            translate("ALTER INDEX users_name RENAME TO members_name")[0],
+            Statement::DataDefinition(DataDefinition::AlterIndex { .. })
+        ));
+    }
+
+    #[test]
+    fn translates_data_types_and_reports_unsupported_types() {
+        assert!(matches!(
+            translate(
+                "CREATE TABLE values (\
+                    a CHAR, b VARCHAR, c TEXT, d INT, e INTEGER, f BIGINT, \
+                    g FLOAT, h DOUBLE, i BOOLEAN, j BLOB, k UUID, l JSON, m JSONB\
+                )"
+            )[0],
+            Statement::DataDefinition(DataDefinition::CreateTable { .. })
+        ));
+
+        let error = block_on(async {
+            SqlTranslator
+                .translate_with_params("CREATE TABLE values (created DATE)", None)
+                .await
+                .unwrap_err()
+        });
+        assert!(error.to_string().contains("Unsupported column data type"));
+    }
+
+    #[test]
+    fn translates_join_kinds_and_expression_variants() {
+        for sql in [
+            "SELECT * FROM users u LEFT JOIN posts p ON p.user_id = u.id",
+            "SELECT * FROM users u RIGHT JOIN posts p ON p.user_id = u.id",
+            "SELECT * FROM users u FULL OUTER JOIN posts p ON p.user_id = u.id",
+            "SELECT id, u.id, u.id + 1 FROM users u WHERE id < 1 OR id <= 2 OR id <> 3 OR id >= 4 AND active = TRUE AND name = 'Ada' AND deleted_at IS NOT NULL",
+        ] {
+            assert!(matches!(
+                translate(sql)[0],
+                Statement::Query(Query::Select(_))
+            ));
+        }
     }
 
     #[test]

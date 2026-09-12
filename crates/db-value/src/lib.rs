@@ -7,6 +7,9 @@ mod json_number;
 mod json_value;
 mod value;
 
+#[cfg(test)]
+mod tests;
+
 pub use json_number::JsonNumber;
 pub use json_value::JsonValue;
 pub use value::{Row, Value, ValueType};

@@ -1,16 +1,15 @@
-use alloc::{string::String, vec::Vec};
+use alloc::{vec, vec::Vec};
 
 use db_value::{Row, Value};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    EngineError, EngineResult, KernelTransaction, RowCodec,
-    catalog::{
-        ENGINE_APPLIED_CHANGES, ENGINE_CHANGE_SEQUENCE, ENGINE_CHANGES, ENGINE_INDEX_FIELDS,
-        ENGINE_INDICES, ENGINE_TABLES,
-    },
-    index::{rebuild, remove as remove_index, update_row},
+    EngineError, EngineResult, KernelTransaction, RowCodec, RowGenerationId, TableGenerationId,
+    catalog::ENGINE_ROW_MAPPINGS,
+    envelope::ensure_envelope_log,
+    index::{rebuild_table, update_row},
+    schema::{SchemaChange, columns, materialize as materialize_schema},
 };
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -21,18 +20,30 @@ pub struct Change {
 }
 
 impl Change {
-    pub fn entry(id: Uuid, table: String, key: Row, value: Option<Vec<u8>>) -> Self {
+    pub fn schema(id: Uuid, schema: SchemaChange) -> Self {
         Self {
             id,
-            key: ChangeKey::Entry { table, key },
-            value,
+            key: ChangeKey::Schema(schema),
+            value: None,
         }
     }
 
-    pub fn row(id: Uuid, table: String, key: Row, value: Option<Vec<u8>>) -> Self {
+    pub fn row(
+        id: Uuid,
+        table: TableGenerationId,
+        row: RowGenerationId,
+        key: Row,
+        previous_key: Option<Row>,
+        value: Option<Vec<u8>>,
+    ) -> Self {
         Self {
             id,
-            key: ChangeKey::Row { table, key },
+            key: ChangeKey::Row {
+                table,
+                row,
+                key,
+                previous_key,
+            },
             value,
         }
     }
@@ -40,120 +51,170 @@ impl Change {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ChangeKey {
-    Entry { table: String, key: Row },
-    Row { table: String, key: Row },
-}
-
-pub trait ChangeReplication {
-    type Cursor;
-
-    fn changes_since(
-        &self,
-        cursor: Option<&Self::Cursor>,
-    ) -> impl Future<Output = EngineResult<(Self::Cursor, Vec<Change>)>>;
-
-    fn apply_changes(&self, changes: Vec<Change>) -> impl Future<Output = EngineResult<()>>;
+    Schema(SchemaChange),
+    Row {
+        table: TableGenerationId,
+        row: RowGenerationId,
+        key: Row,
+        previous_key: Option<Row>,
+    },
 }
 
 pub(crate) async fn ensure_change_log<T>(transaction: &mut T) -> EngineResult<()>
 where
     T: KernelTransaction,
 {
-    for table in [
-        ENGINE_APPLIED_CHANGES,
-        ENGINE_CHANGE_SEQUENCE,
-        ENGINE_CHANGES,
-    ] {
-        transaction.ensure_table(table).await?;
+    transaction.ensure_table(ENGINE_ROW_MAPPINGS).await?;
+    ensure_envelope_log(transaction).await
+}
+
+pub(crate) fn row_mapping_key(table: TableGenerationId, key: &Row) -> Row {
+    let mut values = Vec::with_capacity(key.values.len() + 1);
+    values.push(Value::Uuid(table.0));
+    values.extend(key.values.clone());
+    Row::new(values)
+}
+
+pub(crate) async fn row_generation_id<T>(
+    transaction: &T,
+    table: TableGenerationId,
+    key: &Row,
+) -> EngineResult<Option<RowGenerationId>>
+where
+    T: KernelTransaction,
+{
+    let Some(mapping) = transaction
+        .get_entry(ENGINE_ROW_MAPPINGS, &row_mapping_key(table, key))
+        .await?
+    else {
+        return Ok(None);
+    };
+    mapping
+        .values
+        .first()
+        .and_then(Value::as_uuid)
+        .copied()
+        .map(RowGenerationId)
+        .map(Some)
+        .ok_or(EngineError::custom("Invalid row-generation mapping"))
+}
+
+pub(crate) async fn put_row_mapping<T>(
+    transaction: &mut T,
+    table: TableGenerationId,
+    key: &Row,
+    row: RowGenerationId,
+) -> EngineResult<()>
+where
+    T: KernelTransaction,
+{
+    transaction
+        .put_entry(
+            ENGINE_ROW_MAPPINGS,
+            row_mapping_key(table, key),
+            Row::new(vec![Value::Uuid(row.0)]),
+        )
+        .await
+}
+
+pub(crate) async fn remove_row_mapping<T>(
+    transaction: &mut T,
+    table: TableGenerationId,
+    key: &Row,
+    row: RowGenerationId,
+) -> EngineResult<()>
+where
+    T: KernelTransaction,
+{
+    let mapping_key = row_mapping_key(table, key);
+    if row_generation_id(transaction, table, key).await? == Some(row) {
+        transaction
+            .remove_entry(ENGINE_ROW_MAPPINGS, &mapping_key)
+            .await?;
     }
     Ok(())
 }
 
-pub(crate) async fn apply_change<T, R>(
+pub(crate) async fn apply_local_change<T, R>(
     transaction: &mut T,
     codec: &R,
+    changes: &mut Vec<Change>,
     change: Change,
 ) -> EngineResult<()>
 where
     T: KernelTransaction,
     R: RowCodec<T>,
 {
-    let change_key = Row::new(vec![Value::Uuid(change.id)]);
-    if transaction
-        .get_entry(ENGINE_APPLIED_CHANGES, &change_key)
-        .await?
-        .is_some()
-    {
-        return Ok(());
-    }
+    let _ = materialize_change(transaction, codec, &change).await?;
+    changes.push(change);
+    Ok(())
+}
 
+pub(crate) async fn materialize_change<T, R>(
+    transaction: &mut T,
+    codec: &R,
+    change: &Change,
+) -> EngineResult<bool>
+where
+    T: KernelTransaction,
+    R: RowCodec<T>,
+{
     match (&change.key, &change.value) {
-        (ChangeKey::Entry { table, key }, Some(value)) => {
-            let value: Row = postcard::from_bytes(value).map_err(EngineError::custom)?;
-            if table == ENGINE_TABLES {
-                let Some(table_name) = key.values.first().and_then(Value::as_text) else {
-                    return Err(EngineError::custom("Invalid table catalog change"));
-                };
-                codec.ensure_table(transaction, table_name).await?;
+        (ChangeKey::Schema(schema), None) => {
+            let superseded = materialize_schema(transaction, schema).await?;
+            if let SchemaChange::CreateTable { table, .. } = schema {
+                codec.ensure_table(transaction, *table).await?;
             }
-            transaction.put_entry(table, key.clone(), value).await?;
-            let index_name = (table == ENGINE_INDICES || table == ENGINE_INDEX_FIELDS)
-                .then(|| key.values.first().and_then(Value::as_text))
-                .flatten();
-            if let Some(index_name) = index_name {
-                rebuild(transaction, codec, index_name).await?;
+            match schema {
+                SchemaChange::CreateTable { table, .. }
+                | SchemaChange::AddColumn { table, .. }
+                | SchemaChange::CreateIndex { table, .. } => {
+                    rebuild_table(transaction, codec, *table).await?;
+                }
+                SchemaChange::TombstoneTable(_)
+                | SchemaChange::TombstoneColumn(_)
+                | SchemaChange::TombstoneIndex(_) => {}
+            }
+            if superseded {
+                return Ok(true);
             }
         }
-        (ChangeKey::Entry { table, key }, None) => {
-            if table == ENGINE_INDICES
-                && let Some(index_name) = key.values.first().and_then(Value::as_text)
-            {
-                remove_index(transaction, index_name).await?;
+        (
+            ChangeKey::Row {
+                table,
+                row,
+                key,
+                previous_key,
+            },
+            Some(value),
+        ) => {
+            if columns(transaction, *table).await.is_err() {
+                return Ok(true);
             }
-            transaction.remove_entry(table, key).await?;
+            let old = codec.get_row(transaction, table, row).await?;
+            let Some(value) = codec.merge_row(transaction, table, *row, value).await? else {
+                return Ok(true);
+            };
+            if let Some(previous_key) = previous_key {
+                remove_row_mapping(transaction, *table, previous_key, *row).await?;
+            }
+            put_row_mapping(transaction, *table, key, *row).await?;
+            update_row(transaction, *table, key, old.as_ref(), Some(&value)).await?;
         }
-        (ChangeKey::Row { table, key }, Some(value)) => {
-            let old = codec.get_row(transaction, table, key).await?;
-            let row = codec
-                .merge_row(transaction, table, key.clone(), value)
-                .await?;
-            update_row(transaction, table, key, old.as_ref(), Some(&row)).await?;
+        (
+            ChangeKey::Row {
+                table, row, key, ..
+            },
+            None,
+        ) => {
+            if columns(transaction, *table).await.is_err() {
+                return Ok(true);
+            }
+            let old = codec.remove_row(transaction, table, row).await?;
+            remove_row_mapping(transaction, *table, key, *row).await?;
+            update_row(transaction, *table, key, old.as_ref(), None).await?;
         }
-        (ChangeKey::Row { table, key }, None) => {
-            let old = codec.remove_row(transaction, table, key).await?;
-            update_row(transaction, table, key, old.as_ref(), None).await?;
-        }
+        (_, Some(_)) => return Err(EngineError::custom("Invalid schema change value")),
     }
-
-    let sequence_key = Row::default();
-    let sequence = match transaction
-        .get_entry(ENGINE_CHANGE_SEQUENCE, &sequence_key)
-        .await?
-    {
-        Some(value) => match value.values.as_slice() {
-            [Value::Integer(sequence)] => sequence
-                .checked_add(1)
-                .ok_or_else(|| EngineError::custom("Change sequence overflow"))?,
-            _ => return Err(EngineError::custom("Invalid change sequence")),
-        },
-        None => 1,
-    };
-    let encoded = postcard::to_allocvec(&change).map_err(EngineError::custom)?;
-    transaction
-        .put_entry(ENGINE_APPLIED_CHANGES, change_key, Row::default())
-        .await?;
-    transaction
-        .put_entry(
-            ENGINE_CHANGE_SEQUENCE,
-            sequence_key,
-            Row::new(vec![Value::Integer(sequence)]),
-        )
-        .await?;
-    transaction
-        .put_entry(
-            ENGINE_CHANGES,
-            Row::new(vec![Value::Integer(sequence)]),
-            Row::new(vec![Value::Blob(encoded)]),
-        )
-        .await
+    Ok(false)
 }

@@ -65,30 +65,25 @@ pub async fn run_compaction<T>(
 where
     T: BTreeTransaction<DocumentChangeKey, Vec<u8>>,
 {
-    let to_remove = {
-        let doc_range = DocumentChangeKey::range_for(doc_id);
-        let range_stream = tx.range(doc_range);
-        pin_mut!(range_stream);
-
-        let mut results: Vec<DocumentChangeKey> = Vec::new();
-
-        while let Some(item) = range_stream.next().await {
-            let k = match item {
-                Ok((k, _v)) => k,
-                Err(err) => return Err(err),
-            };
-            results.push(k);
-        }
-        results
-    };
-
+    let to_remove = document_keys(tx, doc_id).await?;
     let new_key =
         DocumentChangeKey::new_snapshot(doc_id.clone(), hash_heads(compacted_doc.get_heads()));
     tx.insert(new_key, compacted_doc.save()).await?;
-
-    for k in to_remove {
-        tx.remove(&k).await?;
+    for key in to_remove {
+        tx.remove(&key).await?;
     }
-
     Ok(())
+}
+
+async fn document_keys<T>(tx: &T, doc_id: &DocumentId) -> BTreeResult<Vec<DocumentChangeKey>>
+where
+    T: BTreeTransaction<DocumentChangeKey, Vec<u8>>,
+{
+    let entries = tx.range(DocumentChangeKey::range_for(doc_id));
+    pin_mut!(entries);
+    let mut keys = Vec::new();
+    while let Some(entry) = entries.next().await {
+        keys.push(entry?.0);
+    }
+    Ok(keys)
 }

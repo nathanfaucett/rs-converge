@@ -1,6 +1,11 @@
 #![cfg(feature = "in-memory")]
 
-use db_engine::{Change, ChangeReplication, DirectRowCodec, Engine, InMemoryKernel};
+use std::collections::BTreeSet;
+
+use db_engine::{
+    Change, ChangeKey, DirectRowCodec, Engine, EnvelopeOutcome, Frontier, InMemoryKernel,
+    RowGenerationId, SchemaChange, TableGenerationId, TransactionEnvelope,
+};
 use db_query::{
     AlterTableOperation, DataDefinition, Query, QueryColumn, QueryDelete, QueryExpr,
     QueryExprValue, QueryFrom, QueryInsert, QuerySelect, QueryUpdate, QueryUpdateAssignment,
@@ -64,6 +69,224 @@ fn creates_inserts_and_selects_rows() {
             .unwrap();
 
         assert_eq!(results[0].rows, vec![Row::new(vec![Value::from("Ada")])]);
+    });
+}
+
+#[test]
+fn catalog_generations_are_immutable() {
+    block_on(async {
+        let engine = Engine::new(InMemoryKernel::new(), DirectRowCodec);
+        engine
+            .create_table(TableSchema {
+                name: "users".into(),
+                columns: vec![ColumnSchema {
+                    name: "id".into(),
+                    r#type: ValueType::Integer,
+                    default: Value::Null,
+                    primary_key: true,
+                }],
+            })
+            .await
+            .unwrap();
+        engine
+            .execute(vec![Statement::DataDefinition(
+                DataDefinition::CreateIndex {
+                    schema: IndexSchema {
+                        name: "users_id".into(),
+                        table_name: "users".into(),
+                        column_indices: vec![0],
+                        unique: true,
+                    },
+                    if_not_exists: false,
+                },
+            )])
+            .await
+            .unwrap();
+
+        let table = engine.table_generation_id("users").await.unwrap();
+        let column = engine.column_generation_id("users", "id").await.unwrap();
+        let index = engine.index_generation_id("users_id").await.unwrap();
+
+        assert_eq!(table, engine.table_generation_id("users").await.unwrap());
+        assert_eq!(
+            column,
+            engine.column_generation_id("users", "id").await.unwrap()
+        );
+        assert_eq!(index, engine.index_generation_id("users_id").await.unwrap());
+    });
+}
+
+#[test]
+fn primary_key_move_preserves_the_row_generation() {
+    block_on(async {
+        let engine = Engine::new(InMemoryKernel::new(), DirectRowCodec);
+        engine
+            .create_table(TableSchema {
+                name: "users".into(),
+                columns: vec![ColumnSchema {
+                    name: "id".into(),
+                    r#type: ValueType::Integer,
+                    default: Value::Null,
+                    primary_key: true,
+                }],
+            })
+            .await
+            .unwrap();
+        engine
+            .execute(vec![Statement::Query(Query::Insert(QueryInsert {
+                table: "users".into(),
+                row: Row::new(vec![Value::Integer(1)]),
+                returning: None,
+            }))])
+            .await
+            .unwrap();
+        let envelopes = engine
+            .missing_envelopes(&Frontier::default())
+            .await
+            .unwrap();
+        let insert = envelopes.last().unwrap();
+        let row = envelopes
+            .iter()
+            .flat_map(|envelope| &envelope.changes)
+            .find_map(|change| match &change.key {
+                ChangeKey::Row { row, .. } => Some(*row),
+                _ => None,
+            })
+            .unwrap();
+
+        engine
+            .execute(vec![Statement::Query(Query::Update(QueryUpdate {
+                from: QueryFrom {
+                    table: "users".into(),
+                    joins: vec![],
+                },
+                assignments: vec![QueryUpdateAssignment {
+                    column: QueryColumn::new("users".into(), "id".into()),
+                    value: QueryExprValue::Value(Value::Integer(2)),
+                }],
+                predicate: Some(QueryExpr::Equals(
+                    Box::new(QueryExpr::Value(QueryExprValue::Column(QueryColumn::new(
+                        "users".into(),
+                        "id".into(),
+                    )))),
+                    Box::new(QueryExpr::Value(QueryExprValue::Value(Value::Integer(1)))),
+                )),
+                returning: None,
+            }))])
+            .await
+            .unwrap();
+        let updates = engine
+            .missing_envelopes(&Frontier::new(vec![insert.id]))
+            .await
+            .unwrap();
+        assert!(updates.iter().any(|update| matches!(
+            update.changes.as_slice(),
+            [Change {
+                key: ChangeKey::Row {
+                    row: updated_row,
+                    previous_key: Some(_),
+                    ..
+                },
+                ..
+            }] if *updated_row == row
+        )));
+    });
+}
+
+#[test]
+fn restore_creates_a_new_row_generation() {
+    block_on(async {
+        let engine = Engine::new(InMemoryKernel::new(), DirectRowCodec);
+        engine
+            .create_table(TableSchema {
+                name: "users".into(),
+                columns: vec![ColumnSchema {
+                    name: "id".into(),
+                    r#type: ValueType::Integer,
+                    default: Value::Null,
+                    primary_key: true,
+                }],
+            })
+            .await
+            .unwrap();
+        let insert = || {
+            Statement::Query(Query::Insert(QueryInsert {
+                table: "users".into(),
+                row: Row::new(vec![Value::Integer(1)]),
+                returning: None,
+            }))
+        };
+        engine.execute(vec![insert()]).await.unwrap();
+        engine
+            .execute(vec![Statement::Query(Query::Delete(QueryDelete {
+                from: QueryFrom {
+                    table: "users".into(),
+                    joins: vec![],
+                },
+                predicate: Some(QueryExpr::Equals(
+                    Box::new(QueryExpr::Value(QueryExprValue::Column(QueryColumn::new(
+                        "users".into(),
+                        "id".into(),
+                    )))),
+                    Box::new(QueryExpr::Value(QueryExprValue::Value(Value::Integer(1)))),
+                )),
+                returning: None,
+            }))])
+            .await
+            .unwrap();
+        engine.execute(vec![insert()]).await.unwrap();
+
+        let rows: Vec<_> = engine
+            .missing_envelopes(&Frontier::default())
+            .await
+            .unwrap()
+            .into_iter()
+            .flat_map(|envelope| envelope.changes)
+            .filter_map(|change| match change.key {
+                ChangeKey::Row { row, .. } => Some(row),
+                ChangeKey::Schema(_) => None,
+            })
+            .collect();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows.into_iter().collect::<BTreeSet<_>>().len(), 2);
+    });
+}
+
+#[test]
+fn records_one_envelope_for_a_committed_statement_batch() {
+    block_on(async {
+        let engine = Engine::new(InMemoryKernel::new(), DirectRowCodec);
+        engine
+            .execute(vec![
+                Statement::DataDefinition(DataDefinition::CreateTable {
+                    schema: TableSchema {
+                        name: "users".into(),
+                        columns: vec![ColumnSchema {
+                            name: "id".into(),
+                            r#type: ValueType::Integer,
+                            default: Value::Null,
+                            primary_key: true,
+                        }],
+                    },
+                    if_not_exists: false,
+                }),
+                Statement::Query(Query::Insert(QueryInsert {
+                    table: "users".into(),
+                    row: Row::new(vec![Value::Integer(1)]),
+                    returning: None,
+                })),
+            ])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            engine
+                .missing_envelopes(&Frontier::default())
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     });
 }
 
@@ -182,8 +405,14 @@ fn updates_and_deletes_rows_through_changes() {
             .unwrap();
         assert!(results[0].rows.is_empty());
 
-        let (_, changes) = engine.changes_since(None).await.unwrap();
-        assert_eq!(changes.len(), 8);
+        assert_eq!(
+            engine
+                .missing_envelopes(&Frontier::default())
+                .await
+                .unwrap()
+                .len(),
+            5
+        );
     });
 }
 
@@ -257,7 +486,7 @@ fn alter_table_add_column_updates_the_catalog() {
 }
 
 #[test]
-fn derives_unique_indexes_and_rolls_back_collisions() {
+fn retains_unique_index_contenders() {
     block_on(async {
         let engine = Engine::new(InMemoryKernel::new(), DirectRowCodec);
         engine
@@ -312,14 +541,14 @@ fn derives_unique_indexes_and_rolls_back_collisions() {
             }
         );
 
-        let result = engine
+        engine
             .execute(vec![Statement::Query(Query::Insert(QueryInsert {
                 table: "users".into(),
                 row: Row::new(vec![Value::Integer(2), Value::from("ada@example.com")]),
                 returning: None,
             }))])
-            .await;
-        assert!(result.is_err());
+            .await
+            .unwrap();
 
         let rows = engine
             .execute(vec![Statement::Query(Query::Select(QuerySelect {
@@ -332,7 +561,7 @@ fn derives_unique_indexes_and_rolls_back_collisions() {
             }))])
             .await
             .unwrap();
-        assert_eq!(rows[0].rows.len(), 1);
+        assert_eq!(rows[0].rows.len(), 2);
     });
 }
 
@@ -389,16 +618,26 @@ fn indexes_defaults_for_rows_created_before_add_column() {
             )])
             .await
             .unwrap();
-        assert!(
-            engine
-                .execute(vec![Statement::Query(Query::Insert(QueryInsert {
+        engine
+            .execute(vec![Statement::Query(Query::Insert(QueryInsert {
+                table: "users".into(),
+                row: Row::new(vec![Value::Integer(2), Value::from("member")]),
+                returning: None,
+            }))])
+            .await
+            .unwrap();
+        let rows = engine
+            .execute(vec![Statement::Query(Query::Select(QuerySelect {
+                from: QueryFrom {
                     table: "users".into(),
-                    row: Row::new(vec![Value::Integer(2), Value::from("member")]),
-                    returning: None,
-                }))])
-                .await
-                .is_err()
-        );
+                    joins: vec![],
+                },
+                projection: vec![QueryColumn::new("users".into(), "*".into())],
+                ..Default::default()
+            }))])
+            .await
+            .unwrap();
+        assert_eq!(rows[0].rows.len(), 2);
     });
 }
 
@@ -473,7 +712,326 @@ fn primary_key_update_releases_old_index_records() {
 }
 
 #[test]
-fn applies_received_changes_once_and_exposes_them() {
+fn concurrent_same_label_tables_choose_the_lowest_generation() {
+    block_on(async {
+        let left = Engine::new(InMemoryKernel::new(), DirectRowCodec);
+        let right = Engine::new(InMemoryKernel::new(), DirectRowCodec);
+        let schema = || TableSchema {
+            name: "users".into(),
+            columns: vec![ColumnSchema {
+                name: "id".into(),
+                r#type: ValueType::Integer,
+                default: Value::Null,
+                primary_key: true,
+            }],
+        };
+        left.create_table(schema()).await.unwrap();
+        right.create_table(schema()).await.unwrap();
+        let left_id = left.table_generation_id("users").await.unwrap();
+        let right_id = right.table_generation_id("users").await.unwrap();
+        for envelope in left.missing_envelopes(&Frontier::default()).await.unwrap() {
+            right.import_envelope(envelope).await.unwrap();
+        }
+        for envelope in right.missing_envelopes(&Frontier::default()).await.unwrap() {
+            left.import_envelope(envelope).await.unwrap();
+        }
+        let winner = TableGenerationId(left_id.0.min(right_id.0));
+        assert_eq!(left.table_generation_id("users").await.unwrap(), winner);
+        assert_eq!(right.table_generation_id("users").await.unwrap(), winner);
+    });
+}
+
+#[test]
+fn imports_envelopes_idempotently_and_quarantines_corrupt_bytes() {
+    block_on(async {
+        let engine = Engine::new(InMemoryKernel::new(), DirectRowCodec);
+        let envelope = TransactionEnvelope::new(Vec::new(), Vec::new()).unwrap();
+
+        assert_eq!(
+            engine.import_envelope(envelope.clone()).await.unwrap(),
+            EnvelopeOutcome::Applied
+        );
+        assert_eq!(
+            engine.import_envelope(envelope.clone()).await.unwrap(),
+            EnvelopeOutcome::Applied
+        );
+        assert_eq!(
+            engine.envelope_outcome(envelope.id).await.unwrap(),
+            Some(EnvelopeOutcome::Applied)
+        );
+        assert!(matches!(
+            engine.import_envelope_bytes(vec![0]).await.unwrap(),
+            EnvelopeOutcome::Quarantined { .. }
+        ));
+        assert_eq!(engine.envelope_outcomes().await.unwrap().len(), 2);
+    });
+}
+
+#[test]
+fn checkpoints_merge_envelopes_without_replacing_destination_state() {
+    block_on(async {
+        let source = Engine::new(InMemoryKernel::new(), DirectRowCodec);
+        let destination = Engine::new(InMemoryKernel::new(), DirectRowCodec);
+        let table_envelope = |name: &str| {
+            TransactionEnvelope::new(
+                Vec::new(),
+                vec![Change::schema(
+                    Uuid::now_v7(),
+                    SchemaChange::CreateTable {
+                        table: TableGenerationId::fresh(),
+                        label: name.into(),
+                    },
+                )],
+            )
+            .unwrap()
+        };
+        let source_envelope = table_envelope("source");
+        let destination_envelope = table_envelope("destination");
+
+        source.import_envelope(source_envelope).await.unwrap();
+        destination
+            .import_envelope(destination_envelope)
+            .await
+            .unwrap();
+        destination
+            .import_checkpoint(source.export_checkpoint().await.unwrap())
+            .await
+            .unwrap();
+
+        assert!(destination.table_schema("source").await.is_ok());
+        assert!(destination.table_schema("destination").await.is_ok());
+    });
+}
+
+#[test]
+fn checkpoints_bootstrap_state_idempotently_and_retain_causal_headers() {
+    block_on(async {
+        let source = Engine::new(InMemoryKernel::new(), DirectRowCodec);
+        let destination = Engine::new(InMemoryKernel::new(), DirectRowCodec);
+        source
+            .create_table(TableSchema {
+                name: "people".into(),
+                columns: vec![ColumnSchema {
+                    name: "id".into(),
+                    r#type: ValueType::Integer,
+                    default: Value::Null,
+                    primary_key: true,
+                }],
+            })
+            .await
+            .unwrap();
+        source
+            .execute(vec![Statement::Query(Query::Insert(QueryInsert {
+                table: "people".into(),
+                row: Row::new(vec![Value::Integer(1)]),
+                returning: None,
+            }))])
+            .await
+            .unwrap();
+
+        let checkpoint = source.export_checkpoint().await.unwrap();
+        assert!(checkpoint.headers.len() >= 2);
+        assert_eq!(checkpoint.rows.len(), 1);
+        destination
+            .import_checkpoint(checkpoint.clone())
+            .await
+            .unwrap();
+        destination.import_checkpoint(checkpoint).await.unwrap();
+        let rows = destination
+            .execute(vec![Statement::Query(Query::Select(QuerySelect {
+                from: QueryFrom {
+                    table: "people".into(),
+                    joins: vec![],
+                },
+                projection: vec![QueryColumn::new("people".into(), "id".into())],
+                ..Default::default()
+            }))])
+            .await
+            .unwrap();
+        assert_eq!(rows[0].rows, vec![Row::new(vec![Value::Integer(1)])]);
+
+        let parent = TransactionEnvelope::new(Vec::new(), Vec::new()).unwrap();
+        let compacted = TransactionEnvelope::new(vec![parent.id], Vec::new()).unwrap();
+        let child = TransactionEnvelope::new(
+            vec![parent.id],
+            vec![Change::schema(
+                Uuid::now_v7(),
+                SchemaChange::CreateTable {
+                    table: TableGenerationId::fresh(),
+                    label: "delayed".into(),
+                },
+            )],
+        )
+        .unwrap();
+        let header_source = Engine::new(InMemoryKernel::new(), DirectRowCodec);
+        let header_destination = Engine::new(InMemoryKernel::new(), DirectRowCodec);
+        header_source.import_envelope(parent).await.unwrap();
+        header_source.import_envelope(compacted).await.unwrap();
+        header_destination
+            .import_checkpoint(header_source.export_checkpoint().await.unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            header_destination.import_envelope(child).await.unwrap(),
+            EnvelopeOutcome::Applied
+        );
+    });
+}
+
+#[test]
+fn retries_pending_envelopes_when_parents_arrive() {
+    block_on(async {
+        let engine = Engine::new(InMemoryKernel::new(), DirectRowCodec);
+        let parent = TransactionEnvelope::new(Vec::new(), Vec::new()).unwrap();
+        let child = TransactionEnvelope::new(vec![parent.id], Vec::new()).unwrap();
+
+        assert_eq!(
+            engine.import_envelope(child.clone()).await.unwrap(),
+            EnvelopeOutcome::Pending
+        );
+        assert_eq!(
+            engine.envelope_outcome(child.id).await.unwrap(),
+            Some(EnvelopeOutcome::Pending)
+        );
+        assert_eq!(
+            engine.import_envelope(parent).await.unwrap(),
+            EnvelopeOutcome::Applied
+        );
+        assert_eq!(
+            engine.envelope_outcome(child.id).await.unwrap(),
+            Some(EnvelopeOutcome::Applied)
+        );
+    });
+}
+
+#[test]
+fn exports_only_envelopes_outside_the_causal_frontier() {
+    block_on(async {
+        let source = Engine::new(InMemoryKernel::new(), DirectRowCodec);
+        let destination = Engine::new(InMemoryKernel::new(), DirectRowCodec);
+        let parent = TransactionEnvelope::new(Vec::new(), Vec::new()).unwrap();
+        let child = TransactionEnvelope::new(vec![parent.id], Vec::new()).unwrap();
+
+        source.import_envelope(parent).await.unwrap();
+        source.import_envelope(child).await.unwrap();
+        for envelope in source
+            .missing_envelopes(&destination.frontier().await.unwrap())
+            .await
+            .unwrap()
+        {
+            destination.import_envelope(envelope).await.unwrap();
+        }
+        assert!(
+            source
+                .missing_envelopes(&destination.frontier().await.unwrap())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    });
+}
+
+#[test]
+fn concurrent_same_label_columns_and_indexes_choose_lowest_generations() {
+    block_on(async {
+        let left = Engine::new(InMemoryKernel::new(), DirectRowCodec);
+        let right = Engine::new(InMemoryKernel::new(), DirectRowCodec);
+        left.create_table(TableSchema {
+            name: "users".into(),
+            columns: vec![ColumnSchema {
+                name: "id".into(),
+                r#type: ValueType::Integer,
+                default: Value::Null,
+                primary_key: true,
+            }],
+        })
+        .await
+        .unwrap();
+        for envelope in left.missing_envelopes(&Frontier::default()).await.unwrap() {
+            right.import_envelope(envelope).await.unwrap();
+        }
+
+        let add_name = || {
+            Statement::DataDefinition(DataDefinition::AlterTable {
+                table_name: "users".into(),
+                operations: vec![AlterTableOperation::AddColumn(ColumnSchema {
+                    name: "name".into(),
+                    r#type: ValueType::Text,
+                    default: Value::Null,
+                    primary_key: false,
+                })],
+                if_exists: false,
+            })
+        };
+        left.execute(vec![add_name()]).await.unwrap();
+        right.execute(vec![add_name()]).await.unwrap();
+        let left_column = left.column_generation_id("users", "name").await.unwrap();
+        let right_column = right.column_generation_id("users", "name").await.unwrap();
+        for envelope in left
+            .missing_envelopes(&right.frontier().await.unwrap())
+            .await
+            .unwrap()
+        {
+            right.import_envelope(envelope).await.unwrap();
+        }
+        for envelope in right
+            .missing_envelopes(&left.frontier().await.unwrap())
+            .await
+            .unwrap()
+        {
+            left.import_envelope(envelope).await.unwrap();
+        }
+        assert_eq!(
+            left.column_generation_id("users", "name").await.unwrap().0,
+            left_column.0.min(right_column.0)
+        );
+        assert_eq!(
+            right.column_generation_id("users", "name").await.unwrap(),
+            left.column_generation_id("users", "name").await.unwrap()
+        );
+
+        let create_index = || {
+            Statement::DataDefinition(DataDefinition::CreateIndex {
+                schema: IndexSchema {
+                    name: "users_name".into(),
+                    table_name: "users".into(),
+                    column_indices: vec![1],
+                    unique: false,
+                },
+                if_not_exists: false,
+            })
+        };
+        left.execute(vec![create_index()]).await.unwrap();
+        right.execute(vec![create_index()]).await.unwrap();
+        let left_index = left.index_generation_id("users_name").await.unwrap();
+        let right_index = right.index_generation_id("users_name").await.unwrap();
+        for envelope in left
+            .missing_envelopes(&right.frontier().await.unwrap())
+            .await
+            .unwrap()
+        {
+            right.import_envelope(envelope).await.unwrap();
+        }
+        for envelope in right
+            .missing_envelopes(&left.frontier().await.unwrap())
+            .await
+            .unwrap()
+        {
+            left.import_envelope(envelope).await.unwrap();
+        }
+        assert_eq!(
+            left.index_generation_id("users_name").await.unwrap().0,
+            left_index.0.min(right_index.0)
+        );
+        assert_eq!(
+            right.index_generation_id("users_name").await.unwrap(),
+            left.index_generation_id("users_name").await.unwrap()
+        );
+    });
+}
+
+#[test]
+fn rejects_an_invalid_envelope_atomically() {
     block_on(async {
         let engine = Engine::new(InMemoryKernel::new(), DirectRowCodec);
         engine
@@ -488,19 +1046,26 @@ fn applies_received_changes_once_and_exposes_them() {
             })
             .await
             .unwrap();
-
-        let key = Row::new(vec![Value::Integer(1)]);
-        let row = Row::new(vec![Value::Integer(1)]);
-        let change = Change::row(
+        let valid = Change::row(
             Uuid::now_v7(),
-            "users".into(),
-            key.clone(),
-            Some(postcard::to_allocvec(&row).unwrap()),
+            engine.table_generation_id("users").await.unwrap(),
+            RowGenerationId::fresh(),
+            Row::new(vec![Value::Integer(1)]),
+            None,
+            Some(postcard::to_allocvec(&Row::new(vec![Value::Integer(1)])).unwrap()),
         );
-        engine.apply_changes(vec![change.clone()]).await.unwrap();
-        engine.apply_changes(vec![change]).await.unwrap();
+        let invalid = Change {
+            id: Uuid::now_v7(),
+            key: ChangeKey::Schema(SchemaChange::CreateTable {
+                table: TableGenerationId::fresh(),
+                label: "invalid".into(),
+            }),
+            value: Some(vec![0]),
+        };
+        let envelope = TransactionEnvelope::new(Vec::new(), vec![valid, invalid]).unwrap();
 
-        let results = engine
+        assert!(engine.import_envelope(envelope).await.is_err());
+        let rows = engine
             .execute(vec![Statement::Query(Query::Select(QuerySelect {
                 from: QueryFrom {
                     table: "users".into(),
@@ -511,49 +1076,7 @@ fn applies_received_changes_once_and_exposes_them() {
             }))])
             .await
             .unwrap();
-        assert_eq!(results[0].rows, vec![row]);
-
-        let (_, changes) = engine.changes_since(None).await.unwrap();
-        assert_eq!(changes.len(), 3);
-    });
-}
-
-#[test]
-fn delivers_late_lower_uuid_changes_after_the_cursor() {
-    block_on(async {
-        let engine = Engine::new(InMemoryKernel::new(), DirectRowCodec);
-        engine
-            .create_table(TableSchema {
-                name: "users".into(),
-                columns: vec![ColumnSchema {
-                    name: "id".into(),
-                    r#type: ValueType::Integer,
-                    default: Value::Null,
-                    primary_key: true,
-                }],
-            })
-            .await
-            .unwrap();
-        let (cursor, _) = engine.changes_since(None).await.unwrap();
-        let first = Change::row(
-            Uuid::from_u128(2),
-            "users".into(),
-            Row::new(vec![Value::Integer(1)]),
-            Some(postcard::to_allocvec(&Row::new(vec![Value::Integer(1)])).unwrap()),
-        );
-        engine.apply_changes(vec![first]).await.unwrap();
-        let (cursor, _) = engine.changes_since(Some(&cursor)).await.unwrap();
-
-        let late = Change::row(
-            Uuid::nil(),
-            "users".into(),
-            Row::new(vec![Value::Integer(2)]),
-            Some(postcard::to_allocvec(&Row::new(vec![Value::Integer(2)])).unwrap()),
-        );
-        engine.apply_changes(vec![late.clone()]).await.unwrap();
-
-        let (_, changes) = engine.changes_since(Some(&cursor)).await.unwrap();
-        assert_eq!(changes, vec![late]);
+        assert!(rows[0].rows.is_empty());
     });
 }
 
@@ -597,5 +1120,89 @@ fn rolls_back_the_full_statement_batch() {
             }))])
             .await;
         assert!(result.is_err());
+    });
+}
+
+#[test]
+fn index_lookup_selects_and_promotes_unique_key_contenders() {
+    block_on(async {
+        let engine = Engine::new(InMemoryKernel::new(), DirectRowCodec);
+        engine
+            .create_table(TableSchema {
+                name: "users".into(),
+                columns: vec![
+                    ColumnSchema {
+                        name: "id".into(),
+                        r#type: ValueType::Integer,
+                        default: Value::Null,
+                        primary_key: true,
+                    },
+                    ColumnSchema {
+                        name: "email".into(),
+                        r#type: ValueType::Text,
+                        default: Value::Null,
+                        primary_key: false,
+                    },
+                ],
+            })
+            .await
+            .unwrap();
+        for id in [1, 2] {
+            engine
+                .execute(vec![Statement::Query(Query::Insert(QueryInsert {
+                    table: "users".into(),
+                    row: Row::new(vec![Value::Integer(id), Value::from("ada@example.com")]),
+                    returning: None,
+                }))])
+                .await
+                .unwrap();
+        }
+        engine
+            .execute(vec![Statement::DataDefinition(
+                DataDefinition::CreateIndex {
+                    schema: IndexSchema {
+                        name: "users_email".into(),
+                        table_name: "users".into(),
+                        column_indices: vec![1],
+                        unique: true,
+                    },
+                    if_not_exists: false,
+                },
+            )])
+            .await
+            .unwrap();
+
+        let key = Row::new(vec![Value::from("ada@example.com")]);
+        assert_eq!(
+            engine.index_lookup("users_email", &key).await.unwrap(),
+            Some(Row::new(vec![
+                Value::Integer(1),
+                Value::from("ada@example.com")
+            ]))
+        );
+        engine
+            .execute(vec![Statement::Query(Query::Delete(QueryDelete {
+                from: QueryFrom {
+                    table: "users".into(),
+                    joins: vec![],
+                },
+                predicate: Some(QueryExpr::Equals(
+                    Box::new(QueryExpr::Value(QueryExprValue::Column(QueryColumn::new(
+                        "users".into(),
+                        "id".into(),
+                    )))),
+                    Box::new(QueryExpr::Value(QueryExprValue::Value(Value::Integer(1)))),
+                )),
+                returning: None,
+            }))])
+            .await
+            .unwrap();
+        assert_eq!(
+            engine.index_lookup("users_email", &key).await.unwrap(),
+            Some(Row::new(vec![
+                Value::Integer(2),
+                Value::from("ada@example.com")
+            ]))
+        );
     });
 }
