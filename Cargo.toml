@@ -13,7 +13,6 @@ default = ["std"]
 std = ["db-sql-translator/std"]
 redb = ["dep:db-engine-redb", "std"]
 automerge = ["dep:db-engine-automerge", "std"]
-redb-automerge = ["redb", "automerge"]
 in-memory = ["db-engine/in-memory"]
 
 [lib]
@@ -58,11 +57,11 @@ required-features = ["in-memory"]
 
 [[example]]
 name = "redb_automerge"
-required-features = ["redb-automerge"]
+required-features = ["redb", "automerge"]
 
 [[example]]
 name = "redb_automerge_cli"
-required-features = ["redb-automerge"]
+required-features = ["redb", "automerge"]
 
 [workspace.package]
 version = "0.1.0"
