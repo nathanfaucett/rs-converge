@@ -8,7 +8,7 @@ use crate::{
     ColumnGenerationId, EngineError, EngineResult, IndexGenerationId, KernelTransaction, RowCodec,
     TableGenerationId,
     catalog::ENGINE_INDICES,
-    executor::{materialize_defaults, primary_key},
+    executor::{materialize_defaults, row_id},
     schema::{columns, table_label, table_schema_for},
 };
 
@@ -189,10 +189,10 @@ where
 fn record_key(
     id: IndexGenerationId,
     schema: &IndexSchema,
-    primary_key: &Row,
+    row_id: uuid::Uuid,
     row: &Row,
 ) -> EngineResult<Row> {
-    let mut values = Vec::with_capacity(schema.column_indices.len() + primary_key.values.len() + 1);
+    let mut values = Vec::with_capacity(schema.column_indices.len() + 2);
     values.push(Value::Uuid(id.0));
     for column in &schema.column_indices {
         values.push(
@@ -204,7 +204,7 @@ fn record_key(
                 ))?,
         );
     }
-    values.extend(primary_key.values.clone());
+    values.push(Value::Uuid(row_id));
     Ok(Row::new(values))
 }
 
@@ -239,14 +239,11 @@ where
         }
         winner = Some(winner.map_or(value.clone(), |current: Row| current.min(value)));
     }
-    let Some(key) = winner else {
+    let Some(row) = winner.and_then(|row| row.values.first().and_then(Value::as_uuid).copied())
+    else {
         return Ok(None);
     };
     let table = table_id_from_index(&schema, transaction).await?;
-    let mapping = crate::change::row_generation_id(transaction, table, &key).await?;
-    let Some(row) = mapping else {
-        return Ok(None);
-    };
     codec.get_row(transaction, &table, &row).await
 }
 
@@ -264,6 +261,7 @@ pub(crate) async fn rebuild_table<T, R>(
     transaction: &mut T,
     codec: &R,
     table: TableGenerationId,
+    enforce_unique: bool,
 ) -> EngineResult<()>
 where
     T: KernelTransaction,
@@ -306,8 +304,7 @@ where
     };
     for (_, row) in rows_to_index {
         let row = materialize_defaults(&schema, row);
-        let key = primary_key(&schema, &row)?;
-        update_row(transaction, table, &key, None, Some(&row)).await?;
+        update_row(transaction, table, None, Some(&row), enforce_unique).await?;
     }
     Ok(())
 }
@@ -315,9 +312,9 @@ where
 pub(crate) async fn update_row<T>(
     transaction: &mut T,
     table: TableGenerationId,
-    key: &Row,
     old: Option<&Row>,
     new: Option<&Row>,
+    enforce_unique: bool,
 ) -> EngineResult<()>
 where
     T: KernelTransaction,
@@ -330,19 +327,55 @@ where
             transaction
                 .remove_entry(
                     ENGINE_INDEX_RECORDS,
-                    &record_key(id, &index, key, &materialize_defaults(&schema, row.clone()))?,
+                    &record_key(
+                        id,
+                        &index,
+                        row_id(&schema, row)?,
+                        &materialize_defaults(&schema, row.clone()),
+                    )?,
                 )
                 .await?;
         }
         if let Some(row) = new {
+            let row = materialize_defaults(&schema, row.clone());
+            let row_id = row_id(&schema, &row)?;
+            let key = record_key(id, &index, row_id, &row)?;
+            if enforce_unique
+                && index.unique
+                && !key.values[1..=index.column_indices.len()]
+                    .iter()
+                    .any(|value| matches!(value, Value::Null))
+                && unique_key_exists(transaction, &key).await?
+            {
+                return Err(EngineError::InvalidQuery("Unique index violation"));
+            }
             transaction
                 .put_entry(
                     ENGINE_INDEX_RECORDS,
-                    record_key(id, &index, key, &materialize_defaults(&schema, row.clone()))?,
-                    key.clone(),
+                    key,
+                    Row::new(vec![Value::Uuid(row_id)]),
                 )
                 .await?;
         }
     }
     Ok(())
+}
+
+async fn unique_key_exists<T>(transaction: &T, key: &Row) -> EngineResult<bool>
+where
+    T: KernelTransaction,
+{
+    let values = &key.values[0..key.values.len() - 1];
+    let entries = transaction.scan_entries(ENGINE_INDEX_RECORDS);
+    pin_mut!(entries);
+    while let Some(entry) = entries.next().await {
+        let (candidate, _) = entry?;
+        if candidate.values.len() == key.values.len()
+            && candidate.values[..candidate.values.len() - 1] == *values
+            && candidate.values.last() != key.values.last()
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }

@@ -12,12 +12,13 @@ use std::collections::BTreeMap;
 
 use db_query::{
     AlterIndexOperation, AlterTableOperation, DataDefinition, Query, QueryColumn, QueryDelete,
-    QueryExpr, QueryExprValue, QueryFrom, QueryInsert, QueryJoin, QueryJoinKind, QueryParams,
-    QuerySelect, QueryUpdate, Statement, TranslateError, TranslateResult, Translator,
+    QueryExpr, QueryExprValue, QueryFrom, QueryInsertValue, QueryInsertValues, QueryJoin,
+    QueryJoinKind, QueryParams, QuerySelect, QueryUpdate, Statement, TranslateError,
+    TranslateResult, Translator,
 };
 
 use db_schema::TableSchema;
-use db_value::{Row, Value, ValueType};
+use db_value::{Value, ValueType};
 use sqlparser::{
     ast::{
         self, Expr, JoinConstraint, JoinOperator, ObjectName, ObjectNamePart, SelectItem,
@@ -26,6 +27,7 @@ use sqlparser::{
     dialect::PostgreSqlDialect,
     parser::Parser,
 };
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy)]
 pub struct SqlTranslator;
@@ -292,6 +294,23 @@ fn translate_expr(aliases: &BTreeMap<String, String>, expr: Expr) -> TranslateRe
         Expr::Value(ast::ValueWithSpan { value, .. }) => Ok(QueryExpr::Value(
             QueryExprValue::Value(translate_value(value)?),
         )),
+        Expr::Cast {
+            kind: ast::CastKind::Cast,
+            expr,
+            data_type: ast::DataType::Uuid,
+            array: false,
+            format: None,
+        } => {
+            let QueryExpr::Value(QueryExprValue::Value(Value::Text(value))) =
+                translate_expr(aliases, *expr)?
+            else {
+                return Err(TranslateError::custom("UUID casts require text values"));
+            };
+            let uuid = Uuid::parse_str(&value)
+                .map_err(|_| TranslateError::custom("Invalid UUID literal"))?;
+            Ok(QueryExpr::Value(QueryExprValue::Value(Value::Uuid(uuid))))
+        }
+        Expr::Cast { .. } => Err(TranslateError::custom("Unsupported cast")),
         _ => Err(TranslateError::custom(format!(
             "Unsupported expression: {:?}",
             expr
@@ -349,14 +368,21 @@ fn translate_insert(
     insert: ast::Insert,
     _params: Option<&QueryParams>,
 ) -> TranslateResult<Statement> {
-    Ok(Statement::Query(Query::Insert(QueryInsert {
+    Ok(Statement::Query(Query::InsertValues(QueryInsertValues {
         table: table_name_to_string(&insert.table)?,
-        row: Row::new(translate_insert_values(insert.source)?),
+        columns: insert
+            .columns
+            .into_iter()
+            .map(|column| object_name_to_string(&column))
+            .collect::<TranslateResult<Vec<_>>>()?,
+        values: translate_insert_values(insert.source)?,
         returning: insert.returning.map(translate_returning).transpose()?,
     })))
 }
 
-fn translate_insert_values(source: Option<Box<ast::Query>>) -> TranslateResult<Vec<Value>> {
+fn translate_insert_values(
+    source: Option<Box<ast::Query>>,
+) -> TranslateResult<Vec<QueryInsertValue>> {
     let Some(source) = source else {
         return Ok(vec![]);
     };
@@ -370,7 +396,10 @@ fn translate_insert_values(source: Option<Box<ast::Query>>) -> TranslateResult<V
     content
         .drain(..)
         .map(|expr| match translate_expr(&BTreeMap::new(), expr)? {
-            QueryExpr::Value(QueryExprValue::Value(value)) => Ok(value),
+            QueryExpr::Value(QueryExprValue::Value(value)) => Ok(QueryInsertValue::Value(value)),
+            QueryExpr::Value(QueryExprValue::Column(column)) if column.column == "DEFAULT" => {
+                Ok(QueryInsertValue::Default)
+            }
             _ => Err(TranslateError::custom("Unsupported expression in VALUES")),
         })
         .collect()
@@ -507,6 +536,29 @@ fn translate_column_schema(column: &ast::ColumnDef) -> TranslateResult<db_schema
     })
 }
 
+fn unique_index_name(table: &str, columns: &[String], ordinal: usize) -> String {
+    format!("{}_unique_{}_{}", table, ordinal, columns.join("_"))
+}
+
+fn unique_columns(columns: &[ast::IndexColumn]) -> TranslateResult<Vec<String>> {
+    columns
+        .iter()
+        .map(|column| match &column.column.expr {
+            Expr::Identifier(identifier)
+                if column.operator_class.is_none()
+                    && column.column.options.asc.is_none()
+                    && column.column.options.nulls_first.is_none()
+                    && column.column.with_fill.is_none() =>
+            {
+                Ok(identifier.value.clone())
+            }
+            _ => Err(TranslateError::custom(
+                "UNIQUE constraints only support bare identifier columns",
+            )),
+        })
+        .collect()
+}
+
 fn translate_create_table(create_table: ast::CreateTable) -> TranslateResult<Statement> {
     let table_name = object_name_to_string(&create_table.name)?;
 
@@ -521,10 +573,73 @@ fn translate_create_table(create_table: ast::CreateTable) -> TranslateResult<Sta
         columns,
     };
 
-    Ok(Statement::DataDefinition(DataDefinition::CreateTable {
-        schema,
-        if_not_exists: create_table.if_not_exists,
-    }))
+    let mut indexes = Vec::new();
+    for (ordinal, column) in create_table.columns.iter().enumerate() {
+        if column
+            .options
+            .iter()
+            .any(|option| matches!(option.option, ast::ColumnOption::Unique { .. }))
+        {
+            let columns = vec![column.name.value.clone()];
+            let name = column.options.iter().find_map(|option| {
+                let ast::ColumnOption::Unique(unique) = &option.option else {
+                    return None;
+                };
+                unique
+                    .name
+                    .as_ref()
+                    .or(unique.index_name.as_ref())
+                    .map(|name| name.value.clone())
+            });
+            indexes.push(db_schema::IndexSchema {
+                name: name.unwrap_or_else(|| unique_index_name(&schema.name, &columns, ordinal)),
+                table_name: schema.name.clone(),
+                column_indices: vec![ordinal as u32],
+                unique: true,
+            });
+        }
+    }
+    for (ordinal, constraint) in create_table.constraints.iter().enumerate() {
+        if let ast::TableConstraint::Unique(unique) = constraint {
+            let names = unique_columns(&unique.columns)?;
+            indexes.push(db_schema::IndexSchema {
+                name: unique
+                    .name
+                    .as_ref()
+                    .or(unique.index_name.as_ref())
+                    .map(|name| name.value.clone())
+                    .unwrap_or_else(|| unique_index_name(&schema.name, &names, ordinal)),
+                table_name: schema.name.clone(),
+                column_indices: names
+                    .iter()
+                    .map(|name| {
+                        schema
+                            .columns
+                            .iter()
+                            .position(|column| column.name == *name)
+                            .map(|index| index as u32)
+                            .ok_or(TranslateError::custom("UNIQUE column not found"))
+                    })
+                    .collect::<TranslateResult<Vec<_>>>()?,
+                unique: true,
+            });
+        }
+    }
+
+    if indexes.is_empty() {
+        Ok(Statement::DataDefinition(DataDefinition::CreateTable {
+            schema,
+            if_not_exists: create_table.if_not_exists,
+        }))
+    } else {
+        Ok(Statement::DataDefinition(
+            DataDefinition::CreateTableWithIndexes {
+                schema,
+                indexes,
+                if_not_exists: create_table.if_not_exists,
+            },
+        ))
+    }
 }
 
 fn translate_drop(
@@ -710,7 +825,7 @@ mod tests {
     fn translates_remaining_statement_types() {
         assert!(matches!(
             translate("INSERT INTO users VALUES (1, 'Ada', TRUE, NULL) RETURNING id, *")[0],
-            Statement::Query(Query::Insert(_))
+            Statement::Query(Query::InsertValues(_))
         ));
         assert!(matches!(
             translate("UPDATE users SET name = 'Ada' WHERE id <> 1")[0],
@@ -731,6 +846,75 @@ mod tests {
             translate("ALTER INDEX users_name RENAME TO members_name")[0],
             Statement::DataDefinition(DataDefinition::AlterIndex { .. })
         ));
+    }
+
+    #[test]
+    fn translates_uuid_casts() {
+        let uuid = Uuid::parse_str("018f0f8e-7b6d-7c4a-8f12-123456789abc").unwrap();
+        let statements = translate(
+            "SELECT id FROM users WHERE id = CAST('018f0f8e-7b6d-7c4a-8f12-123456789abc' AS UUID)",
+        );
+        let Statement::Query(Query::Select(select)) = &statements[0] else {
+            panic!("expected SELECT");
+        };
+        let Some(QueryExpr::Equals(_, right)) = &select.predicate else {
+            panic!("expected equality predicate");
+        };
+        assert_eq!(
+            right.as_ref(),
+            &QueryExpr::Value(QueryExprValue::Value(Value::Uuid(uuid)))
+        );
+    }
+
+    #[test]
+    fn translates_insert_columns_and_defaults() {
+        let statements =
+            translate("INSERT INTO users (name, id) VALUES ('Ada', DEFAULT) RETURNING id, name");
+        let Statement::Query(Query::InsertValues(insert)) = &statements[0] else {
+            panic!("expected INSERT VALUES");
+        };
+        assert_eq!(insert.columns, vec!["name", "id"]);
+        assert_eq!(
+            insert.values,
+            vec![
+                QueryInsertValue::Value(Value::from("Ada")),
+                QueryInsertValue::Default,
+            ]
+        );
+    }
+
+    #[test]
+    fn translates_unique_constraints_to_named_indexes() {
+        let statements = translate(
+            "CREATE TABLE users (id UUID PRIMARY KEY, email TEXT UNIQUE, UNIQUE (id, email))",
+        );
+        let Statement::DataDefinition(DataDefinition::CreateTableWithIndexes {
+            schema,
+            indexes,
+            ..
+        }) = &statements[0]
+        else {
+            panic!("expected table with indexes");
+        };
+        assert_eq!(schema.columns.len(), 2);
+        assert_eq!(indexes.len(), 2);
+        assert_eq!(indexes[0].column_indices, vec![1]);
+        assert_eq!(indexes[1].column_indices, vec![0, 1]);
+        assert!(indexes.iter().all(|index| index.unique));
+    }
+
+    #[test]
+    fn rejects_invalid_uuid_casts() {
+        let error = block_on(async {
+            SqlTranslator
+                .translate_with_params(
+                    "SELECT id FROM users WHERE id = CAST('not-a-uuid' AS UUID)",
+                    None,
+                )
+                .await
+                .unwrap_err()
+        });
+        assert!(error.to_string().contains("Invalid UUID literal"));
     }
 
     #[test]

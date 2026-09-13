@@ -7,24 +7,23 @@ where
     R: RowCodec<K::Transaction>,
     T: Translator,
 {
-    // Create tables via SQL using the facade.
     engine
         .translate_and_execute(
-            "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);",
+            "CREATE TABLE users (id UUID PRIMARY KEY, name TEXT);",
             &translator,
         )
         .await
         .expect("create users");
     engine
         .translate_and_execute(
-            "INSERT INTO users (id, name) VALUES (1, 'Alice');",
+            "INSERT INTO users (id, name) VALUES (CAST('018f0f8e-7b6d-7c4a-8f12-123456789abc' AS UUID), 'Alice');",
             &translator,
         )
         .await
         .expect("insert user 1");
     engine
         .translate_and_execute(
-            "INSERT INTO users (id, name) VALUES (2, 'Bob');",
+            "INSERT INTO users (id, name) VALUES (CAST('018f0f8e-7b6d-7c4a-8f12-123456789abd' AS UUID), 'Bob');",
             &translator,
         )
         .await

@@ -10,7 +10,7 @@ use db_btree_automerge::{
 };
 use db_engine::{
     ENGINE_TABLE_FIELDS_FIELD_COLUMN_ID, EngineError, EngineResult, KernelTransaction, RowCodec,
-    RowGenerationId, TableGenerationId,
+    TableGenerationId,
 };
 use db_value::{Row, Value};
 use futures::{Stream, StreamExt, pin_mut};
@@ -58,27 +58,17 @@ impl AutomergeRowCodec {
         Row::new(values)
     }
 
-    fn document_id(table: impl AsRef<str>, row: &RowGenerationId) -> EngineResult<DocumentId> {
-        let table = table.as_ref();
-        let key = postcard::to_allocvec(&Row::new(vec![Value::Uuid(row.0)]))
-            .map_err(EngineError::custom)?;
-        let mut id = Vec::with_capacity(table.len() + key.len() + 4);
-        id.extend_from_slice(&(table.len() as u32).to_be_bytes());
+    fn document_id(table: impl AsRef<str>, row: &uuid::Uuid) -> EngineResult<DocumentId> {
+        let table = uuid::Uuid::parse_str(table.as_ref()).map_err(EngineError::custom)?;
+        let mut id = Vec::with_capacity(32);
         id.extend_from_slice(table.as_bytes());
-        id.extend_from_slice(&key);
+        id.extend_from_slice(row.as_bytes());
         Ok(id)
     }
 
-    fn row_generation_id(table: &str, id: &[u8]) -> EngineResult<RowGenerationId> {
-        let Some((table_len, id)) = id.split_at_checked(size_of::<u32>()) else {
-            return Err(EngineError::custom("Invalid Automerge document ID"));
-        };
-        let table_len = u32::from_be_bytes(
-            table_len
-                .try_into()
-                .map_err(|_| EngineError::custom("Invalid Automerge document ID"))?,
-        ) as usize;
-        let Some((document_table, key)) = id.split_at_checked(table_len) else {
+    fn row_id(table: &str, id: &[u8]) -> EngineResult<uuid::Uuid> {
+        let table = uuid::Uuid::parse_str(table).map_err(EngineError::custom)?;
+        let Some((document_table, row)) = id.split_at_checked(16) else {
             return Err(EngineError::custom("Invalid Automerge document ID"));
         };
         if document_table != table.as_bytes() {
@@ -86,11 +76,7 @@ impl AutomergeRowCodec {
                 "Automerge document belongs to another table",
             ));
         }
-        let key: Row = postcard::from_bytes(key).map_err(EngineError::custom)?;
-        match key.values.as_slice() {
-            [Value::Uuid(row)] => Ok(RowGenerationId(*row)),
-            _ => Err(EngineError::custom("Invalid Automerge row document ID")),
-        }
+        uuid::Uuid::from_slice(row).map_err(EngineError::custom)
     }
 
     async fn columns<T>(
@@ -427,10 +413,10 @@ where
         &self,
         transaction: &T,
         table: &TableGenerationId,
-        row: &RowGenerationId,
+        row: &uuid::Uuid,
     ) -> EngineResult<Option<Row>> {
         let table = &table.0.to_string();
-        let key = Row::new(vec![Value::Uuid(row.0)]);
+        let key = Row::new(vec![Value::Uuid(*row)]);
         if transaction
             .get_entry(TOMBSTONES, &Self::row_key(table, &key))
             .await?
@@ -450,7 +436,7 @@ where
         &self,
         transaction: &T,
         table: &TableGenerationId,
-    ) -> impl Stream<Item = EngineResult<(RowGenerationId, Row)>> {
+    ) -> impl Stream<Item = EngineResult<(uuid::Uuid, Row)>> {
         let table = table.0.to_string();
         stream! {
             let changes = ChangeLogRead::new(transaction, Self::change_table(&table));
@@ -459,8 +445,8 @@ where
 
             while let Some(document) = documents.next().await {
                 let (id, document) = document.map_err(EngineError::custom)?;
-                let row = Self::row_generation_id(&table, &id)?;
-                let key = Row::new(vec![Value::Uuid(row.0)]);
+                let row = Self::row_id(&table, &id)?;
+                let key = Row::new(vec![Value::Uuid(row)]);
                 if transaction
                     .get_entry(TOMBSTONES, &Self::row_key(&table, &key))
                     .await?
@@ -478,7 +464,7 @@ where
         &self,
         transaction: &T,
         table: &TableGenerationId,
-        row_id: &RowGenerationId,
+        row_id: &uuid::Uuid,
         row: &Row,
         changed_columns: &[usize],
     ) -> EngineResult<Vec<u8>> {
@@ -502,7 +488,7 @@ where
         &self,
         transaction: &T,
         table: &TableGenerationId,
-        row: &RowGenerationId,
+        row: &uuid::Uuid,
     ) -> EngineResult<Vec<usize>> {
         let table = table.0.to_string();
         let id = Self::document_id(&table, row)?;
@@ -519,7 +505,7 @@ where
         &self,
         transaction: &T,
         table: &TableGenerationId,
-        row_id: &RowGenerationId,
+        row_id: &uuid::Uuid,
         row: &Row,
         changed_columns: &[usize],
     ) -> EngineResult<Vec<u8>> {
@@ -538,11 +524,11 @@ where
         &self,
         transaction: &mut T,
         table: &TableGenerationId,
-        row: RowGenerationId,
+        row: uuid::Uuid,
         value: &[u8],
     ) -> EngineResult<Option<Row>> {
         let table = &table.0.to_string();
-        let key = Row::new(vec![Value::Uuid(row.0)]);
+        let key = Row::new(vec![Value::Uuid(row)]);
         if transaction
             .get_entry(TOMBSTONES, &Self::row_key(table, &key))
             .await?
@@ -578,7 +564,7 @@ where
         &self,
         transaction: &T,
         table: &TableGenerationId,
-        row: &RowGenerationId,
+        row: &uuid::Uuid,
     ) -> EngineResult<Option<Vec<u8>>> {
         let table = table.0.to_string();
         let id = Self::document_id(&table, row)?;
@@ -592,11 +578,11 @@ where
         &self,
         transaction: &mut T,
         table: &TableGenerationId,
-        row: RowGenerationId,
+        row: uuid::Uuid,
         state: &[u8],
     ) -> EngineResult<Option<Row>> {
         let table = table.0.to_string();
-        let key = Row::new(vec![Value::Uuid(row.0)]);
+        let key = Row::new(vec![Value::Uuid(row)]);
         if transaction
             .get_entry(TOMBSTONES, &Self::row_key(&table, &key))
             .await?
@@ -630,11 +616,11 @@ where
         &self,
         transaction: &mut T,
         table: &TableGenerationId,
-        row: &RowGenerationId,
+        row: &uuid::Uuid,
     ) -> EngineResult<Option<Row>> {
         let value = self.get_row(transaction, table, row).await?;
         let table = table.0.to_string();
-        let key = Row::new(vec![Value::Uuid(row.0)]);
+        let key = Row::new(vec![Value::Uuid(*row)]);
         let tombstone_key = Self::row_key(&table, &key);
         transaction
             .put_entry(TOMBSTONES, tombstone_key, Row::default())
@@ -646,7 +632,7 @@ where
         &self,
         transaction: &T,
         table: &TableGenerationId,
-    ) -> impl Stream<Item = EngineResult<RowGenerationId>> {
+    ) -> impl Stream<Item = EngineResult<uuid::Uuid>> {
         let table = table.0.to_string();
         futures::StreamExt::filter_map(transaction.scan_entries(TOMBSTONES), move |entry| {
             let table = table.clone();
@@ -655,12 +641,7 @@ where
                     Ok((key, _))
                         if key.values.first().and_then(Value::as_text) == Some(table.as_str()) =>
                     {
-                        key.values
-                            .get(1)
-                            .and_then(Value::as_uuid)
-                            .copied()
-                            .map(RowGenerationId)
-                            .map(Ok)
+                        key.values.get(1).and_then(Value::as_uuid).copied().map(Ok)
                     }
                     Ok(_) => None,
                     Err(error) => Some(Err(error)),
@@ -673,11 +654,11 @@ where
         &self,
         transaction: &mut T,
         table: TableGenerationId,
-        row: RowGenerationId,
+        row: uuid::Uuid,
         value: Row,
     ) -> EngineResult<()> {
         let table = &table.0.to_string();
-        let key = Row::new(vec![Value::Uuid(row.0)]);
+        let key = Row::new(vec![Value::Uuid(row)]);
         if transaction
             .get_entry(TOMBSTONES, &Self::row_key(table, &key))
             .await?
@@ -695,7 +676,7 @@ where
         &self,
         transaction: &mut T,
         table: &TableGenerationId,
-        row: &RowGenerationId,
+        row: &uuid::Uuid,
     ) -> EngineResult<Option<Row>> {
         self.tombstone_row(transaction, table, row).await
     }

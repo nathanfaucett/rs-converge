@@ -1,12 +1,12 @@
 use std::{
     path::PathBuf,
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
-use db_engine::{
-    DirectRowCodec, Engine, Kernel, KernelTransaction, RowCodec, RowGenerationId, TableGenerationId,
-};
+use db_engine::{DirectRowCodec, Engine, Kernel, KernelTransaction, RowCodec, TableGenerationId};
 use db_engine_automerge::AutomergeRowCodec;
 use db_engine_redb::RedbKernel;
 use db_query::{
@@ -17,13 +17,20 @@ use db_query::{
 use db_schema::{ColumnSchema, IndexSchema, TableSchema};
 use db_value::{Row, Value, ValueType};
 use futures::executor::block_on;
+use uuid::Uuid;
+
+fn uuid_value(value: u128) -> Value {
+    Value::Uuid(Uuid::from_u128(value))
+}
+
+static NEXT_DATABASE_ID: AtomicU64 = AtomicU64::new(0);
 
 fn database_path() -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    std::env::temp_dir().join(format!("db-engine-automerge-{nanos}.redb"))
+    let id = NEXT_DATABASE_ID.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "db-engine-automerge-{}-{id}.redb",
+        std::process::id()
+    ))
 }
 
 fn people_schema() -> TableSchema {
@@ -32,7 +39,7 @@ fn people_schema() -> TableSchema {
         columns: vec![
             ColumnSchema {
                 name: "id".into(),
-                r#type: ValueType::Integer,
+                r#type: ValueType::Uuid,
                 default: Value::Null,
                 primary_key: true,
             },
@@ -59,15 +66,13 @@ fn replica(path: &PathBuf) -> Engine<RedbKernel, AutomergeRowCodec> {
     )
 }
 
-fn id(value: i64) -> Option<QueryExpr> {
+fn id(value: u128) -> Option<QueryExpr> {
     Some(QueryExpr::Equals(
         Box::new(QueryExpr::Value(QueryExprValue::Column(QueryColumn::new(
             "people".into(),
             "id".into(),
         )))),
-        Box::new(QueryExpr::Value(QueryExprValue::Value(Value::Integer(
-            value,
-        )))),
+        Box::new(QueryExpr::Value(QueryExprValue::Value(uuid_value(value)))),
     ))
 }
 
@@ -143,8 +148,8 @@ fn logical_rows_persist_in_one_kernel_transaction() {
     let kernel = RedbKernel::new(Arc::new(redb::Database::create(&path).unwrap()));
     block_on(async {
         let reconciler = AutomergeRowCodec::new();
-        let table = TableGenerationId::fresh();
-        let row_id = RowGenerationId::fresh();
+        let table = TableGenerationId(Uuid::from_u128(100));
+        let row_id = Uuid::now_v7();
         let mut transaction = kernel.transaction().await.unwrap();
         reconciler
             .ensure_table(&mut transaction, table)
@@ -155,7 +160,7 @@ fn logical_rows_persist_in_one_kernel_transaction() {
                 &mut transaction,
                 table,
                 row_id,
-                Row::new(vec![Value::Integer(1), Value::from("Ada")]),
+                Row::new(vec![uuid_value(1), Value::from("Ada")]),
             )
             .await
             .unwrap();
@@ -167,7 +172,7 @@ fn logical_rows_persist_in_one_kernel_transaction() {
                 .get_row(&transaction, &table, &row_id)
                 .await
                 .unwrap(),
-            Some(Row::new(vec![Value::Integer(1), Value::from("Ada")]))
+            Some(Row::new(vec![uuid_value(1), Value::from("Ada")]))
         );
         transaction.rollback().await.unwrap();
     });
@@ -180,9 +185,9 @@ fn redb_kernel_pairs_with_a_non_automerge_reconciler() {
     let kernel = RedbKernel::new(Arc::new(redb::Database::create(&path).unwrap()));
     block_on(async {
         let reconciler = DirectRowCodec;
-        let table = TableGenerationId::fresh();
-        let row_id = RowGenerationId::fresh();
-        let row = Row::new(vec![Value::Integer(1), Value::from("Ada")]);
+        let table = TableGenerationId(Uuid::from_u128(101));
+        let row_id = Uuid::now_v7();
+        let row = Row::new(vec![uuid_value(1), Value::from("Ada")]);
         let mut transaction = kernel.transaction().await.unwrap();
         reconciler
             .ensure_table(&mut transaction, table)
@@ -213,8 +218,8 @@ fn removing_a_logical_row_writes_a_tombstone() {
     let kernel = RedbKernel::new(Arc::new(redb::Database::create(&path).unwrap()));
     block_on(async {
         let reconciler = AutomergeRowCodec::new();
-        let table = TableGenerationId::fresh();
-        let row_id = RowGenerationId::fresh();
+        let table = TableGenerationId(Uuid::from_u128(102));
+        let row_id = Uuid::now_v7();
         let mut transaction = kernel.transaction().await.unwrap();
         reconciler
             .ensure_table(&mut transaction, table)
@@ -225,7 +230,7 @@ fn removing_a_logical_row_writes_a_tombstone() {
                 &mut transaction,
                 table,
                 row_id,
-                Row::new(vec![Value::Integer(1), Value::from("Ada")]),
+                Row::new(vec![uuid_value(1), Value::from("Ada")]),
             )
             .await
             .unwrap();
@@ -260,7 +265,7 @@ fn engine_persists_a_logical_row_through_the_public_transaction_seam() {
         columns: vec![
             ColumnSchema {
                 name: "id".into(),
-                r#type: ValueType::Integer,
+                r#type: ValueType::Uuid,
                 default: Value::Null,
                 primary_key: true,
             },
@@ -286,7 +291,7 @@ fn engine_persists_a_logical_row_through_the_public_transaction_seam() {
         engine
             .execute(vec![Statement::Query(Query::Insert(QueryInsert {
                 table: "people".into(),
-                row: Row::new(vec![Value::Integer(1), Value::from("Ada")]),
+                row: Row::new(vec![uuid_value(1), Value::from("Ada")]),
                 returning: None,
             }))])
             .await
@@ -319,7 +324,7 @@ fn received_automerge_incremental_change_materializes_a_row() {
             columns: vec![
                 ColumnSchema {
                     name: "id".into(),
-                    r#type: ValueType::Integer,
+                    r#type: ValueType::Uuid,
                     default: Value::Null,
                     primary_key: true,
                 },
@@ -345,7 +350,7 @@ fn received_automerge_incremental_change_materializes_a_row() {
         source
             .execute(vec![Statement::Query(Query::Insert(QueryInsert {
                 table: "people".into(),
-                row: Row::new(vec![Value::Integer(1), Value::from("Ada")]),
+                row: Row::new(vec![uuid_value(1), Value::from("Ada")]),
                 returning: None,
             }))])
             .await
@@ -375,8 +380,8 @@ fn rollback_discards_catalog_and_logical_row_changes() {
     let kernel = RedbKernel::new(Arc::new(redb::Database::create(&path).unwrap()));
     block_on(async {
         let reconciler = AutomergeRowCodec::new();
-        let table = TableGenerationId::fresh();
-        let row_id = RowGenerationId::fresh();
+        let table = TableGenerationId(Uuid::from_u128(103));
+        let row_id = Uuid::now_v7();
         let mut transaction = kernel.transaction().await.unwrap();
         transaction.ensure_table("tables").await.unwrap();
         reconciler
@@ -396,7 +401,7 @@ fn rollback_discards_catalog_and_logical_row_changes() {
                 &mut transaction,
                 table,
                 row_id,
-                Row::new(vec![Value::Integer(1), Value::from("Ada")]),
+                Row::new(vec![uuid_value(1), Value::from("Ada")]),
             )
             .await
             .unwrap();
@@ -427,7 +432,7 @@ fn bootstrap_destination_exclusively_from_source_canonical_changes() {
             .execute(vec![Statement::Query(Query::Insert(QueryInsert {
                 table: "people".into(),
                 row: Row::new(vec![
-                    Value::Integer(1),
+                    uuid_value(1),
                     Value::from("Ada"),
                     Value::from("London"),
                 ]),
@@ -440,7 +445,7 @@ fn bootstrap_destination_exclusively_from_source_canonical_changes() {
         assert_eq!(
             people_rows(&destination, &["id", "name", "city"]).await,
             vec![Row::new(vec![
-                Value::Integer(1),
+                uuid_value(1),
                 Value::from("Ada"),
                 Value::from("London"),
             ])]
@@ -462,7 +467,7 @@ fn checkpoint_bootstraps_complete_automerge_documents() {
             .execute(vec![Statement::Query(Query::Insert(QueryInsert {
                 table: "people".into(),
                 row: Row::new(vec![
-                    Value::Integer(1),
+                    uuid_value(1),
                     Value::from("Ada"),
                     Value::from("London"),
                 ]),
@@ -477,7 +482,7 @@ fn checkpoint_bootstraps_complete_automerge_documents() {
         assert_eq!(
             people_rows(&destination, &["id", "name", "city"]).await,
             vec![Row::new(vec![
-                Value::Integer(1),
+                uuid_value(1),
                 Value::from("Ada"),
                 Value::from("London"),
             ])]
@@ -498,7 +503,7 @@ fn copied_files_reopen_with_distinct_actors_and_converge() {
             source
                 .execute(vec![Statement::Query(Query::Insert(QueryInsert {
                     table: "people".into(),
-                    row: Row::new(vec![Value::Integer(1), Value::from("Ada"), Value::Null]),
+                    row: Row::new(vec![uuid_value(1), Value::from("Ada"), Value::Null]),
                     returning: None,
                 }))])
                 .await
@@ -533,7 +538,7 @@ fn concurrent_different_column_updates_converge() {
         source
             .execute(vec![Statement::Query(Query::Insert(QueryInsert {
                 table: "people".into(),
-                row: Row::new(vec![Value::Integer(1), Value::from("Ada"), Value::Null]),
+                row: Row::new(vec![uuid_value(1), Value::from("Ada"), Value::Null]),
                 returning: None,
             }))])
             .await
@@ -567,7 +572,7 @@ fn concurrent_same_column_updates_converge_to_the_automerge_winner() {
         source
             .execute(vec![Statement::Query(Query::Insert(QueryInsert {
                 table: "people".into(),
-                row: Row::new(vec![Value::Integer(1), Value::from("Ada"), Value::Null]),
+                row: Row::new(vec![uuid_value(1), Value::from("Ada"), Value::Null]),
                 returning: None,
             }))])
             .await
@@ -601,7 +606,7 @@ fn concurrent_same_column_updates_converge_to_the_automerge_winner() {
         );
         assert_eq!(
             source
-                .row_conflicts("people", &Row::new(vec![Value::Integer(1)]))
+                .row_conflicts("people", &Row::new(vec![uuid_value(1)]))
                 .await
                 .unwrap(),
             vec!["name"]
@@ -609,7 +614,7 @@ fn concurrent_same_column_updates_converge_to_the_automerge_winner() {
         source
             .resolve_row(
                 "people",
-                &Row::new(vec![Value::Integer(1)]),
+                &Row::new(vec![uuid_value(1)]),
                 vec![("name".into(), Value::from("Margaret"))],
             )
             .await
@@ -618,7 +623,7 @@ fn concurrent_same_column_updates_converge_to_the_automerge_winner() {
         sync(&destination, &source).await.unwrap();
         assert!(
             source
-                .row_conflicts("people", &Row::new(vec![Value::Integer(1)]))
+                .row_conflicts("people", &Row::new(vec![uuid_value(1)]))
                 .await
                 .unwrap()
                 .is_empty()
@@ -660,7 +665,7 @@ fn resolving_an_indexed_conflict_promotes_the_next_unique_contender() {
             .execute(vec![Statement::Query(Query::Insert(QueryInsert {
                 table: "people".into(),
                 row: Row::new(vec![
-                    Value::Integer(1),
+                    uuid_value(1),
                     Value::from("Ada"),
                     Value::from("London"),
                 ]),
@@ -672,7 +677,7 @@ fn resolving_an_indexed_conflict_promotes_the_next_unique_contender() {
             .execute(vec![Statement::Query(Query::Insert(QueryInsert {
                 table: "people".into(),
                 row: Row::new(vec![
-                    Value::Integer(2),
+                    uuid_value(2),
                     Value::from("Grace"),
                     Value::from("London"),
                 ]),
@@ -686,7 +691,7 @@ fn resolving_an_indexed_conflict_promotes_the_next_unique_contender() {
         assert_eq!(
             source.index_lookup("people_city", &london).await.unwrap(),
             Some(Row::new(vec![
-                Value::Integer(1),
+                uuid_value(1),
                 Value::from("Ada"),
                 Value::from("London")
             ]))
@@ -698,7 +703,7 @@ fn resolving_an_indexed_conflict_promotes_the_next_unique_contender() {
         sync(&destination, &source).await.unwrap();
         assert_eq!(
             source
-                .row_conflicts("people", &Row::new(vec![Value::Integer(1)]))
+                .row_conflicts("people", &Row::new(vec![uuid_value(1)]))
                 .await
                 .unwrap(),
             vec!["city"]
@@ -707,7 +712,7 @@ fn resolving_an_indexed_conflict_promotes_the_next_unique_contender() {
         source
             .resolve_row(
                 "people",
-                &Row::new(vec![Value::Integer(1)]),
+                &Row::new(vec![uuid_value(1)]),
                 vec![("city".into(), Value::from("Paris"))],
             )
             .await
@@ -716,7 +721,7 @@ fn resolving_an_indexed_conflict_promotes_the_next_unique_contender() {
         sync(&destination, &source).await.unwrap();
 
         let expected = Some(Row::new(vec![
-            Value::Integer(2),
+            uuid_value(2),
             Value::from("Grace"),
             Value::from("London"),
         ]));
@@ -755,7 +760,7 @@ fn tombstoned_incoming_updates_are_superseded() {
         source
             .execute(vec![Statement::Query(Query::Insert(QueryInsert {
                 table: "people".into(),
-                row: Row::new(vec![Value::Integer(1), Value::from("Ada"), Value::Null]),
+                row: Row::new(vec![uuid_value(1), Value::from("Ada"), Value::Null]),
                 returning: None,
             }))])
             .await
@@ -807,7 +812,7 @@ fn schema_add_column_then_row_mutation_replicates() {
         source
             .execute(vec![Statement::Query(Query::Insert(QueryInsert {
                 table: "people".into(),
-                row: Row::new(vec![Value::Integer(1), Value::from("Ada"), Value::Null]),
+                row: Row::new(vec![uuid_value(1), Value::from("Ada"), Value::Null]),
                 returning: None,
             }))])
             .await
@@ -837,7 +842,7 @@ fn concurrent_add_column_converges_with_defaults_and_later_updates() {
         source
             .execute(vec![Statement::Query(Query::Insert(QueryInsert {
                 table: "people".into(),
-                row: Row::new(vec![Value::Integer(1), Value::from("Ada"), Value::Null]),
+                row: Row::new(vec![uuid_value(1), Value::from("Ada"), Value::Null]),
                 returning: None,
             }))])
             .await
@@ -883,7 +888,7 @@ fn reversed_delivery_retries_dependencies_and_relays_to_a_third_replica() {
         source
             .execute(vec![Statement::Query(Query::Insert(QueryInsert {
                 table: "people".into(),
-                row: Row::new(vec![Value::Integer(1), Value::from("Ada"), Value::Null]),
+                row: Row::new(vec![uuid_value(1), Value::from("Ada"), Value::Null]),
                 returning: None,
             }))])
             .await
@@ -903,7 +908,7 @@ fn reversed_delivery_retries_dependencies_and_relays_to_a_third_replica() {
         sync(&middle, &destination).await.unwrap();
 
         let expected = vec![Row::new(vec![
-            Value::Integer(1),
+            uuid_value(1),
             Value::from("Ada"),
             Value::Null,
         ])];
@@ -940,7 +945,7 @@ fn table_tombstone_supersedes_a_late_row_update() {
         source
             .execute(vec![Statement::Query(Query::Insert(QueryInsert {
                 table: "people".into(),
-                row: Row::new(vec![Value::Integer(1), Value::from("Ada"), Value::Null]),
+                row: Row::new(vec![uuid_value(1), Value::from("Ada"), Value::Null]),
                 returning: None,
             }))])
             .await

@@ -9,16 +9,17 @@ use db_value::{Row, Value};
 use futures::{StreamExt, pin_mut};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 use crate::{
-    Change, EngineError, EngineResult, KernelTransaction, RowCodec, RowGenerationId, SchemaChange,
+    Change, EngineError, EngineResult, KernelTransaction, RowCodec, SchemaChange,
     TableGenerationId,
     catalog::{
         ENGINE_ENVELOPE_FRONTIER, ENGINE_ENVELOPE_HEADERS, ENGINE_ENVELOPE_LOG,
         ENGINE_ENVELOPE_SEQUENCE, ENGINE_ENVELOPE_STATUS, ENGINE_ENVELOPES,
-        ENGINE_QUARANTINED_ENVELOPES, ENGINE_ROW_MAPPINGS,
+        ENGINE_QUARANTINED_ENVELOPES,
     },
-    change::{materialize_change, put_row_mapping},
+    change::materialize_change,
     index::rebuild_table,
     schema::{active_table_ids, checkpoint_changes, materialize as materialize_schema},
 };
@@ -39,7 +40,8 @@ impl Frontier {
     }
 }
 
-const WIRE_VERSION: u8 = 2;
+const WIRE_VERSION: u8 = 3;
+const CHECKPOINT_WIRE_VERSION: u8 = 1;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TransactionEnvelope {
@@ -57,15 +59,14 @@ pub struct EnvelopeHeader {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CheckpointRow {
     pub table: TableGenerationId,
-    pub row: RowGenerationId,
-    pub key: Row,
+    pub row: Uuid,
     pub state: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RowTombstone {
     pub table: TableGenerationId,
-    pub row: RowGenerationId,
+    pub row: Uuid,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -77,10 +78,34 @@ pub struct Checkpoint {
     pub row_tombstones: Vec<RowTombstone>,
 }
 
+impl Checkpoint {
+    pub fn encode(&self) -> EngineResult<Vec<u8>> {
+        postcard::to_allocvec(&WireCheckpoint {
+            version: CHECKPOINT_WIRE_VERSION,
+            checkpoint: self.clone(),
+        })
+        .map_err(EngineError::custom)
+    }
+
+    pub fn decode(bytes: &[u8]) -> EngineResult<Self> {
+        let wire: WireCheckpoint = postcard::from_bytes(bytes).map_err(EngineError::custom)?;
+        if wire.version != CHECKPOINT_WIRE_VERSION {
+            return Err(EngineError::custom("Unsupported checkpoint wire version"));
+        }
+        Ok(wire.checkpoint)
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 struct WireEnvelope {
     version: u8,
     envelope: TransactionEnvelope,
+}
+
+#[derive(Serialize, Deserialize)]
+struct WireCheckpoint {
+    version: u8,
+    checkpoint: Checkpoint,
 }
 
 impl TransactionEnvelope {
@@ -231,17 +256,16 @@ where
     }
     let mut rebuild = BTreeSet::new();
     for row in &checkpoint.rows {
-        if let Some(value) = codec
+        if codec
             .merge_row_state(transaction, &row.table, row.row, &row.state)
             .await?
+            .is_some()
         {
-            put_row_mapping(transaction, row.table, &row.key, row.row).await?;
             rebuild.insert(row.table);
-            let _ = value;
         }
     }
     for table in rebuild {
-        rebuild_table(transaction, codec, table).await?;
+        rebuild_table(transaction, codec, table, false).await?;
     }
     for head in checkpoint.frontier.heads {
         transaction
@@ -289,28 +313,12 @@ where
     let mut rows = Vec::new();
     let mut row_tombstones = Vec::new();
     for table in tables {
-        let mappings = transaction.scan_entries(ENGINE_ROW_MAPPINGS);
-        pin_mut!(mappings);
-        while let Some(entry) = mappings.next().await {
-            let (mapping_key, mapping) = entry?;
-            if mapping_key.values.first().and_then(Value::as_uuid) != Some(&table.0) {
-                continue;
-            }
-            let row = mapping
-                .values
-                .first()
-                .and_then(Value::as_uuid)
-                .copied()
-                .map(RowGenerationId)
-                .ok_or(EngineError::custom("Invalid row-generation mapping"))?;
-            let key = Row::new(mapping_key.values[1..].to_vec());
+        let table_rows = codec.scan_rows(transaction, &table);
+        pin_mut!(table_rows);
+        while let Some(row) = table_rows.next().await {
+            let (row, _) = row?;
             if let Some(state) = codec.export_row_state(transaction, &table, &row).await? {
-                rows.push(CheckpointRow {
-                    table,
-                    row,
-                    key,
-                    state,
-                });
+                rows.push(CheckpointRow { table, row, state });
             }
         }
         let tombstones = codec.row_tombstones(transaction, &table);
@@ -375,7 +383,7 @@ where
 {
     let mut superseded = !envelope.changes.is_empty();
     for change in &envelope.changes {
-        superseded &= materialize_change(transaction, codec, change).await?;
+        superseded &= materialize_change(transaction, codec, change, false).await?;
     }
     let outcome = if superseded {
         EnvelopeOutcome::Superseded
@@ -629,7 +637,7 @@ fn status_row(outcome: &EnvelopeOutcome) -> EngineResult<Row> {
 
 #[cfg(test)]
 mod tests {
-    use super::{TransactionEnvelope, WireEnvelope};
+    use super::{Checkpoint, TransactionEnvelope, WireCheckpoint, WireEnvelope};
 
     #[test]
     fn rejects_legacy_and_unknown_wire_versions() {
@@ -638,10 +646,28 @@ mod tests {
         assert!(
             TransactionEnvelope::decode(
                 &postcard::to_allocvec(&WireEnvelope {
-                    version: 3,
+                    version: 2,
                     envelope,
                 })
                 .unwrap(),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn checkpoints_are_versioned() {
+        let checkpoint = Checkpoint::default();
+        let bytes = checkpoint.encode().unwrap();
+        assert_eq!(Checkpoint::decode(&bytes).unwrap(), checkpoint);
+        assert!(Checkpoint::decode(&postcard::to_allocvec(&checkpoint).unwrap()).is_err());
+        assert!(
+            Checkpoint::decode(
+                &postcard::to_allocvec(&WireCheckpoint {
+                    version: 2,
+                    checkpoint,
+                })
+                .unwrap()
             )
             .is_err()
         );

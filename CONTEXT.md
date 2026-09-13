@@ -2,7 +2,7 @@
 
 ## Engine Transaction
 
-One transaction owns one complete read snapshot or write set for an engine operation batch. A write transaction commits all enlisted catalog, schema, primary-key mapping, index, Automerge row, tombstone, and replication-envelope changes together, or rolls them all back.
+One transaction owns one complete read snapshot or write set for an engine operation batch. A write transaction commits all enlisted catalog, schema, index, Automerge row, tombstone, and replication-envelope changes together, or rolls them all back.
 
 ## Logical Row
 
@@ -12,13 +12,13 @@ A Logical Row is the row value the Engine reads, writes, and indexes. Its stored
 
 A Row Reconciler stores and resolves Logical Rows through an Engine Transaction. The Automerge Row Reconciler uses one Automerge document per Logical Row with stable column keys. The Engine is the only path for applying local or incoming Automerge changes to an engine-managed Logical Row. Concurrent values for one column are retained as a Conflict; Automerge canonical ordering selects the visible value.
 
-## Primary-Key Mapping
+## Row Identity
 
-A Primary-Key Mapping associates an arbitrary, including composite, immutable primary-key `Row` with a Logical Row Generation's Automerge `DocumentId`.
+Each table has one immutable UUID primary key. A Logical Row is identified by its table generation and row UUID; the same pair identifies its Automerge document.
 
 ## Index Record
 
-An Index Record maps an index key to a primary-key `Row`. The engine derives and updates Index Records from canonical visible Logical Rows in the same Engine Transaction. A unique-index conflict retains all rows; index lookup selects the canonical row.
+An Index Record maps an index key to a row UUID. The engine derives and updates Index Records from canonical visible Logical Rows in the same Engine Transaction. A unique-index conflict retains all rows; index lookup selects the canonical row.
 
 ## Conflict
 
@@ -26,7 +26,7 @@ A Conflict retains concurrent candidate values or objects that cannot all be act
 
 ## Generation
 
-A Generation is the immutable identity of a Logical Row, Table, Column, or Index. Names are labels and may be reused by a new Generation after the former Generation is Tombstoned.
+A Generation is the immutable identity of a Table, Column, or Index. A Logical Row uses its table generation and immutable UUID. Names are labels and may be reused by a new Generation after the former Generation is Tombstoned.
 
 ## Replication Envelope
 

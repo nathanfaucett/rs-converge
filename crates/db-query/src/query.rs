@@ -229,6 +229,30 @@ pub struct QueryInsert {
     pub row: Row,
     pub returning: Option<Vec<String>>,
 }
+
+#[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(
+    feature = "wasm",
+    derive(tsify::Tsify),
+    tsify(into_wasm_abi, from_wasm_abi)
+)]
+pub enum QueryInsertValue {
+    Value(Value),
+    Default,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(
+    feature = "wasm",
+    derive(tsify::Tsify),
+    tsify(into_wasm_abi, from_wasm_abi)
+)]
+pub struct QueryInsertValues {
+    pub table: String,
+    pub columns: Vec<String>,
+    pub values: Vec<QueryInsertValue>,
+    pub returning: Option<Vec<String>>,
+}
 #[derive(Debug, Clone, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(
     feature = "wasm",
@@ -262,6 +286,7 @@ pub struct QueryDelete {
 pub enum Query {
     Select(QuerySelect),
     Insert(QueryInsert),
+    InsertValues(QueryInsertValues),
     Update(QueryUpdate),
     Delete(QueryDelete),
 }
@@ -301,6 +326,11 @@ pub enum AlterIndexOperation {
 pub enum DataDefinition {
     CreateTable {
         schema: TableSchema,
+        if_not_exists: bool,
+    },
+    CreateTableWithIndexes {
+        schema: TableSchema,
+        indexes: Vec<IndexSchema>,
         if_not_exists: bool,
     },
     AlterTable {

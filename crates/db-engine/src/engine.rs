@@ -12,6 +12,7 @@ use db_value::{Row, Value};
 use std::sync::Arc;
 
 use thiserror::Error;
+use uuid::Uuid;
 
 use db_query::{QueryParams, QueryResult, Statement, TranslateError, Translator};
 
@@ -19,8 +20,8 @@ use crate::{
     Checkpoint, ColumnGenerationId, EnvelopeId, EnvelopeOutcome, Frontier, IndexGenerationId,
     TableGenerationId, TransactionEnvelope,
     catalog::{
-        ENGINE_INDEX_FIELDS, ENGINE_INDICES, ENGINE_ROW_MAPPINGS, ENGINE_SCHEMA_TOMBSTONES,
-        ENGINE_TABLE_FIELDS, ENGINE_TABLES,
+        ENGINE_INDEX_FIELDS, ENGINE_INDICES, ENGINE_SCHEMA_TOMBSTONES, ENGINE_TABLE_FIELDS,
+        ENGINE_TABLES,
     },
     codec::RowCodec,
     envelope::{
@@ -46,6 +47,9 @@ pub enum EngineError {
     #[error("Invalid query: {0}")]
     InvalidQuery(&'static str),
 
+    #[error("A UUID provider is required to generate a primary key")]
+    MissingUuidProvider,
+
     #[error("Error: {0}")]
     Custom(String),
 }
@@ -61,10 +65,23 @@ impl EngineError {
 
 pub type EngineResult<T> = Result<T, EngineError>;
 
+pub type UuidProvider = fn() -> Option<Uuid>;
+
+#[cfg(feature = "std")]
+fn default_uuid_provider() -> Option<Uuid> {
+    Some(Uuid::now_v7())
+}
+
+#[cfg(not(feature = "std"))]
+fn default_uuid_provider() -> Option<Uuid> {
+    None
+}
+
 #[derive(Clone)]
 pub struct Engine<K, R> {
     pub(crate) kernel: Arc<K>,
     pub(crate) reconciler: Arc<R>,
+    pub(crate) uuid_provider: UuidProvider,
 }
 
 impl<K, R> From<(K, R)> for Engine<K, R> {
@@ -72,6 +89,7 @@ impl<K, R> From<(K, R)> for Engine<K, R> {
         Self {
             kernel: Arc::new(kernel),
             reconciler: Arc::new(reconciler),
+            uuid_provider: default_uuid_provider,
         }
     }
 }
@@ -79,6 +97,14 @@ impl<K, R> From<(K, R)> for Engine<K, R> {
 impl<K, R> Engine<K, R> {
     pub fn new(kernel: K, reconciler: R) -> Self {
         Self::from((kernel, reconciler))
+    }
+
+    pub fn with_uuid_provider(kernel: K, reconciler: R, uuid_provider: UuidProvider) -> Self {
+        Self {
+            kernel: Arc::new(kernel),
+            reconciler: Arc::new(reconciler),
+            uuid_provider,
+        }
     }
 }
 
@@ -261,6 +287,7 @@ where
         let result = resolve_conflicted_row(
             &mut transaction,
             self.reconciler.as_ref(),
+            self.uuid_provider,
             table_name,
             key,
             values,
@@ -317,7 +344,6 @@ where
         ENGINE_INDICES,
         ENGINE_INDEX_FIELDS,
         ENGINE_INDEX_RECORDS,
-        ENGINE_ROW_MAPPINGS,
         ENGINE_SCHEMA_TOMBSTONES,
     ] {
         transaction.ensure_table(table).await?;

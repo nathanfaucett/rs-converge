@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 use db_value::{Row, Value};
 use futures::Stream;
 
-use crate::{EngineResult, KernelTransaction, RowGenerationId, TableGenerationId};
+use crate::{EngineResult, KernelTransaction, TableGenerationId};
+use uuid::Uuid;
 
 const ROWS: &str = "__db_rows";
 const TOMBSTONES: &str = "__db_row_tombstones";
@@ -28,31 +29,31 @@ where
         &self,
         transaction: &T,
         table: &TableGenerationId,
-        row: &RowGenerationId,
+        row: &Uuid,
     ) -> impl Future<Output = EngineResult<Option<Row>>>;
     fn scan_rows(
         &self,
         transaction: &T,
         table: &TableGenerationId,
-    ) -> impl Stream<Item = EngineResult<(RowGenerationId, Row)>>;
+    ) -> impl Stream<Item = EngineResult<(Uuid, Row)>>;
     fn put_row(
         &self,
         transaction: &mut T,
         table: TableGenerationId,
-        row: RowGenerationId,
+        row: Uuid,
         value: Row,
     ) -> impl Future<Output = EngineResult<()>>;
     fn remove_row(
         &self,
         transaction: &mut T,
         table: &TableGenerationId,
-        row: &RowGenerationId,
+        row: &Uuid,
     ) -> impl Future<Output = EngineResult<Option<Row>>>;
     fn encode_row(
         &self,
         transaction: &T,
         table: &TableGenerationId,
-        row: &RowGenerationId,
+        row: &Uuid,
         value: &Row,
         changed_columns: &[usize],
     ) -> impl Future<Output = EngineResult<Vec<u8>>>;
@@ -60,13 +61,13 @@ where
         &self,
         transaction: &T,
         table: &TableGenerationId,
-        row: &RowGenerationId,
+        row: &Uuid,
     ) -> impl Future<Output = EngineResult<alloc::vec::Vec<usize>>>;
     fn encode_resolution(
         &self,
         transaction: &T,
         table: &TableGenerationId,
-        row: &RowGenerationId,
+        row: &Uuid,
         value: &Row,
         changed_columns: &[usize],
     ) -> impl Future<Output = EngineResult<Vec<u8>>>;
@@ -74,47 +75,47 @@ where
         &self,
         transaction: &mut T,
         table: &TableGenerationId,
-        row: RowGenerationId,
+        row: Uuid,
         value: &[u8],
     ) -> impl Future<Output = EngineResult<Option<Row>>>;
     fn export_row_state(
         &self,
         transaction: &T,
         table: &TableGenerationId,
-        row: &RowGenerationId,
+        row: &Uuid,
     ) -> impl Future<Output = EngineResult<Option<Vec<u8>>>>;
     fn merge_row_state(
         &self,
         transaction: &mut T,
         table: &TableGenerationId,
-        row: RowGenerationId,
+        row: Uuid,
         state: &[u8],
     ) -> impl Future<Output = EngineResult<Option<Row>>>;
     fn tombstone_row(
         &self,
         transaction: &mut T,
         table: &TableGenerationId,
-        row: &RowGenerationId,
+        row: &Uuid,
     ) -> impl Future<Output = EngineResult<Option<Row>>>;
     fn row_tombstones(
         &self,
         transaction: &T,
         table: &TableGenerationId,
-    ) -> impl Stream<Item = EngineResult<RowGenerationId>>;
+    ) -> impl Stream<Item = EngineResult<Uuid>>;
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
 pub struct DirectRowCodec;
 
 impl DirectRowCodec {
-    fn key(table: &TableGenerationId, row: &RowGenerationId) -> Row {
-        Row::new(alloc::vec![Value::Uuid(table.0), Value::Uuid(row.0)])
+    fn key(table: &TableGenerationId, row: &Uuid) -> Row {
+        Row::new(alloc::vec![Value::Uuid(table.0), Value::Uuid(*row)])
     }
 
     async fn tombstoned<T>(
         transaction: &T,
         table: &TableGenerationId,
-        row: &RowGenerationId,
+        row: &Uuid,
     ) -> EngineResult<bool>
     where
         T: KernelTransaction,
@@ -143,7 +144,7 @@ where
         &self,
         transaction: &T,
         table: &TableGenerationId,
-        row: &RowGenerationId,
+        row: &Uuid,
     ) -> EngineResult<Option<Row>> {
         let key = Self::key(table, row);
         if transaction.get_entry(TOMBSTONES, &key).await?.is_some() {
@@ -156,7 +157,7 @@ where
         &self,
         transaction: &T,
         table: &TableGenerationId,
-    ) -> impl Stream<Item = EngineResult<(RowGenerationId, Row)>> {
+    ) -> impl Stream<Item = EngineResult<(Uuid, Row)>> {
         let table = table.0;
         futures::StreamExt::filter_map(transaction.scan_entries(ROWS), move |entry| async move {
             match entry {
@@ -165,7 +166,6 @@ where
                         .get(1)
                         .and_then(Value::as_uuid)
                         .copied()
-                        .map(RowGenerationId)
                         .map(|row| Ok((row, value)))
                 }
                 Ok(_) => None,
@@ -178,7 +178,7 @@ where
         &self,
         transaction: &mut T,
         table: TableGenerationId,
-        row: RowGenerationId,
+        row: Uuid,
         value: Row,
     ) -> EngineResult<()> {
         transaction
@@ -190,7 +190,7 @@ where
         &self,
         transaction: &mut T,
         table: &TableGenerationId,
-        row: &RowGenerationId,
+        row: &Uuid,
     ) -> EngineResult<Option<Row>> {
         let key = Self::key(table, row);
         let value = transaction.remove_entry(ROWS, &key).await?;
@@ -204,7 +204,7 @@ where
         &self,
         _: &T,
         _: &TableGenerationId,
-        _: &RowGenerationId,
+        _: &Uuid,
         row: &Row,
         _: &[usize],
     ) -> EngineResult<Vec<u8>> {
@@ -215,7 +215,7 @@ where
         &self,
         _: &T,
         _: &TableGenerationId,
-        _: &RowGenerationId,
+        _: &Uuid,
     ) -> EngineResult<alloc::vec::Vec<usize>> {
         Ok(alloc::vec::Vec::new())
     }
@@ -224,7 +224,7 @@ where
         &self,
         _: &T,
         _: &TableGenerationId,
-        _: &RowGenerationId,
+        _: &Uuid,
         row: &Row,
         _: &[usize],
     ) -> EngineResult<Vec<u8>> {
@@ -235,7 +235,7 @@ where
         &self,
         transaction: &mut T,
         table: &TableGenerationId,
-        row: RowGenerationId,
+        row: Uuid,
         value: &[u8],
     ) -> EngineResult<Option<Row>> {
         self.merge_row_state(transaction, table, row, value).await
@@ -245,7 +245,7 @@ where
         &self,
         transaction: &T,
         table: &TableGenerationId,
-        row: &RowGenerationId,
+        row: &Uuid,
     ) -> EngineResult<Option<Vec<u8>>> {
         self.get_row(transaction, table, row)
             .await?
@@ -257,7 +257,7 @@ where
         &self,
         transaction: &mut T,
         table: &TableGenerationId,
-        row: RowGenerationId,
+        row: Uuid,
         value: &[u8],
     ) -> EngineResult<Option<Row>> {
         if Self::tombstoned(transaction, table, &row).await? {
@@ -273,7 +273,7 @@ where
         &self,
         transaction: &mut T,
         table: &TableGenerationId,
-        row: &RowGenerationId,
+        row: &Uuid,
     ) -> EngineResult<Option<Row>> {
         self.remove_row(transaction, table, row).await
     }
@@ -282,19 +282,14 @@ where
         &self,
         transaction: &T,
         table: &TableGenerationId,
-    ) -> impl Stream<Item = EngineResult<RowGenerationId>> {
+    ) -> impl Stream<Item = EngineResult<Uuid>> {
         let table = table.0;
         futures::StreamExt::filter_map(
             transaction.scan_entries(TOMBSTONES),
             move |entry| async move {
                 match entry {
                     Ok((key, _)) if key.values.first().and_then(Value::as_uuid) == Some(&table) => {
-                        key.values
-                            .get(1)
-                            .and_then(Value::as_uuid)
-                            .copied()
-                            .map(RowGenerationId)
-                            .map(Ok)
+                        key.values.get(1).and_then(Value::as_uuid).copied().map(Ok)
                     }
                     Ok(_) => None,
                     Err(error) => Some(Err(error)),

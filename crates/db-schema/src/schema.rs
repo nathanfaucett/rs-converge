@@ -43,3 +43,57 @@ pub struct TableSchema {
     pub name: String,
     pub columns: Vec<ColumnSchema>,
 }
+
+impl TableSchema {
+    pub fn validate_uuid_primary_key(&self) -> Result<(), &'static str> {
+        let mut primary_keys = self.columns.iter().filter(|column| column.primary_key);
+        let Some(primary_key) = primary_keys.next() else {
+            return Err("Table requires a UUID primary key");
+        };
+        if primary_keys.next().is_some() {
+            return Err("Table requires exactly one primary key");
+        }
+        if primary_key.r#type != ValueType::Uuid {
+            return Err("Primary key must have UUID type");
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn column(value_type: ValueType, primary_key: bool) -> ColumnSchema {
+        ColumnSchema {
+            name: String::new(),
+            r#type: value_type,
+            default: Value::Null,
+            primary_key,
+        }
+    }
+
+    #[test]
+    fn validates_one_uuid_primary_key() {
+        let valid = TableSchema {
+            name: String::new(),
+            columns: vec![column(ValueType::Uuid, true)],
+        };
+        assert_eq!(valid.validate_uuid_primary_key(), Ok(()));
+
+        for columns in [
+            vec![column(ValueType::Text, false)],
+            vec![column(ValueType::Integer, true)],
+            vec![column(ValueType::Uuid, true), column(ValueType::Uuid, true)],
+        ] {
+            assert!(
+                TableSchema {
+                    name: String::new(),
+                    columns
+                }
+                .validate_uuid_primary_key()
+                .is_err()
+            );
+        }
+    }
+}

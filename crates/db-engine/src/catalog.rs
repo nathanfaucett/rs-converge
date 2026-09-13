@@ -7,7 +7,6 @@ pub const ENGINE_ENVELOPE_HEADERS: &str = "__db_envelope_headers";
 pub const ENGINE_QUARANTINED_ENVELOPES: &str = "__db_quarantined_envelopes";
 
 pub const ENGINE_TABLES: &str = "tables";
-pub const ENGINE_ROW_MAPPINGS: &str = "__db_row_mappings";
 pub const ENGINE_SCHEMA_TOMBSTONES: &str = "__db_schema_tombstones";
 
 pub const ENGINE_TABLE_FIELDS: &str = "table_fields";

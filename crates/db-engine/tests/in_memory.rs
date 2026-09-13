@@ -1,10 +1,8 @@
 #![cfg(feature = "in-memory")]
 
-use std::collections::BTreeSet;
-
 use db_engine::{
     Change, ChangeKey, DirectRowCodec, Engine, EnvelopeOutcome, Frontier, InMemoryKernel,
-    RowGenerationId, SchemaChange, TableGenerationId, TransactionEnvelope,
+    SchemaChange, TableGenerationId, TransactionEnvelope,
 };
 use db_query::{
     AlterTableOperation, DataDefinition, Query, QueryColumn, QueryDelete, QueryExpr,
@@ -16,6 +14,14 @@ use db_value::{Row, Value, ValueType};
 use futures::executor::block_on;
 use uuid::Uuid;
 
+fn row_uuid(value: u128) -> Uuid {
+    Uuid::from_u128(value)
+}
+
+fn uuid_value(value: u128) -> Value {
+    Value::Uuid(row_uuid(value))
+}
+
 #[test]
 fn creates_inserts_and_selects_rows() {
     block_on(async {
@@ -25,7 +31,7 @@ fn creates_inserts_and_selects_rows() {
             columns: vec![
                 ColumnSchema {
                     name: "id".into(),
-                    r#type: ValueType::Integer,
+                    r#type: ValueType::Uuid,
                     default: Value::Null,
                     primary_key: true,
                 },
@@ -50,7 +56,7 @@ fn creates_inserts_and_selects_rows() {
         engine
             .execute(vec![Statement::Query(Query::Insert(QueryInsert {
                 table: "users".into(),
-                row: Row::new(vec![Value::Integer(1), Value::from("Ada")]),
+                row: Row::new(vec![uuid_value(1), Value::from("Ada")]),
                 returning: None,
             }))])
             .await
@@ -81,7 +87,7 @@ fn catalog_generations_are_immutable() {
                 name: "users".into(),
                 columns: vec![ColumnSchema {
                     name: "id".into(),
-                    r#type: ValueType::Integer,
+                    r#type: ValueType::Uuid,
                     default: Value::Null,
                     primary_key: true,
                 }],
@@ -117,7 +123,7 @@ fn catalog_generations_are_immutable() {
 }
 
 #[test]
-fn primary_key_move_preserves_the_row_generation() {
+fn primary_key_updates_are_rejected() {
     block_on(async {
         let engine = Engine::new(InMemoryKernel::new(), DirectRowCodec);
         engine
@@ -125,7 +131,7 @@ fn primary_key_move_preserves_the_row_generation() {
                 name: "users".into(),
                 columns: vec![ColumnSchema {
                     name: "id".into(),
-                    r#type: ValueType::Integer,
+                    r#type: ValueType::Uuid,
                     default: Value::Null,
                     primary_key: true,
                 }],
@@ -135,25 +141,11 @@ fn primary_key_move_preserves_the_row_generation() {
         engine
             .execute(vec![Statement::Query(Query::Insert(QueryInsert {
                 table: "users".into(),
-                row: Row::new(vec![Value::Integer(1)]),
+                row: Row::new(vec![uuid_value(1)]),
                 returning: None,
             }))])
             .await
             .unwrap();
-        let envelopes = engine
-            .missing_envelopes(&Frontier::default())
-            .await
-            .unwrap();
-        let insert = envelopes.last().unwrap();
-        let row = envelopes
-            .iter()
-            .flat_map(|envelope| &envelope.changes)
-            .find_map(|change| match &change.key {
-                ChangeKey::Row { row, .. } => Some(*row),
-                _ => None,
-            })
-            .unwrap();
-
         engine
             .execute(vec![Statement::Query(Query::Update(QueryUpdate {
                 from: QueryFrom {
@@ -162,39 +154,24 @@ fn primary_key_move_preserves_the_row_generation() {
                 },
                 assignments: vec![QueryUpdateAssignment {
                     column: QueryColumn::new("users".into(), "id".into()),
-                    value: QueryExprValue::Value(Value::Integer(2)),
+                    value: QueryExprValue::Value(uuid_value(2)),
                 }],
                 predicate: Some(QueryExpr::Equals(
                     Box::new(QueryExpr::Value(QueryExprValue::Column(QueryColumn::new(
                         "users".into(),
                         "id".into(),
                     )))),
-                    Box::new(QueryExpr::Value(QueryExprValue::Value(Value::Integer(1)))),
+                    Box::new(QueryExpr::Value(QueryExprValue::Value(uuid_value(1)))),
                 )),
                 returning: None,
             }))])
             .await
-            .unwrap();
-        let updates = engine
-            .missing_envelopes(&Frontier::new(vec![insert.id]))
-            .await
-            .unwrap();
-        assert!(updates.iter().any(|update| matches!(
-            update.changes.as_slice(),
-            [Change {
-                key: ChangeKey::Row {
-                    row: updated_row,
-                    previous_key: Some(_),
-                    ..
-                },
-                ..
-            }] if *updated_row == row
-        )));
+            .unwrap_err();
     });
 }
 
 #[test]
-fn restore_creates_a_new_row_generation() {
+fn deleted_uuid_cannot_be_reused() {
     block_on(async {
         let engine = Engine::new(InMemoryKernel::new(), DirectRowCodec);
         engine
@@ -202,7 +179,7 @@ fn restore_creates_a_new_row_generation() {
                 name: "users".into(),
                 columns: vec![ColumnSchema {
                     name: "id".into(),
-                    r#type: ValueType::Integer,
+                    r#type: ValueType::Uuid,
                     default: Value::Null,
                     primary_key: true,
                 }],
@@ -212,7 +189,7 @@ fn restore_creates_a_new_row_generation() {
         let insert = || {
             Statement::Query(Query::Insert(QueryInsert {
                 table: "users".into(),
-                row: Row::new(vec![Value::Integer(1)]),
+                row: Row::new(vec![uuid_value(1)]),
                 returning: None,
             }))
         };
@@ -228,27 +205,13 @@ fn restore_creates_a_new_row_generation() {
                         "users".into(),
                         "id".into(),
                     )))),
-                    Box::new(QueryExpr::Value(QueryExprValue::Value(Value::Integer(1)))),
+                    Box::new(QueryExpr::Value(QueryExprValue::Value(uuid_value(1)))),
                 )),
                 returning: None,
             }))])
             .await
             .unwrap();
-        engine.execute(vec![insert()]).await.unwrap();
-
-        let rows: Vec<_> = engine
-            .missing_envelopes(&Frontier::default())
-            .await
-            .unwrap()
-            .into_iter()
-            .flat_map(|envelope| envelope.changes)
-            .filter_map(|change| match change.key {
-                ChangeKey::Row { row, .. } => Some(row),
-                ChangeKey::Schema(_) => None,
-            })
-            .collect();
-        assert_eq!(rows.len(), 3);
-        assert_eq!(rows.into_iter().collect::<BTreeSet<_>>().len(), 2);
+        assert!(engine.execute(vec![insert()]).await.is_err());
     });
 }
 
@@ -263,7 +226,7 @@ fn records_one_envelope_for_a_committed_statement_batch() {
                         name: "users".into(),
                         columns: vec![ColumnSchema {
                             name: "id".into(),
-                            r#type: ValueType::Integer,
+                            r#type: ValueType::Uuid,
                             default: Value::Null,
                             primary_key: true,
                         }],
@@ -272,7 +235,7 @@ fn records_one_envelope_for_a_committed_statement_batch() {
                 }),
                 Statement::Query(Query::Insert(QueryInsert {
                     table: "users".into(),
-                    row: Row::new(vec![Value::Integer(1)]),
+                    row: Row::new(vec![uuid_value(1)]),
                     returning: None,
                 })),
             ])
@@ -300,7 +263,7 @@ fn updates_and_deletes_rows_through_changes() {
                 columns: vec![
                     ColumnSchema {
                         name: "id".into(),
-                        r#type: ValueType::Integer,
+                        r#type: ValueType::Uuid,
                         default: Value::Null,
                         primary_key: true,
                     },
@@ -317,7 +280,7 @@ fn updates_and_deletes_rows_through_changes() {
         engine
             .execute(vec![Statement::Query(Query::Insert(QueryInsert {
                 table: "users".into(),
-                row: Row::new(vec![Value::Integer(1), Value::from("Ada")]),
+                row: Row::new(vec![uuid_value(1), Value::from("Ada")]),
                 returning: None,
             }))])
             .await
@@ -329,9 +292,7 @@ fn updates_and_deletes_rows_through_changes() {
                     "users".into(),
                     "id".into(),
                 )))),
-                Box::new(QueryExpr::Value(QueryExprValue::Value(Value::Integer(
-                    value,
-                )))),
+                Box::new(QueryExpr::Value(QueryExprValue::Value(uuid_value(value)))),
             ))
         };
         engine
@@ -349,22 +310,6 @@ fn updates_and_deletes_rows_through_changes() {
             }))])
             .await
             .unwrap();
-        engine
-            .execute(vec![Statement::Query(Query::Update(QueryUpdate {
-                from: QueryFrom {
-                    table: "users".into(),
-                    joins: vec![],
-                },
-                assignments: vec![QueryUpdateAssignment {
-                    column: QueryColumn::new("users".into(), "id".into()),
-                    value: QueryExprValue::Value(Value::Integer(2)),
-                }],
-                predicate: id(1),
-                returning: None,
-            }))])
-            .await
-            .unwrap();
-
         let results = engine
             .execute(vec![Statement::Query(Query::Select(QuerySelect {
                 from: QueryFrom {
@@ -378,7 +323,7 @@ fn updates_and_deletes_rows_through_changes() {
             .unwrap();
         assert_eq!(
             results[0].rows,
-            vec![Row::new(vec![Value::Integer(2), Value::from("Grace")])]
+            vec![Row::new(vec![uuid_value(1), Value::from("Grace")])]
         );
 
         engine
@@ -387,7 +332,7 @@ fn updates_and_deletes_rows_through_changes() {
                     table: "users".into(),
                     joins: vec![],
                 },
-                predicate: id(2),
+                predicate: id(1),
                 returning: None,
             }))])
             .await
@@ -411,7 +356,7 @@ fn updates_and_deletes_rows_through_changes() {
                 .await
                 .unwrap()
                 .len(),
-            5
+            4
         );
     });
 }
@@ -425,7 +370,7 @@ fn alter_table_add_column_updates_the_catalog() {
                 name: "users".into(),
                 columns: vec![ColumnSchema {
                     name: "id".into(),
-                    r#type: ValueType::Integer,
+                    r#type: ValueType::Uuid,
                     default: Value::Null,
                     primary_key: true,
                 }],
@@ -435,7 +380,7 @@ fn alter_table_add_column_updates_the_catalog() {
         engine
             .execute(vec![Statement::Query(Query::Insert(QueryInsert {
                 table: "users".into(),
-                row: Row::new(vec![Value::Integer(0)]),
+                row: Row::new(vec![uuid_value(0)]),
                 returning: None,
             }))])
             .await
@@ -458,7 +403,7 @@ fn alter_table_add_column_updates_the_catalog() {
         engine
             .execute(vec![Statement::Query(Query::Insert(QueryInsert {
                 table: "users".into(),
-                row: Row::new(vec![Value::Integer(1), Value::from("member")]),
+                row: Row::new(vec![uuid_value(1), Value::from("member")]),
                 returning: None,
             }))])
             .await
@@ -486,7 +431,7 @@ fn alter_table_add_column_updates_the_catalog() {
 }
 
 #[test]
-fn retains_unique_index_contenders() {
+fn rejects_local_unique_index_duplicates() {
     block_on(async {
         let engine = Engine::new(InMemoryKernel::new(), DirectRowCodec);
         engine
@@ -495,7 +440,7 @@ fn retains_unique_index_contenders() {
                 columns: vec![
                     ColumnSchema {
                         name: "id".into(),
-                        r#type: ValueType::Integer,
+                        r#type: ValueType::Uuid,
                         default: Value::Null,
                         primary_key: true,
                     },
@@ -512,7 +457,7 @@ fn retains_unique_index_contenders() {
         engine
             .execute(vec![Statement::Query(Query::Insert(QueryInsert {
                 table: "users".into(),
-                row: Row::new(vec![Value::Integer(1), Value::from("ada@example.com")]),
+                row: Row::new(vec![uuid_value(1), Value::from("ada@example.com")]),
                 returning: None,
             }))])
             .await
@@ -544,11 +489,11 @@ fn retains_unique_index_contenders() {
         engine
             .execute(vec![Statement::Query(Query::Insert(QueryInsert {
                 table: "users".into(),
-                row: Row::new(vec![Value::Integer(2), Value::from("ada@example.com")]),
+                row: Row::new(vec![uuid_value(2), Value::from("ada@example.com")]),
                 returning: None,
             }))])
             .await
-            .unwrap();
+            .unwrap_err();
 
         let rows = engine
             .execute(vec![Statement::Query(Query::Select(QuerySelect {
@@ -561,7 +506,7 @@ fn retains_unique_index_contenders() {
             }))])
             .await
             .unwrap();
-        assert_eq!(rows[0].rows.len(), 2);
+        assert_eq!(rows[0].rows.len(), 1);
     });
 }
 
@@ -574,7 +519,7 @@ fn indexes_defaults_for_rows_created_before_add_column() {
                 name: "users".into(),
                 columns: vec![ColumnSchema {
                     name: "id".into(),
-                    r#type: ValueType::Integer,
+                    r#type: ValueType::Uuid,
                     default: Value::Null,
                     primary_key: true,
                 }],
@@ -584,7 +529,7 @@ fn indexes_defaults_for_rows_created_before_add_column() {
         engine
             .execute(vec![Statement::Query(Query::Insert(QueryInsert {
                 table: "users".into(),
-                row: Row::new(vec![Value::Integer(1)]),
+                row: Row::new(vec![uuid_value(1)]),
                 returning: None,
             }))])
             .await
@@ -611,7 +556,7 @@ fn indexes_defaults_for_rows_created_before_add_column() {
                         name: "users_role".into(),
                         table_name: "users".into(),
                         column_indices: vec![1],
-                        unique: true,
+                        unique: false,
                     },
                     if_not_exists: false,
                 },
@@ -621,7 +566,7 @@ fn indexes_defaults_for_rows_created_before_add_column() {
         engine
             .execute(vec![Statement::Query(Query::Insert(QueryInsert {
                 table: "users".into(),
-                row: Row::new(vec![Value::Integer(2), Value::from("member")]),
+                row: Row::new(vec![uuid_value(2), Value::from("member")]),
                 returning: None,
             }))])
             .await
@@ -642,7 +587,7 @@ fn indexes_defaults_for_rows_created_before_add_column() {
 }
 
 #[test]
-fn primary_key_update_releases_old_index_records() {
+fn primary_key_update_is_rejected() {
     block_on(async {
         let engine = Engine::new(InMemoryKernel::new(), DirectRowCodec);
         engine
@@ -650,7 +595,7 @@ fn primary_key_update_releases_old_index_records() {
                 name: "users".into(),
                 columns: vec![ColumnSchema {
                     name: "id".into(),
-                    r#type: ValueType::Integer,
+                    r#type: ValueType::Uuid,
                     default: Value::Null,
                     primary_key: true,
                 }],
@@ -674,7 +619,7 @@ fn primary_key_update_releases_old_index_records() {
         engine
             .execute(vec![Statement::Query(Query::Insert(QueryInsert {
                 table: "users".into(),
-                row: Row::new(vec![Value::Integer(1)]),
+                row: Row::new(vec![uuid_value(1)]),
                 returning: None,
             }))])
             .await
@@ -687,27 +632,19 @@ fn primary_key_update_releases_old_index_records() {
                 },
                 assignments: vec![QueryUpdateAssignment {
                     column: QueryColumn::new("users".into(), "id".into()),
-                    value: QueryExprValue::Value(Value::Integer(2)),
+                    value: QueryExprValue::Value(uuid_value(2)),
                 }],
                 predicate: Some(QueryExpr::Equals(
                     Box::new(QueryExpr::Value(QueryExprValue::Column(QueryColumn::new(
                         "users".into(),
                         "id".into(),
                     )))),
-                    Box::new(QueryExpr::Value(QueryExprValue::Value(Value::Integer(1)))),
+                    Box::new(QueryExpr::Value(QueryExprValue::Value(uuid_value(1)))),
                 )),
                 returning: None,
             }))])
             .await
-            .unwrap();
-        engine
-            .execute(vec![Statement::Query(Query::Insert(QueryInsert {
-                table: "users".into(),
-                row: Row::new(vec![Value::Integer(1)]),
-                returning: None,
-            }))])
-            .await
-            .unwrap();
+            .unwrap_err();
     });
 }
 
@@ -720,7 +657,7 @@ fn concurrent_same_label_tables_choose_the_lowest_generation() {
             name: "users".into(),
             columns: vec![ColumnSchema {
                 name: "id".into(),
-                r#type: ValueType::Integer,
+                r#type: ValueType::Uuid,
                 default: Value::Null,
                 primary_key: true,
             }],
@@ -778,7 +715,11 @@ fn checkpoints_merge_envelopes_without_replacing_destination_state() {
                 vec![Change::schema(
                     Uuid::now_v7(),
                     SchemaChange::CreateTable {
-                        table: TableGenerationId::fresh(),
+                        table: TableGenerationId(row_uuid(if name == "source" {
+                            100
+                        } else {
+                            101
+                        })),
                         label: name.into(),
                     },
                 )],
@@ -813,7 +754,7 @@ fn checkpoints_bootstrap_state_idempotently_and_retain_causal_headers() {
                 name: "people".into(),
                 columns: vec![ColumnSchema {
                     name: "id".into(),
-                    r#type: ValueType::Integer,
+                    r#type: ValueType::Uuid,
                     default: Value::Null,
                     primary_key: true,
                 }],
@@ -823,7 +764,7 @@ fn checkpoints_bootstrap_state_idempotently_and_retain_causal_headers() {
         source
             .execute(vec![Statement::Query(Query::Insert(QueryInsert {
                 table: "people".into(),
-                row: Row::new(vec![Value::Integer(1)]),
+                row: Row::new(vec![uuid_value(1)]),
                 returning: None,
             }))])
             .await
@@ -848,7 +789,7 @@ fn checkpoints_bootstrap_state_idempotently_and_retain_causal_headers() {
             }))])
             .await
             .unwrap();
-        assert_eq!(rows[0].rows, vec![Row::new(vec![Value::Integer(1)])]);
+        assert_eq!(rows[0].rows, vec![Row::new(vec![uuid_value(1)])]);
 
         let parent = TransactionEnvelope::new(Vec::new(), Vec::new()).unwrap();
         let compacted = TransactionEnvelope::new(vec![parent.id], Vec::new()).unwrap();
@@ -857,7 +798,7 @@ fn checkpoints_bootstrap_state_idempotently_and_retain_causal_headers() {
             vec![Change::schema(
                 Uuid::now_v7(),
                 SchemaChange::CreateTable {
-                    table: TableGenerationId::fresh(),
+                    table: TableGenerationId(row_uuid(101)),
                     label: "delayed".into(),
                 },
             )],
@@ -940,7 +881,7 @@ fn concurrent_same_label_columns_and_indexes_choose_lowest_generations() {
             name: "users".into(),
             columns: vec![ColumnSchema {
                 name: "id".into(),
-                r#type: ValueType::Integer,
+                r#type: ValueType::Uuid,
                 default: Value::Null,
                 primary_key: true,
             }],
@@ -1039,7 +980,7 @@ fn rejects_an_invalid_envelope_atomically() {
                 name: "users".into(),
                 columns: vec![ColumnSchema {
                     name: "id".into(),
-                    r#type: ValueType::Integer,
+                    r#type: ValueType::Uuid,
                     default: Value::Null,
                     primary_key: true,
                 }],
@@ -1049,15 +990,13 @@ fn rejects_an_invalid_envelope_atomically() {
         let valid = Change::row(
             Uuid::now_v7(),
             engine.table_generation_id("users").await.unwrap(),
-            RowGenerationId::fresh(),
-            Row::new(vec![Value::Integer(1)]),
-            None,
-            Some(postcard::to_allocvec(&Row::new(vec![Value::Integer(1)])).unwrap()),
+            Uuid::now_v7(),
+            Some(postcard::to_allocvec(&Row::new(vec![uuid_value(1)])).unwrap()),
         );
         let invalid = Change {
             id: Uuid::now_v7(),
             key: ChangeKey::Schema(SchemaChange::CreateTable {
-                table: TableGenerationId::fresh(),
+                table: TableGenerationId(row_uuid(102)),
                 label: "invalid".into(),
             }),
             value: Some(vec![0]),
@@ -1088,7 +1027,7 @@ fn rolls_back_the_full_statement_batch() {
             name: "users".into(),
             columns: vec![ColumnSchema {
                 name: "id".into(),
-                r#type: ValueType::Integer,
+                r#type: ValueType::Uuid,
                 default: Value::Null,
                 primary_key: true,
             }],
@@ -1102,7 +1041,7 @@ fn rolls_back_the_full_statement_batch() {
                 }),
                 Statement::Query(Query::Insert(QueryInsert {
                     table: "users".into(),
-                    row: Row::new(vec![]),
+                    row: Row::new(vec![Value::Null]),
                     returning: None,
                 })),
             ])
@@ -1133,7 +1072,7 @@ fn index_lookup_selects_and_promotes_unique_key_contenders() {
                 columns: vec![
                     ColumnSchema {
                         name: "id".into(),
-                        r#type: ValueType::Integer,
+                        r#type: ValueType::Uuid,
                         default: Value::Null,
                         primary_key: true,
                     },
@@ -1151,7 +1090,7 @@ fn index_lookup_selects_and_promotes_unique_key_contenders() {
             engine
                 .execute(vec![Statement::Query(Query::Insert(QueryInsert {
                     table: "users".into(),
-                    row: Row::new(vec![Value::Integer(id), Value::from("ada@example.com")]),
+                    row: Row::new(vec![uuid_value(id), Value::from("ada@example.com")]),
                     returning: None,
                 }))])
                 .await
@@ -1164,7 +1103,7 @@ fn index_lookup_selects_and_promotes_unique_key_contenders() {
                         name: "users_email".into(),
                         table_name: "users".into(),
                         column_indices: vec![1],
-                        unique: true,
+                        unique: false,
                     },
                     if_not_exists: false,
                 },
@@ -1176,7 +1115,7 @@ fn index_lookup_selects_and_promotes_unique_key_contenders() {
         assert_eq!(
             engine.index_lookup("users_email", &key).await.unwrap(),
             Some(Row::new(vec![
-                Value::Integer(1),
+                uuid_value(1),
                 Value::from("ada@example.com")
             ]))
         );
@@ -1191,7 +1130,7 @@ fn index_lookup_selects_and_promotes_unique_key_contenders() {
                         "users".into(),
                         "id".into(),
                     )))),
-                    Box::new(QueryExpr::Value(QueryExprValue::Value(Value::Integer(1)))),
+                    Box::new(QueryExpr::Value(QueryExprValue::Value(uuid_value(1)))),
                 )),
                 returning: None,
             }))])
@@ -1200,7 +1139,7 @@ fn index_lookup_selects_and_promotes_unique_key_contenders() {
         assert_eq!(
             engine.index_lookup("users_email", &key).await.unwrap(),
             Some(Row::new(vec![
-                Value::Integer(2),
+                uuid_value(2),
                 Value::from("ada@example.com")
             ]))
         );

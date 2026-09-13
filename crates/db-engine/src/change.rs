@@ -1,12 +1,10 @@
-use alloc::{vec, vec::Vec};
+use alloc::vec::Vec;
 
-use db_value::{Row, Value};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    EngineError, EngineResult, KernelTransaction, RowCodec, RowGenerationId, TableGenerationId,
-    catalog::ENGINE_ROW_MAPPINGS,
+    EngineError, EngineResult, KernelTransaction, RowCodec, TableGenerationId,
     envelope::ensure_envelope_log,
     index::{rebuild_table, update_row},
     schema::{SchemaChange, columns, materialize as materialize_schema},
@@ -28,22 +26,10 @@ impl Change {
         }
     }
 
-    pub fn row(
-        id: Uuid,
-        table: TableGenerationId,
-        row: RowGenerationId,
-        key: Row,
-        previous_key: Option<Row>,
-        value: Option<Vec<u8>>,
-    ) -> Self {
+    pub fn row(id: Uuid, table: TableGenerationId, row: Uuid, value: Option<Vec<u8>>) -> Self {
         Self {
             id,
-            key: ChangeKey::Row {
-                table,
-                row,
-                key,
-                previous_key,
-            },
+            key: ChangeKey::Row { table, row },
             value,
         }
     }
@@ -52,87 +38,14 @@ impl Change {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ChangeKey {
     Schema(SchemaChange),
-    Row {
-        table: TableGenerationId,
-        row: RowGenerationId,
-        key: Row,
-        previous_key: Option<Row>,
-    },
+    Row { table: TableGenerationId, row: Uuid },
 }
 
 pub(crate) async fn ensure_change_log<T>(transaction: &mut T) -> EngineResult<()>
 where
     T: KernelTransaction,
 {
-    transaction.ensure_table(ENGINE_ROW_MAPPINGS).await?;
     ensure_envelope_log(transaction).await
-}
-
-pub(crate) fn row_mapping_key(table: TableGenerationId, key: &Row) -> Row {
-    let mut values = Vec::with_capacity(key.values.len() + 1);
-    values.push(Value::Uuid(table.0));
-    values.extend(key.values.clone());
-    Row::new(values)
-}
-
-pub(crate) async fn row_generation_id<T>(
-    transaction: &T,
-    table: TableGenerationId,
-    key: &Row,
-) -> EngineResult<Option<RowGenerationId>>
-where
-    T: KernelTransaction,
-{
-    let Some(mapping) = transaction
-        .get_entry(ENGINE_ROW_MAPPINGS, &row_mapping_key(table, key))
-        .await?
-    else {
-        return Ok(None);
-    };
-    mapping
-        .values
-        .first()
-        .and_then(Value::as_uuid)
-        .copied()
-        .map(RowGenerationId)
-        .map(Some)
-        .ok_or(EngineError::custom("Invalid row-generation mapping"))
-}
-
-pub(crate) async fn put_row_mapping<T>(
-    transaction: &mut T,
-    table: TableGenerationId,
-    key: &Row,
-    row: RowGenerationId,
-) -> EngineResult<()>
-where
-    T: KernelTransaction,
-{
-    transaction
-        .put_entry(
-            ENGINE_ROW_MAPPINGS,
-            row_mapping_key(table, key),
-            Row::new(vec![Value::Uuid(row.0)]),
-        )
-        .await
-}
-
-pub(crate) async fn remove_row_mapping<T>(
-    transaction: &mut T,
-    table: TableGenerationId,
-    key: &Row,
-    row: RowGenerationId,
-) -> EngineResult<()>
-where
-    T: KernelTransaction,
-{
-    let mapping_key = row_mapping_key(table, key);
-    if row_generation_id(transaction, table, key).await? == Some(row) {
-        transaction
-            .remove_entry(ENGINE_ROW_MAPPINGS, &mapping_key)
-            .await?;
-    }
-    Ok(())
 }
 
 pub(crate) async fn apply_local_change<T, R>(
@@ -145,7 +58,7 @@ where
     T: KernelTransaction,
     R: RowCodec<T>,
 {
-    let _ = materialize_change(transaction, codec, &change).await?;
+    let _ = materialize_change(transaction, codec, &change, true).await?;
     changes.push(change);
     Ok(())
 }
@@ -154,6 +67,7 @@ pub(crate) async fn materialize_change<T, R>(
     transaction: &mut T,
     codec: &R,
     change: &Change,
+    enforce_unique: bool,
 ) -> EngineResult<bool>
 where
     T: KernelTransaction,
@@ -169,7 +83,7 @@ where
                 SchemaChange::CreateTable { table, .. }
                 | SchemaChange::AddColumn { table, .. }
                 | SchemaChange::CreateIndex { table, .. } => {
-                    rebuild_table(transaction, codec, *table).await?;
+                    rebuild_table(transaction, codec, *table, enforce_unique).await?;
                 }
                 SchemaChange::TombstoneTable(_)
                 | SchemaChange::TombstoneColumn(_)
@@ -179,15 +93,7 @@ where
                 return Ok(true);
             }
         }
-        (
-            ChangeKey::Row {
-                table,
-                row,
-                key,
-                previous_key,
-            },
-            Some(value),
-        ) => {
+        (ChangeKey::Row { table, row }, Some(value)) => {
             if columns(transaction, *table).await.is_err() {
                 return Ok(true);
             }
@@ -195,24 +101,21 @@ where
             let Some(value) = codec.merge_row(transaction, table, *row, value).await? else {
                 return Ok(true);
             };
-            if let Some(previous_key) = previous_key {
-                remove_row_mapping(transaction, *table, previous_key, *row).await?;
-            }
-            put_row_mapping(transaction, *table, key, *row).await?;
-            update_row(transaction, *table, key, old.as_ref(), Some(&value)).await?;
+            update_row(
+                transaction,
+                *table,
+                old.as_ref(),
+                Some(&value),
+                enforce_unique,
+            )
+            .await?;
         }
-        (
-            ChangeKey::Row {
-                table, row, key, ..
-            },
-            None,
-        ) => {
+        (ChangeKey::Row { table, row }, None) => {
             if columns(transaction, *table).await.is_err() {
                 return Ok(true);
             }
             let old = codec.remove_row(transaction, table, row).await?;
-            remove_row_mapping(transaction, *table, key, *row).await?;
-            update_row(transaction, *table, key, old.as_ref(), None).await?;
+            update_row(transaction, *table, old.as_ref(), None, enforce_unique).await?;
         }
         (_, Some(_)) => return Err(EngineError::custom("Invalid schema change value")),
     }

@@ -2,12 +2,12 @@
 
 ## Overview
 
-The database is a modular, async-first engine built around one Engine Transaction. A transaction owns one complete read snapshot or write set for an operation batch. It commits all enlisted catalog, schema, primary-key mapping, index, Automerge-row, tombstone, and replication-envelope changes together, or rolls them back together.
+The database is a modular, async-first engine built around one Engine Transaction. A transaction owns one complete read snapshot or write set for an operation batch. It commits all enlisted catalog, schema, UUID-keyed row, index, Automerge-row, tombstone, and replication-envelope changes together, or rolls them back together.
 
 ```text
 query API / SQL translator
         -> Engine Transaction
-        -> catalog, schema, primary-key mappings, and derived indexes
+        -> catalog, schema, UUID-keyed rows, and derived indexes
         -> Row Reconciler
         -> transactional kernel
         -> storage backend
@@ -39,15 +39,15 @@ The Engine is the only path that applies local or replicated Automerge changes t
 
 ### Generations and Tombstones
 
-Tables, columns, indexes, and Logical Rows have immutable Generation identities. Names are reusable labels, not identities. When multiple active generations have the same label, deterministic canonical ordering selects the visible one.
+Tables, columns, and indexes have immutable Generation identities. A Logical Row is identified by its table generation and immutable UUID primary key. Names are reusable labels, not identities. When multiple active generations have the same label, deterministic canonical ordering selects the visible one.
 
-A Tombstone permanently deletes a generation from visible state, removes active mappings and derived index records, and causes later changes to that generation to be retained as Superseded. Restore creates a new Generation rather than reactivating the tombstoned one.
+A Tombstone permanently deletes a generation or UUID-keyed row from visible state, removes derived index records, and causes later changes to that identity to be retained as Superseded. A deleted UUID cannot be reused within a table generation; restore creates a row with a new UUID.
 
 ### Primary Keys and Indexes
 
-A Primary-Key Mapping maps an arbitrary immutable `Row`, including a composite key, to a Logical Row Generation's document ID.
+Every table declares exactly one non-null `UUID PRIMARY KEY`. The engine may issue it through an Engine-scoped UUID provider; the default provider issues UUIDv7 values under `std`, while strict `no_std` callers must configure a provider before omitting a primary key.
 
-The Engine derives Index Records from canonical visible Logical Rows within the same Engine Transaction. A unique-index conflict retains every contender. Primary-key scans return all rows; an index lookup selects the canonical contender until an explicit resolution changes it.
+The Engine derives Index Records from canonical visible Logical Rows within the same Engine Transaction. A local unique-index violation rejects its write. Concurrent replicated unique-index contenders are retained; scans return all rows and a unique-index lookup selects the contender with the lowest canonical UUID.
 
 ## Replication
 
@@ -74,4 +74,4 @@ The programmatic `Query` API and SQL translator produce statement batches for th
 
 ## Current Implementation Scope
 
-The repository has transactional in-memory and Redb kernels, an Automerge row codec, envelope logging/import, stable schema and row generation IDs, tombstones, explicit row-conflict resolution, compact checkpoints, and canonical unique-index contender handling. Broader query execution remains incremental; see `docs/replication-todo.md` for the implementation checklist.
+The repository has transactional in-memory and Redb kernels, an Automerge row codec, envelope logging/import, stable schema generation IDs, tombstones, explicit row-conflict resolution, compact checkpoints, and canonical unique-index contender handling. Broader query execution remains incremental; see `docs/uuid-primary-key-plan.md` for the UUID primary-key implementation checklist.
