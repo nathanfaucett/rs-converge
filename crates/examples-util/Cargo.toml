@@ -1,0 +1,24 @@
+[package]
+name = "examples-util"
+version = "0.1.0"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "DB Examples Utility Crate"
+
+[lib]
+path = "src/lib.rs"
+name = "examples_util"
+
+[dependencies]
+# internal dependencies
+engine = { path = "../engine", default-features = false, features = ["std"] }
+query = { path = "../query", default-features = true }
+
+rustyline = { version = "18.0" }
+
+[build-dependencies]
+
+[dev-dependencies]

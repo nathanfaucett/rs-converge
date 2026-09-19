@@ -1,0 +1,25 @@
+[package]
+name = "engine-redb"
+version.workspace = true
+publish = false
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "engine_redb"
+path = "src/lib.rs"
+
+[dependencies]
+# internal dependencies
+btree = { path = "../btree", default-features = false, features = [] }
+btree-redb = { path = "../btree-redb", default-features = false, features = [] }
+engine = { path = "../engine", default-features = false, features = ["std"] }
+value = { path = "../value", default-features = false, features = ["redb", "std"] }
+
+# external dependencies
+async-stream = { version = "0.3", default-features = false, features = [] }
+futures = { version = "0.3", default-features = false, features = ["std"] }
+redb = { version = "4.3", default-features = false, features = ["uuid"] }

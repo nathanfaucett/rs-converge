@@ -1,7 +1,7 @@
-use db::{DirectRowCodec, Engine, InMemoryKernel, SqlTranslator};
+use converge::{DirectRowCodec, Engine, InMemoryKernel, SqlTranslator};
 
 fn main() {
-    futures::executor::block_on(db_examples_util::cli(
+    futures::executor::block_on(examples_util::cli(
         Engine::new(InMemoryKernel::new(), DirectRowCodec),
         SqlTranslator,
     ));

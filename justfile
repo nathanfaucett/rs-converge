@@ -60,7 +60,7 @@ clean:
     cargo clean
 
 wasm:
-    cd ./crates/db-wasm && wasm-pack build --target web --scope aicacia
+    cd ./crates/wasm && wasm-pack build --target web --scope aicacia
 
 doc:
     cargo doc --workspace --no-deps

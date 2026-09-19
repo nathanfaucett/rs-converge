@@ -1,0 +1,26 @@
+[package]
+name = "test"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "test"
+path = "src/lib.rs"
+
+[dependencies]
+# Internal dependencies
+engine = { path = "../engine", default-features = false, features = ["in-memory", "std"] }
+engine-automerge = { path = "../engine-automerge", default-features = false, features = [] }
+engine-redb = { path = "../engine-redb", default-features = false, features = [] }
+sql-translator = { path = "../sql-translator", default-features = false, features = ["std"] }
+sync = { path = "../sync", default-features = false, features = [] }
+value = { path = "../value", default-features = false, features = ["std"] }
+
+# External dependencies
+futures = { version = "0.3", default-features = false, features = ["async-await", "executor", "std"] }
+rand = { version = "0.10", default-features = false, features = ["std", "std_rng", "sys_rng"] }
+redb = { version = "4.3", default-features = false, features = ["std", "uuid"] }

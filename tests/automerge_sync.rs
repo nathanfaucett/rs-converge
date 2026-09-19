@@ -8,11 +8,11 @@ use std::{
     },
 };
 
-use db::{
+use converge::{
     AutomergeRowCodec, Engine, RedbKernel, SessionConfig, SqlTranslator, SyncRole, Value, redb,
     synchronize,
 };
-use db_test::{in_memory_transport_pair, run};
+use test::{in_memory_transport_pair, run};
 
 static DATABASE_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -23,12 +23,12 @@ fn database_path() -> PathBuf {
 
 fn replica(path: &Path) -> Engine<RedbKernel, AutomergeRowCodec> {
     Engine::new(
-        RedbKernel::new(Arc::new(redb::Database::create(path).unwrap())),
+        RedbKernel::new(Arc::new(reconverge::Database::create(path).unwrap())),
         AutomergeRowCodec::new(),
     )
 }
 
-async fn execute(engine: &Engine<RedbKernel, AutomergeRowCodec>, sql: &str) -> Vec<db::Row> {
+async fn execute(engine: &Engine<RedbKernel, AutomergeRowCodec>, sql: &str) -> Vec<converge::Row> {
     engine
         .translate_and_execute(sql, &SqlTranslator)
         .await
@@ -120,8 +120,8 @@ fn durable_automerge_engines_converge_offline_writes_after_sync() {
         .await;
         sync(&left, &right, &config).await;
 
-        let expected = vec![db::Row::new(vec![
-            Value::Uuid(db::Uuid::parse_str("018f0f8e-7b6d-7c4a-8f12-123456789abc").unwrap()),
+        let expected = vec![converge::Row::new(vec![
+            Value::Uuid(converge::Uuid::parse_str("018f0f8e-7b6d-7c4a-8f12-123456789abc").unwrap()),
             Value::from("Grace"),
             Value::from("Paris"),
         ])];

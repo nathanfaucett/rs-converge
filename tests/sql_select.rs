@@ -1,11 +1,11 @@
-use db::{FromRow, Row, Uuid, Value};
+use converge::{FromRow, Row, Uuid, Value};
 
-#[derive(db::FromRow, Debug, PartialEq)]
+#[derive(converge::FromRow, Debug, PartialEq)]
 struct User {
     id: Uuid,
     name: String,
 }
-use db_test::{Case, assert_case, direct_in_memory_cluster, run};
+use test::{Case, assert_case, direct_in_memory_cluster, run};
 
 #[test]
 fn derive_from_row_uses_the_db_facade() {

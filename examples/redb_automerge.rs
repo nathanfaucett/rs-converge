@@ -3,7 +3,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use db::{AutomergeRowCodec, Engine, RedbKernel, SqlTranslator, redb};
+use converge::{AutomergeRowCodec, Engine, RedbKernel, SqlTranslator, redb};
 
 fn database_path() -> std::path::PathBuf {
     let nanos = SystemTime::now()
@@ -16,10 +16,10 @@ fn database_path() -> std::path::PathBuf {
 fn main() {
     futures::executor::block_on(async {
         let path = database_path();
-        let database = Arc::new(redb::Database::create(&path).expect("open Redb database"));
+        let database = Arc::new(reconverge::Database::create(&path).expect("open Redb database"));
         let engine = Engine::new(RedbKernel::new(database), AutomergeRowCodec::new());
 
-        db_examples_util::run(engine, SqlTranslator).await;
+        examples_util::run(engine, SqlTranslator).await;
         std::fs::remove_file(path).expect("remove Redb database");
     });
 }

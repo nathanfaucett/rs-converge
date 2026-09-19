@@ -1,0 +1,31 @@
+[package]
+name = "sync"
+description = "Transport-neutral synchronization for engine"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "sync"
+path = "src/lib.rs"
+
+[dependencies]
+# internal dependencies
+engine = { path = "../engine", default-features = false, features = [] }
+
+# external dependencies
+postcard = { version = "1.1", default-features = false, features = ["alloc"] }
+serde = { version = "1.0", default-features = false, features = ["alloc", "derive"] }
+thiserror = { version = "2.0", default-features = false, features = [] }
+
+[dev-dependencies]
+# internal dependencies
+engine = { path = "../engine", default-features = false, features = ["in-memory", "std"] }
+schema = { path = "../schema", default-features = false, features = [] }
+value = { path = "../value", default-features = false, features = [] }
+
+# external dependencies
+futures = { version = "0.3", default-features = false, features = ["async-await", "executor", "std"] }

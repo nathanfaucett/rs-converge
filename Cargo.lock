@@ -204,6 +204,47 @@ dependencies = [
 ]
 
 [[package]]
+name = "btree"
+version = "0.1.0"
+dependencies = [
+ "async-lock",
+ "async-stream",
+ "futures",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "btree-automerge"
+version = "0.1.0"
+dependencies = [
+ "async-lock",
+ "async-stream",
+ "automerge 0.9.0",
+ "base64",
+ "btree",
+ "futures",
+ "serde",
+ "sha2 0.10.9",
+ "uuid",
+]
+
+[[package]]
+name = "btree-redb"
+version = "0.1.0"
+dependencies = [
+ "async-lock",
+ "async-stream",
+ "btree",
+ "dashmap",
+ "futures",
+ "redb",
+ "serde",
+ "thiserror 2.0.18",
+ "uuid",
+ "value",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -304,6 +345,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 
 [[package]]
+name = "converge"
+version = "0.1.0"
+dependencies = [
+ "engine",
+ "engine-automerge",
+ "engine-redb",
+ "examples-util",
+ "futures",
+ "macros",
+ "query",
+ "sql-translator",
+ "sync",
+ "test",
+ "uuid",
+ "value",
+]
+
+[[package]]
 name = "cpufeatures"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -376,242 +435,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "db"
-version = "0.1.0"
-dependencies = [
- "db-engine",
- "db-engine-automerge",
- "db-engine-redb",
- "db-examples-util",
- "db-macros",
- "db-sql-translator",
- "db-sync",
- "db-test",
- "db-value",
- "futures",
- "uuid",
-]
-
-[[package]]
-name = "db-btree"
-version = "0.1.0"
-dependencies = [
- "async-lock",
- "async-stream",
- "futures",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "db-btree-automerge"
-version = "0.1.0"
-dependencies = [
- "async-lock",
- "async-stream",
- "automerge 0.9.0",
- "base64",
- "db-btree",
- "futures",
- "serde",
- "sha2 0.10.9",
- "uuid",
-]
-
-[[package]]
-name = "db-btree-redb"
-version = "0.1.0"
-dependencies = [
- "async-lock",
- "async-stream",
- "dashmap",
- "db-btree",
- "db-value",
- "futures",
- "redb",
- "serde",
- "thiserror 2.0.18",
- "uuid",
-]
-
-[[package]]
-name = "db-engine"
-version = "0.1.0"
-dependencies = [
- "async-lock",
- "async-stream",
- "db-btree",
- "db-query",
- "db-schema",
- "db-value",
- "futures",
- "postcard",
- "serde",
- "serde-wasm-bindgen",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.18",
- "tsify",
- "uuid",
- "wasm-bindgen",
-]
-
-[[package]]
-name = "db-engine-automerge"
-version = "0.1.0"
-dependencies = [
- "async-stream",
- "automerge 0.9.0",
- "db-btree",
- "db-btree-automerge",
- "db-engine",
- "db-engine-redb",
- "db-query",
- "db-schema",
- "db-value",
- "futures",
- "postcard",
- "redb",
- "uuid",
-]
-
-[[package]]
-name = "db-engine-redb"
-version = "0.1.0"
-dependencies = [
- "async-stream",
- "db-btree",
- "db-btree-redb",
- "db-engine",
- "db-value",
- "futures",
- "redb",
-]
-
-[[package]]
-name = "db-examples-util"
-version = "0.1.0"
-dependencies = [
- "db-engine",
- "db-query",
- "rustyline",
-]
-
-[[package]]
-name = "db-macros"
-version = "0.1.0"
-dependencies = [
- "db-value",
- "quote",
- "syn",
- "uuid",
-]
-
-[[package]]
-name = "db-query"
-version = "0.1.0"
-dependencies = [
- "db-schema",
- "db-value",
- "serde",
- "serde-wasm-bindgen",
- "thiserror 2.0.18",
- "tsify",
- "uuid",
- "wasm-bindgen",
-]
-
-[[package]]
-name = "db-schema"
-version = "0.1.0"
-dependencies = [
- "db-value",
- "serde",
- "serde-wasm-bindgen",
- "tsify",
- "wasm-bindgen",
-]
-
-[[package]]
-name = "db-sql-translator"
-version = "0.1.0"
-dependencies = [
- "db-query",
- "db-schema",
- "db-value",
- "futures",
- "serde",
- "serde-wasm-bindgen",
- "serde_json",
- "sqlparser",
- "thiserror 2.0.18",
- "tsify",
- "uuid",
- "wasm-bindgen",
-]
-
-[[package]]
-name = "db-sync"
-version = "0.1.0"
-dependencies = [
- "db-engine",
- "db-schema",
- "db-value",
- "futures",
- "postcard",
- "serde",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "db-test"
-version = "0.1.0"
-dependencies = [
- "db-engine",
- "db-engine-automerge",
- "db-engine-redb",
- "db-sql-translator",
- "db-sync",
- "db-value",
- "futures",
- "rand",
- "redb",
-]
-
-[[package]]
-name = "db-value"
-version = "0.1.0"
-dependencies = [
- "automerge 0.10.0",
- "autosurgeon",
- "postcard",
- "redb",
- "serde",
- "serde-wasm-bindgen",
- "serde_json",
- "tsify",
- "uuid",
- "wasm-bindgen",
-]
-
-[[package]]
-name = "db-wasm"
-version = "0.1.0"
-dependencies = [
- "async-stream",
- "console_error_panic_hook",
- "db-engine",
- "db-sql-translator",
- "futures",
- "js-sys",
- "serde",
- "serde-wasm-bindgen",
- "tsify",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "wasm-bindgen-test",
-]
-
-[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -657,6 +480,60 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "869b0adbda23651a9c5c0c3d270aac9fcb52e8622a8f2b17e57802d7791962f2"
 
 [[package]]
+name = "engine"
+version = "0.1.0"
+dependencies = [
+ "async-lock",
+ "async-stream",
+ "btree",
+ "futures",
+ "postcard",
+ "query",
+ "schema",
+ "serde",
+ "serde-wasm-bindgen",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "tsify",
+ "uuid",
+ "value",
+ "wasm-bindgen",
+]
+
+[[package]]
+name = "engine-automerge"
+version = "0.1.0"
+dependencies = [
+ "async-stream",
+ "automerge 0.9.0",
+ "btree",
+ "btree-automerge",
+ "engine",
+ "engine-redb",
+ "futures",
+ "postcard",
+ "query",
+ "redb",
+ "schema",
+ "uuid",
+ "value",
+]
+
+[[package]]
+name = "engine-redb"
+version = "0.1.0"
+dependencies = [
+ "async-stream",
+ "btree",
+ "btree-redb",
+ "engine",
+ "futures",
+ "redb",
+ "value",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -687,6 +564,15 @@ checksum = "8be9f3dfaaffdae2972880079a491a1a8bb7cbed0b8dd7a347f668b4150a3b93"
 dependencies = [
  "event-listener",
  "pin-project-lite",
+]
+
+[[package]]
+name = "examples-util"
+version = "0.1.0"
+dependencies = [
+ "engine",
+ "query",
+ "rustyline",
 ]
 
 [[package]]
@@ -994,6 +880,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "953f07c43838f8e6f9758cab68bf5bed85465e7587ebe0b823f1bcd81978ad3a"
 
 [[package]]
+name = "macros"
+version = "0.1.0"
+dependencies = [
+ "quote",
+ "syn",
+ "uuid",
+ "value",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1129,6 +1025,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "query"
+version = "0.1.0"
+dependencies = [
+ "schema",
+ "serde",
+ "serde-wasm-bindgen",
+ "thiserror 2.0.18",
+ "tsify",
+ "uuid",
+ "value",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1244,6 +1154,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
 dependencies = [
  "winapi-util",
+]
+
+[[package]]
+name = "schema"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde-wasm-bindgen",
+ "tsify",
+ "value",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -1405,6 +1326,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "sql-translator"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "query",
+ "schema",
+ "serde",
+ "serde-wasm-bindgen",
+ "serde_json",
+ "sqlparser",
+ "thiserror 2.0.18",
+ "tsify",
+ "uuid",
+ "value",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "sqlparser"
 version = "0.62.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1428,6 +1367,34 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "sync"
+version = "0.1.0"
+dependencies = [
+ "engine",
+ "futures",
+ "postcard",
+ "schema",
+ "serde",
+ "thiserror 2.0.18",
+ "value",
+]
+
+[[package]]
+name = "test"
+version = "0.1.0"
+dependencies = [
+ "engine",
+ "engine-automerge",
+ "engine-redb",
+ "futures",
+ "rand",
+ "redb",
+ "sql-translator",
+ "sync",
+ "value",
 ]
 
 [[package]]
@@ -1590,6 +1557,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "value"
+version = "0.1.0"
+dependencies = [
+ "automerge 0.10.0",
+ "autosurgeon",
+ "postcard",
+ "redb",
+ "serde",
+ "serde-wasm-bindgen",
+ "serde_json",
+ "tsify",
+ "uuid",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1621,6 +1604,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5428f8bf88ea5ddc08faddef2ac4a67e390b88186c703ce6dbd955e1c145aca5"
 dependencies = [
  "wit-bindgen 0.51.0",
+]
+
+[[package]]
+name = "wasm"
+version = "0.1.0"
+dependencies = [
+ "async-stream",
+ "console_error_panic_hook",
+ "engine",
+ "futures",
+ "js-sys",
+ "serde",
+ "serde-wasm-bindgen",
+ "sql-translator",
+ "tsify",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm-bindgen-test",
 ]
 
 [[package]]

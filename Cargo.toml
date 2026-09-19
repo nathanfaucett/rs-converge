@@ -1,5 +1,5 @@
 [package]
-name = "db"
+name = "converge"
 version = "0.1.0"
 publish = true
 authors.workspace = true
@@ -10,52 +10,53 @@ rust-version.workspace = true
 
 [features]
 default = ["macros", "sql", "std", "sync"]
-std = ["db-engine/std", "db-value/std", "uuid/std"]
-macros = ["dep:db-macros"]
-sql = ["dep:db-sql-translator", "db-sql-translator/std"]
-sync = ["dep:db-sync"]
-redb = ["dep:db-engine-redb", "std"]
-automerge = ["dep:db-engine-automerge", "std"]
-in-memory = ["db-engine/in-memory"]
+std = ["engine/std", "value/std", "uuid/std"]
+macros = ["dep:macros"]
+sql = ["dep:sql-translator", "sql-translator/std"]
+sync = ["dep:sync"]
+redb = ["dep:engine-redb", "std"]
+automerge = ["dep:engine-automerge", "std"]
+in-memory = ["engine/in-memory"]
 
 [lib]
-name = "db"
+name = "converge"
 
 [dependencies]
 # Internal dependencies
-db-engine = { path = "crates/db-engine", default-features = false, features = [] }
-db-engine-automerge = { path = "crates/db-engine-automerge", default-features = false, features = [], optional = true }
-db-engine-redb = { path = "crates/db-engine-redb", default-features = false, features = [], optional = true }
-db-macros = { path = "crates/db-macros", default-features = false, features = [], optional = true }
-db-sql-translator = { path = "crates/db-sql-translator", default-features = false, features = [], optional = true }
-db-sync = { path = "crates/db-sync", default-features = false, features = [], optional = true }
-db-value = { path = "crates/db-value", default-features = false, features = [] }
+engine = { path = "crates/engine", default-features = false, features = [] }
+engine-automerge = { path = "crates/engine-automerge", default-features = false, features = [], optional = true }
+engine-redb = { path = "crates/engine-redb", default-features = false, features = [], optional = true }
+macros = { path = "crates/macros", default-features = false, features = [], optional = true }
+query = { path = "crates/query", default-features = false, features = [] }
+sql-translator = { path = "crates/sql-translator", default-features = false, features = [], optional = true }
+sync = { path = "crates/sync", default-features = false, features = [], optional = true }
+value = { path = "crates/value", default-features = false, features = [] }
 
 uuid = { version = "1.23", default-features = false, features = [] }
 
 [dev-dependencies]
 # Internal dependencies
-db-examples-util = { path = "crates/db-examples-util" }
-db-test = { path = "crates/db-test", default-features = false, features = [] }
+examples-util = { path = "crates/examples-util" }
+test = { path = "crates/test", default-features = false, features = [] }
 
 # External dependencies
 futures = { version = "0.3", default-features = false, features = ["async-await", "executor", "std"] }
 
 [workspace]
 members = [
-  "crates/db-engine",
-  "crates/db-engine-automerge",
-  "crates/db-engine-redb",
-  "crates/db-btree-redb",
-  "crates/db-btree-automerge",
-  "crates/db-sql-translator",
-  "crates/db-sync",
-  "crates/db-wasm",
-  "crates/db-btree",
-  "crates/db-value",
-  "crates/db-query",
-  "crates/db-macros",
-  "crates/db-test",
+  "crates/engine",
+  "crates/engine-automerge",
+  "crates/engine-redb",
+  "crates/btree-redb",
+  "crates/btree-automerge",
+  "crates/sql-translator",
+  "crates/sync",
+  "crates/wasm",
+  "crates/btree",
+  "crates/value",
+  "crates/query",
+  "crates/macros",
+  "crates/test",
 ]
 
 [[example]]
@@ -80,7 +81,7 @@ edition = "2024"
 authors = ["nathanfaucett@gmail.com"]
 license = "MIT OR Apache-2.0"
 rust-version = "1.98"
-repository = "https://github.com/aicacia/rs-db"
+repository = "https://github.com/aicacia/converge-db"
 
 [workspace.lints.rust]
 ambiguous_negative_literals = "warn"

@@ -1,0 +1,37 @@
+[package]
+name = "engine-automerge"
+version.workspace = true
+publish = false
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "engine_automerge"
+path = "src/lib.rs"
+
+[dependencies]
+# internal dependencies
+btree = { path = "../btree", default-features = false, features = [] }
+btree-automerge = { path = "../btree-automerge", default-features = false, features = [] }
+engine = { path = "../engine", default-features = false, features = ["std"] }
+value = { path = "../value", default-features = false, features = ["std"] }
+
+# external dependencies
+automerge = { version = "0.9", default-features = false, features = [] }
+async-stream = { version = "0.3", default-features = false, features = [] }
+futures = { version = "0.3", default-features = false, features = ["std"] }
+postcard = { version = "1.1", default-features = false, features = ["alloc"] }
+uuid = { version = "1.23", default-features = false, features = ["v7"] }
+
+[dev-dependencies]
+# internal dependencies
+engine-redb = { path = "../engine-redb", default-features = false, features = [] }
+query = { path = "../query", default-features = false, features = [] }
+schema = { path = "../schema", default-features = false, features = [] }
+
+# external dependencies
+futures = { version = "0.3", default-features = false, features = ["executor"] }
+redb = { version = "4.3", default-features = false, features = ["uuid"] }

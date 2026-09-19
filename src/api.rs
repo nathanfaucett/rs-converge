@@ -1,23 +1,27 @@
-pub use db_engine::{
+pub use engine::{
     Checkpoint, ColumnGenerationId, DirectRowCodec, Engine, EngineError, EngineResult,
     EnvelopeHeader, EnvelopeId, EnvelopeOutcome, Frontier, IndexGenerationId, Kernel,
     KernelTransaction, RowCodec, RowTombstone, SchemaChange, TableGenerationId,
     TransactionEnvelope,
 };
 #[cfg(feature = "in-memory")]
-pub use db_engine::{InMemoryKernel, InMemoryKernelTransaction};
+pub use engine::{InMemoryKernel, InMemoryKernelTransaction};
 #[cfg(feature = "automerge")]
-pub use db_engine_automerge::AutomergeRowCodec;
+pub use engine_automerge::AutomergeRowCodec;
 #[cfg(feature = "redb")]
-pub use db_engine_redb::{RedbKernel, RedbKernelTransaction, redb};
+pub use engine_reconverge::{RedbKernel, RedbKernelTransaction, redb};
 #[cfg(feature = "macros")]
-pub use db_macros::FromRow;
+pub use macros::FromRow;
+pub use query::{
+    Query, QueryColumn, QueryDelete, QueryExpr, QueryExprValue, QueryFrom, QueryInsert,
+    QueryResult, QuerySelect, QueryUpdate, QueryUpdateAssignment, Statement,
+};
 #[cfg(feature = "sql")]
-pub use db_sql_translator::SqlTranslator;
+pub use sql_translator::SqlTranslator;
 #[cfg(feature = "sync")]
-pub use db_sync::{
+pub use sync::{
     SessionConfig, SyncError, SyncHello, SyncMessage, SyncResult, SyncRole, SyncTransport,
     synchronize,
 };
-pub use db_value::{FromRow, FromRowError, FromValue, Row, Value, ValueType, decode, value};
 pub use uuid::Uuid;
+pub use value::{FromRow, FromRowError, FromValue, Row, Value, ValueType, decode, value};
