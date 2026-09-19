@@ -6,7 +6,7 @@ use futures::{Stream, stream};
 
 use crate::{
     EngineError, EngineResult,
-    catalog::{ENGINE_INDEX_FIELDS, ENGINE_INDICES, ENGINE_TABLE_FIELDS, ENGINE_TABLES},
+    catalog::{ENGINE_INDICES, ENGINE_TABLE_FIELDS, ENGINE_TABLES},
     kernel::{Kernel, KernelTransaction},
 };
 
@@ -25,12 +25,7 @@ pub struct InMemoryKernel {
 impl InMemoryKernel {
     pub fn new() -> Self {
         let mut tables = Tables::new();
-        for name in [
-            ENGINE_TABLES,
-            ENGINE_TABLE_FIELDS,
-            ENGINE_INDICES,
-            ENGINE_INDEX_FIELDS,
-        ] {
+        for name in [ENGINE_TABLES, ENGINE_TABLE_FIELDS, ENGINE_INDICES] {
             tables.insert(String::from(name), BTreeMap::new());
         }
         Self {

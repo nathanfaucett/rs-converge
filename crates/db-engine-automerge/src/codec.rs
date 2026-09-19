@@ -20,6 +20,7 @@ use crate::change_log::{ChangeLogRead, ChangeLogTransaction};
 const TOMBSTONES: &str = "__db_engine_tombstones";
 const COLUMN_COUNT_BYTES: usize = size_of::<u32>();
 const ENGINE_TABLE_FIELDS: &str = "table_fields";
+const CHANGES: &str = "__db_engine_changes";
 
 #[derive(Debug)]
 pub struct AutomergeRowCodec {
@@ -46,10 +47,6 @@ struct Column {
 }
 
 impl AutomergeRowCodec {
-    fn change_table(table: impl AsRef<str>) -> String {
-        format!("__db_engine_changes_{}", table.as_ref())
-    }
-
     fn row_key(table: impl AsRef<str>, key: &Row) -> Row {
         let table = table.as_ref();
         let mut values = Vec::with_capacity(key.values.len() + 1);
@@ -132,29 +129,26 @@ impl AutomergeRowCodec {
 
     async fn document<T>(
         transaction: &T,
-        table: impl AsRef<str>,
+        _: impl AsRef<str>,
         id: &DocumentId,
     ) -> EngineResult<Option<AutoCommit>>
     where
         T: KernelTransaction,
     {
-        get_document(
-            &ChangeLogRead::new(transaction, Self::change_table(table)),
-            id,
-        )
-        .await
-        .map_err(EngineError::custom)
+        get_document(&ChangeLogRead::new(transaction, CHANGES), id)
+            .await
+            .map_err(EngineError::custom)
     }
 
     fn changes<'a, T>(
         transaction: &'a mut T,
-        table: &'a str,
+        _: &'a str,
     ) -> AutomergeBTreeTransaction<ChangeLogTransaction<'a, T>>
     where
         T: KernelTransaction + Send,
     {
         AutomergeBTreeTransaction::new(
-            ChangeLogTransaction::new(transaction, Self::change_table(table)),
+            ChangeLogTransaction::new(transaction, CHANGES),
             ThresholdPolicy::default(),
         )
     }
@@ -390,15 +384,8 @@ impl<T> RowCodec<T> for AutomergeRowCodec
 where
     T: KernelTransaction + Send,
 {
-    async fn ensure_table(
-        &self,
-        transaction: &mut T,
-        table: TableGenerationId,
-    ) -> EngineResult<()> {
-        transaction
-            .ensure_table(&Self::change_table(table.0.to_string()))
-            .await?;
-
+    async fn ensure_table(&self, transaction: &mut T, _: TableGenerationId) -> EngineResult<()> {
+        transaction.ensure_table(CHANGES).await?;
         transaction.ensure_table(TOMBSTONES).await?;
         transaction.ensure_table(ENGINE_TABLE_FIELDS).await
     }
@@ -406,7 +393,7 @@ where
     async fn drop_table(&self, transaction: &mut T, table: TableGenerationId) -> EngineResult<()> {
         let table = table.0.to_string();
         Self::remove_table_entries(transaction, TOMBSTONES, &table).await?;
-        transaction.drop_table(&Self::change_table(table)).await
+        Ok(())
     }
 
     async fn get_row(
@@ -439,7 +426,7 @@ where
     ) -> impl Stream<Item = EngineResult<(uuid::Uuid, Row)>> {
         let table = table.0.to_string();
         stream! {
-            let changes = ChangeLogRead::new(transaction, Self::change_table(&table));
+            let changes = ChangeLogRead::new(transaction, CHANGES);
             let documents = reconstruct_document_values(changes.range(..));
             pin_mut!(documents);
 

@@ -10,6 +10,12 @@ pub enum InMemoryTransportError {
     Interrupted,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransportDirection {
+    LeftToRight,
+    RightToLeft,
+}
+
 impl fmt::Display for InMemoryTransportError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
@@ -57,19 +63,28 @@ pub fn in_memory_transport_pair() -> (InMemoryTransport, InMemoryTransport) {
 pub fn in_memory_transport_pair_failing_at(
     fail_at: Option<usize>,
 ) -> (InMemoryTransport, InMemoryTransport) {
+    in_memory_transport_pair_failing(None, fail_at)
+}
+
+pub fn in_memory_transport_pair_failing(
+    direction: Option<TransportDirection>,
+    fail_at: Option<usize>,
+) -> (InMemoryTransport, InMemoryTransport) {
     let (left_sender, right_receiver) = mpsc::unbounded();
     let (right_sender, left_receiver) = mpsc::unbounded();
+    let left_fails = direction != Some(TransportDirection::RightToLeft);
+    let right_fails = direction == Some(TransportDirection::RightToLeft);
     (
         InMemoryTransport {
             receiver: left_receiver,
             sender: Some(left_sender),
-            fail_at,
+            fail_at: left_fails.then_some(fail_at).flatten(),
             sent: 0,
         },
         InMemoryTransport {
             receiver: right_receiver,
             sender: Some(right_sender),
-            fail_at: None,
+            fail_at: right_fails.then_some(fail_at).flatten(),
             sent: 0,
         },
     )

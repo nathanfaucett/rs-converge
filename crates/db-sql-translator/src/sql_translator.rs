@@ -13,8 +13,8 @@ use std::collections::BTreeMap;
 use db_query::{
     AlterIndexOperation, AlterTableOperation, DataDefinition, Query, QueryColumn, QueryDelete,
     QueryExpr, QueryExprValue, QueryFrom, QueryInsertValue, QueryInsertValues, QueryJoin,
-    QueryJoinKind, QueryParams, QuerySelect, QueryUpdate, Statement, TranslateError,
-    TranslateResult, Translator,
+    QueryJoinKind, QueryParams, QuerySelect, QueryUpdate, QueryUpdateAssignment, Statement,
+    TranslateError, TranslateResult, Translator,
 };
 
 use db_schema::TableSchema;
@@ -125,11 +125,27 @@ fn translate_query(query: ast::Query, _params: Option<&QueryParams>) -> Translat
             "Only plain SELECT queries supported",
         ));
     }
+    if query.order_by.is_some() || query.limit_clause.is_some() || query.fetch.is_some() {
+        return Err(TranslateError::custom(
+            "ORDER BY, LIMIT, and OFFSET are not supported",
+        ));
+    }
 
     let select = match *query.body {
         ast::SetExpr::Select(select) => select,
         _ => unreachable!(),
     };
+
+    if select.distinct.is_some() {
+        return Err(TranslateError::custom("DISTINCT is not supported"));
+    }
+    if !matches!(select.group_by, ast::GroupByExpr::Expressions(ref expressions, _) if expressions.is_empty())
+    {
+        return Err(TranslateError::custom("GROUP BY is not supported"));
+    }
+    if select.having.is_some() {
+        return Err(TranslateError::custom("HAVING is not supported"));
+    }
 
     let (from, aliases) = translate_from(&select.from)?;
     let projection = translate_projection(&aliases, &select.projection)?;
@@ -166,6 +182,11 @@ fn translate_query(query: ast::Query, _params: Option<&QueryParams>) -> Translat
 fn translate_from(
     from: &[TableWithJoins],
 ) -> TranslateResult<(QueryFrom, BTreeMap<String, String>)> {
+    if from.len() != 1 {
+        return Err(TranslateError::custom(
+            "Only one table in FROM is supported",
+        ));
+    }
     let twj = from
         .first()
         .ok_or(TranslateError::custom("Missing FROM clause"))?;
@@ -445,8 +466,25 @@ fn translate_update(
         .map(|e| translate_expr(&BTreeMap::new(), e))
         .transpose()?;
 
-    // TODO: Implement proper assignment parsing from update.assignments
-    let assignments = vec![];
+    let assignments = update
+        .assignments
+        .into_iter()
+        .map(|assignment| {
+            let ast::AssignmentTarget::ColumnName(column) = assignment.target else {
+                return Err(TranslateError::custom(
+                    "UPDATE assignments require one column",
+                ));
+            };
+            let QueryExpr::Value(value) = translate_expr(&BTreeMap::new(), assignment.value)?
+            else {
+                return Err(TranslateError::custom("UPDATE assignments require a value"));
+            };
+            Ok(QueryUpdateAssignment {
+                column: QueryColumn::new(table.clone(), object_name_to_string(&column)?),
+                value,
+            })
+        })
+        .collect::<TranslateResult<Vec<_>>>()?;
 
     Ok(Statement::Query(Query::Update(QueryUpdate {
         from: QueryFrom {
@@ -463,15 +501,22 @@ fn translate_delete(
     delete: ast::Delete,
     _params: Option<&QueryParams>,
 ) -> TranslateResult<Statement> {
-    if delete.tables.is_empty() {
-        return Err(TranslateError::custom("No tables in DELETE"));
-    }
-    if delete.tables.len() > 1 {
+    let (ast::FromTable::WithFromKeyword(from) | ast::FromTable::WithoutKeyword(from)) =
+        delete.from;
+    if from.len() != 1 || !delete.tables.is_empty() {
         return Err(TranslateError::custom(
-            "Multiple tables in DELETE not supported",
+            "Only one table in DELETE is supported",
         ));
     }
-    let table = object_name_to_string(&delete.tables[0])?;
+    let TableFactor::Table { name, .. } = &from[0].relation else {
+        return Err(TranslateError::custom(
+            "Only simple table references supported in DELETE",
+        ));
+    };
+    if !from[0].joins.is_empty() {
+        return Err(TranslateError::custom("Joins in DELETE are not supported"));
+    }
+    let table = object_name_to_string(name)?;
 
     let predicate = delete
         .selection

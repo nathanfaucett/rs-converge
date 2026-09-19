@@ -267,6 +267,13 @@ where
     for table in rebuild {
         rebuild_table(transaction, codec, table, false).await?;
     }
+    for header in &checkpoint.headers {
+        for parent in &header.parents {
+            transaction
+                .remove_entry(ENGINE_ENVELOPE_FRONTIER, &key(*parent))
+                .await?;
+        }
+    }
     for head in checkpoint.frontier.heads {
         transaction
             .put_entry(ENGINE_ENVELOPE_FRONTIER, key(head), Row::default())
@@ -470,13 +477,19 @@ where
             .remove_entry(ENGINE_ENVELOPE_FRONTIER, &key(*parent))
             .await?;
     }
-    transaction
-        .put_entry(
-            ENGINE_ENVELOPE_FRONTIER,
-            envelope_key.clone(),
-            Row::default(),
-        )
-        .await?;
+    let has_known_child = headers(transaction)
+        .await?
+        .iter()
+        .any(|header| header.parents.contains(&envelope.id));
+    if !has_known_child {
+        transaction
+            .put_entry(
+                ENGINE_ENVELOPE_FRONTIER,
+                envelope_key.clone(),
+                Row::default(),
+            )
+            .await?;
+    }
     let sequence_key = Row::default();
     let sequence = match transaction
         .get_entry(ENGINE_ENVELOPE_SEQUENCE, &sequence_key)
@@ -637,6 +650,8 @@ fn status_row(outcome: &EnvelopeOutcome) -> EngineResult<Row> {
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec::Vec;
+
     use super::{Checkpoint, TransactionEnvelope, WireCheckpoint, WireEnvelope};
 
     #[test]

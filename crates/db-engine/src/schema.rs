@@ -46,7 +46,6 @@ where
         ENGINE_TABLES,
         ENGINE_TABLE_FIELDS,
         "indices",
-        "index_fields",
         ENGINE_SCHEMA_TOMBSTONES,
     ] {
         transaction.ensure_table(table).await?;

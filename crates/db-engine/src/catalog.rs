@@ -14,5 +14,3 @@ pub const ENGINE_TABLE_FIELDS: &str = "table_fields";
 pub const ENGINE_TABLE_FIELDS_FIELD_COLUMN_ID: &str = "column_id";
 
 pub const ENGINE_INDICES: &str = "indices";
-
-pub const ENGINE_INDEX_FIELDS: &str = "index_fields";

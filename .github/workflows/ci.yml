@@ -37,6 +37,9 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-lint-${{ hashFiles('**/Cargo.lock') }}
 
+      - name: Root integration boundary
+        run: "! grep -RE 'use (db_engine|db_sync|db_value|db_engine_redb|db_engine_automerge|redb|uuid|tokio|futures|db_macros)' tests"
+
       - name: Rust fmt check
         run: just fmt-check
 
@@ -86,4 +89,22 @@ jobs:
         run: just test-sql
 
       - name: Test feature combinations
-        run: just crap-summary
+        run: cargo hack test --feature-powerset --all-targets
+
+  durable-automerge-redb:
+    name: Durable Automerge/Redb integration
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+
+      - name: Test durable Automerge/Redb integration
+        run: cargo test --features redb,automerge --test automerge_sync

@@ -84,18 +84,26 @@ pub async fn run_chaos<K: Kernel, R: RowCodec<K::Transaction>>(
     scenario: ChaosScenario,
     config: &SessionConfig,
 ) {
+    let ChaosScenario {
+        name,
+        nodes,
+        seed,
+        steps,
+    } = scenario;
     assert_eq!(
         cluster.len(),
-        scenario.nodes,
-        "{}: node count mismatch",
-        scenario.name
+        nodes,
+        "{name} (seed {seed}): node count mismatch"
     );
-    let mut network = ChaosNetwork::new(scenario.seed);
+    let mut network = ChaosNetwork::new(seed);
 
-    for step in scenario.steps {
+    for step in steps {
         match step {
             ChaosStep::Exec { node, sql } => {
-                let _ = cluster.exec(node, sql).await;
+                assert!(
+                    cluster.try_exec(node, sql).await.is_ok(),
+                    "{name} (seed {seed}): execution failed on node {node}: {sql}"
+                );
             }
             ChaosStep::Sync => sync_available_pairs(&cluster, &mut network, config).await,
             ChaosStep::Partition { groups } => network.partition(groups),
@@ -108,13 +116,18 @@ pub async fn run_chaos<K: Kernel, R: RowCodec<K::Transaction>>(
                         break;
                     }
                 }
-                cluster.assert_converged(query).await;
+                assert!(
+                    cluster.is_converged(query).await,
+                    "{name} (seed {seed}): replicas did not converge on query: {query}"
+                );
             }
             ChaosStep::CurrentlyDiverged { a, b, query } => {
                 assert_ne!(
                     cluster.exec(a, query).await,
                     cluster.exec(b, query).await,
-                    "expected divergence between {a} and {b}"
+                    "{} (seed {}): expected divergence between {a} and {b}",
+                    name,
+                    seed
                 );
             }
         }

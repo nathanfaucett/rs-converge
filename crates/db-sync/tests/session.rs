@@ -234,6 +234,79 @@ fn transfers_writes_made_during_checkpoint_bootstrap() {
 }
 
 #[test]
+fn respects_checkpoint_thresholds_and_envelope_batches() {
+    block_on(async {
+        let left = Engine::new(InMemoryKernel::new(), DirectRowCodec);
+        let right = Engine::new(InMemoryKernel::new(), DirectRowCodec);
+        for name in ["one", "two", "three"] {
+            left.create_table(table(name)).await.unwrap();
+        }
+
+        let mut config = SessionConfig::new();
+        config.max_envelopes_per_frame = 2;
+        config.checkpoint_threshold = Some(3);
+        let frames = sync_with(&left, &right, &config).await;
+        assert!(
+            !frames
+                .iter()
+                .any(|frame| matches!(frame, SyncMessage::Checkpoint(_)))
+        );
+        assert_eq!(
+            frames
+                .iter()
+                .filter_map(|frame| match frame {
+                    SyncMessage::Envelopes(envelopes) => Some(envelopes.len()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec![2, 1]
+        );
+
+        let destination = Engine::new(InMemoryKernel::new(), DirectRowCodec);
+        config.checkpoint_threshold = Some(2);
+        let frames = sync_with(&left, &destination, &config).await;
+        assert!(
+            frames
+                .iter()
+                .any(|frame| matches!(frame, SyncMessage::Checkpoint(_)))
+        );
+    });
+}
+
+#[test]
+fn delayed_child_applies_after_checkpoint_bootstrap() {
+    block_on(async {
+        let source = Engine::new(InMemoryKernel::new(), DirectRowCodec);
+        let destination = Engine::new(InMemoryKernel::new(), DirectRowCodec);
+        source.create_table(table("parent")).await.unwrap();
+        let checkpoint = source.export_checkpoint().await.unwrap();
+        source.create_table(table("child")).await.unwrap();
+        let child = source
+            .missing_envelopes(&Frontier::default())
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|envelope| {
+                envelope
+                    .parents
+                    .iter()
+                    .any(|parent| checkpoint.headers.iter().any(|header| header.id == *parent))
+            })
+            .unwrap();
+
+        destination.import_checkpoint(checkpoint).await.unwrap();
+        assert_eq!(
+            destination.import_envelope(child).await.unwrap(),
+            db_engine::EnvelopeOutcome::Applied
+        );
+        assert_eq!(
+            destination.table_schema("child").await.unwrap(),
+            table("child")
+        );
+    });
+}
+
+#[test]
 fn rejects_malformed_checkpoint_frames() {
     block_on(async {
         let engine = Engine::new(InMemoryKernel::new(), DirectRowCodec);

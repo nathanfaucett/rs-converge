@@ -6,7 +6,7 @@ use alloc::{
     vec::Vec,
 };
 use db_schema::{IndexSchema, TableSchema};
-use db_value::{Row, Value};
+use db_value::{FromRow, Row, Value};
 
 #[cfg(feature = "std")]
 use std::sync::Arc;
@@ -19,10 +19,6 @@ use db_query::{QueryParams, QueryResult, Statement, TranslateError, Translator};
 use crate::{
     Checkpoint, ColumnGenerationId, EnvelopeId, EnvelopeOutcome, Frontier, IndexGenerationId,
     TableGenerationId, TransactionEnvelope,
-    catalog::{
-        ENGINE_INDEX_FIELDS, ENGINE_INDICES, ENGINE_SCHEMA_TOMBSTONES, ENGINE_TABLE_FIELDS,
-        ENGINE_TABLES,
-    },
     codec::RowCodec,
     envelope::{
         checkpoint, ensure_envelope_log, envelopes_missing, frontier, import as import_envelope,
@@ -32,8 +28,9 @@ use crate::{
         execute_statement, resolve_row as resolve_conflicted_row,
         row_conflicts as conflicted_row_columns,
     },
-    index::{ENGINE_INDEX_RECORDS, index_generation_id, index_schema, lookup as index_lookup},
+    index::{ensure_index_records, index_generation_id, index_schema, lookup as index_lookup},
     kernel::{Kernel, KernelTransaction},
+    schema::ensure,
 };
 
 #[derive(Error, Debug)]
@@ -207,6 +204,26 @@ where
         self.execute(statements).await
     }
 
+    pub async fn translate_and_select<T, U>(
+        &self,
+        query: &str,
+        translator: &T,
+    ) -> EngineResult<Vec<U>>
+    where
+        T: Translator,
+        U: FromRow,
+    {
+        let mut results = self.translate_and_execute(query, translator).await?;
+        if results.len() != 1 {
+            return Err(EngineError::InvalidQuery("Expected one query result"));
+        }
+        results
+            .pop()
+            .expect("result length was checked")
+            .rows_as()
+            .map_err(EngineError::custom)
+    }
+
     pub async fn execute(&self, statements: Vec<Statement>) -> EngineResult<Vec<QueryResult>> {
         execute_statement(self, statements).await
     }
@@ -338,15 +355,7 @@ async fn ensure_replication_tables<T>(transaction: &mut T) -> EngineResult<()>
 where
     T: KernelTransaction,
 {
-    for table in [
-        ENGINE_TABLES,
-        ENGINE_TABLE_FIELDS,
-        ENGINE_INDICES,
-        ENGINE_INDEX_FIELDS,
-        ENGINE_INDEX_RECORDS,
-        ENGINE_SCHEMA_TOMBSTONES,
-    ] {
-        transaction.ensure_table(table).await?;
-    }
+    ensure(transaction).await?;
+    ensure_index_records(transaction).await?;
     ensure_envelope_log(transaction).await
 }
