@@ -5,17 +5,15 @@ use automerge::transaction::Transactable;
 use automerge::{ActorId, AutoCommit, ROOT, ReadDoc, ScalarValue, Value as AutomergeValue};
 use db_btree::{BTreeRead, BTreeTransaction};
 use db_btree_automerge::{
-    AutomergeBTreeTransaction, DocumentId, ThresholdPolicy, get_document,
+    AutomergeBTreeTransaction, AutomergeChangeStore, DocumentId, ThresholdPolicy, get_document,
     reconstruct_document_values,
 };
 use db_engine::{
-    ENGINE_TABLE_FIELDS_FIELD_COLUMN_ID, EngineError, EngineResult, KernelTransaction, RowCodec,
-    TableGenerationId,
+    BytesTable, BytesTableTransaction, ENGINE_TABLE_FIELDS_FIELD_COLUMN_ID, EngineError,
+    EngineResult, KernelTransaction, RowCodec, RowTable, TableGenerationId,
 };
 use db_value::{Row, Value};
 use futures::{Stream, StreamExt, pin_mut};
-
-use crate::change_log::{ChangeLogRead, ChangeLogTransaction};
 
 const TOMBSTONES: &str = "__db_engine_tombstones";
 const COLUMN_COUNT_BYTES: usize = size_of::<u32>();
@@ -127,28 +125,26 @@ impl AutomergeRowCodec {
         Ok(columns.into_iter().map(|(_, column)| column).collect())
     }
 
-    async fn document<T>(
-        transaction: &T,
-        _: impl AsRef<str>,
-        id: &DocumentId,
-    ) -> EngineResult<Option<AutoCommit>>
+    async fn document<T>(transaction: &T, id: &DocumentId) -> EngineResult<Option<AutoCommit>>
     where
         T: KernelTransaction,
     {
-        get_document(&ChangeLogRead::new(transaction, CHANGES), id)
-            .await
-            .map_err(EngineError::custom)
+        get_document(
+            &AutomergeChangeStore::new(BytesTable::new(transaction, CHANGES)),
+            id,
+        )
+        .await
+        .map_err(EngineError::custom)
     }
 
     fn changes<'a, T>(
         transaction: &'a mut T,
-        _: &'a str,
-    ) -> AutomergeBTreeTransaction<ChangeLogTransaction<'a, T>>
+    ) -> AutomergeBTreeTransaction<AutomergeChangeStore<BytesTableTransaction<'a, T>>>
     where
         T: KernelTransaction + Send,
     {
         AutomergeBTreeTransaction::new(
-            ChangeLogTransaction::new(transaction, CHANGES),
+            AutomergeChangeStore::new(BytesTableTransaction::new(transaction, CHANGES)),
             ThresholdPolicy::default(),
         )
     }
@@ -332,7 +328,6 @@ impl AutomergeRowCodec {
     async fn store_row<T>(
         &self,
         transaction: &mut T,
-        table: &str,
         id: DocumentId,
         columns: &[Column],
         value: &Row,
@@ -340,7 +335,7 @@ impl AutomergeRowCodec {
     where
         T: KernelTransaction + Send,
     {
-        let mut changes = Self::changes(transaction, table);
+        let mut changes = Self::changes(transaction);
         if let Some(document) = changes.get(&id).await.map_err(EngineError::custom)? {
             let changed_columns: Vec<_> = (0..columns.len()).collect();
             if Self::has_conflicts(&document, columns, &changed_columns)? {
@@ -348,25 +343,10 @@ impl AutomergeRowCodec {
                     "Logical row column is conflicted",
                 ));
             }
-            let values: EngineResult<Vec<_>> = value
-                .values
-                .iter()
-                .zip(columns)
-                .map(|(value, column)| {
-                    postcard::to_allocvec(value)
-                        .map(|bytes| (column.id.clone(), bytes))
-                        .map_err(EngineError::custom)
-                })
-                .collect();
-            let values = values?;
             changes
                 .update(id, |document| {
-                    for (id, bytes) in &values {
-                        document
-                            .put(ROOT, id, ScalarValue::Bytes(bytes.clone()))
-                            .map_err(db_btree::BTreeError::custom)?;
-                    }
-                    Ok(())
+                    Self::update_document(document, value, columns)
+                        .map_err(db_btree::BTreeError::custom)
                 })
                 .await
                 .map_err(EngineError::custom)?;
@@ -412,7 +392,7 @@ where
             return Ok(None);
         }
         let id = Self::document_id(table, row)?;
-        let Some(document) = Self::document(transaction, table, &id).await? else {
+        let Some(document) = Self::document(transaction, &id).await? else {
             return Ok(None);
         };
         let columns = Self::document_columns(transaction, table, &document).await?;
@@ -426,7 +406,7 @@ where
     ) -> impl Stream<Item = EngineResult<(uuid::Uuid, Row)>> {
         let table = table.0.to_string();
         stream! {
-            let changes = ChangeLogRead::new(transaction, CHANGES);
+            let changes = AutomergeChangeStore::new(BytesTable::new(transaction, CHANGES));
             let documents = reconstruct_document_values(changes.range(..));
             pin_mut!(documents);
 
@@ -457,7 +437,7 @@ where
     ) -> EngineResult<Vec<u8>> {
         let table = table.0.to_string();
         let id = Self::document_id(&table, row_id)?;
-        let mut document = Self::document(transaction, &table, &id)
+        let mut document = Self::document(transaction, &id)
             .await?
             .unwrap_or_else(AutoCommit::new)
             .with_actor(self.actor.clone());
@@ -479,7 +459,7 @@ where
     ) -> EngineResult<Vec<usize>> {
         let table = table.0.to_string();
         let id = Self::document_id(&table, row)?;
-        let Some(document) = Self::document(transaction, &table, &id).await? else {
+        let Some(document) = Self::document(transaction, &id).await? else {
             return Ok(Vec::new());
         };
         Self::conflicted_columns(
@@ -498,7 +478,7 @@ where
     ) -> EngineResult<Vec<u8>> {
         let table = table.0.to_string();
         let id = Self::document_id(&table, row_id)?;
-        let mut document = Self::document(transaction, &table, &id)
+        let mut document = Self::document(transaction, &id)
             .await?
             .unwrap_or_else(AutoCommit::new)
             .with_actor(self.actor.clone());
@@ -527,7 +507,7 @@ where
         let (column_count, incremental) = Self::decode_incremental(value)?;
         let id = Self::document_id(table, &row)?;
 
-        let existing = Self::document(transaction, table, &id).await?;
+        let existing = Self::document(transaction, &id).await?;
         let has_existing = existing.is_some();
         let mut document = existing.unwrap_or_else(AutoCommit::new);
         document
@@ -536,7 +516,7 @@ where
         let columns = Self::columns(transaction, table, column_count).await?;
         let row = Self::decode_row(&document, &columns)?;
 
-        let mut changes = Self::changes(transaction, table);
+        let mut changes = Self::changes(transaction);
         if has_existing {
             changes.remove(&id).await.map_err(EngineError::custom)?;
         }
@@ -555,7 +535,7 @@ where
     ) -> EngineResult<Option<Vec<u8>>> {
         let table = table.0.to_string();
         let id = Self::document_id(&table, row)?;
-        Self::document(transaction, &table, &id)
+        Self::document(transaction, &id)
             .await?
             .map(|mut document| Ok(document.save()))
             .transpose()
@@ -579,7 +559,7 @@ where
         }
         let mut incoming = AutoCommit::load(state).map_err(EngineError::custom)?;
         let id = Self::document_id(&table, &row)?;
-        let existing = Self::document(transaction, &table, &id).await?;
+        let existing = Self::document(transaction, &id).await?;
         let mut document = existing.clone().unwrap_or_else(AutoCommit::new);
         if existing.is_some() {
             document.merge(&mut incoming).map_err(EngineError::custom)?;
@@ -588,7 +568,7 @@ where
         }
         let columns = Self::document_columns(transaction, &table, &document).await?;
         let row_value = Self::decode_row(&document, &columns)?;
-        let mut changes = Self::changes(transaction, &table);
+        let mut changes = Self::changes(transaction);
         if existing.is_some() {
             changes.remove(&id).await.map_err(EngineError::custom)?;
         }
@@ -655,8 +635,7 @@ where
         }
         let columns = Self::columns(transaction, table, value.values.len()).await?;
         let id = Self::document_id(table, &row)?;
-        self.store_row(transaction, table, id, &columns, &value)
-            .await
+        self.store_row(transaction, id, &columns, &value).await
     }
 
     async fn remove_row(

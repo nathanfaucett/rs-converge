@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
-    Change, EngineError, EngineResult, KernelTransaction, RowCodec, SchemaChange,
+    Change, EngineError, EngineResult, KernelTransaction, RowCodec, RowTable, SchemaChange,
     TableGenerationId,
     catalog::{
         ENGINE_ENVELOPE_FRONTIER, ENGINE_ENVELOPE_HEADERS, ENGINE_ENVELOPE_LOG,

@@ -5,6 +5,7 @@ use core::{
 };
 
 use automerge::ActorId;
+use db_btree::BTreeError;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -72,17 +73,51 @@ impl DocumentChangeKey {
         ActorId::from(self.uuid().as_bytes())
     }
 
-    pub fn as_bytes(&self) -> &[u8] {
-        unsafe {
-            core::slice::from_raw_parts(
-                self as *const Self as *const u8,
-                core::mem::size_of::<Self>(),
-            )
+    pub fn encode_ordered(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(self.id.len() + 35);
+        for byte in &self.id {
+            if *byte == 0 {
+                bytes.extend_from_slice(&[0, 255]);
+            } else {
+                bytes.push(*byte);
+            }
         }
+        bytes.extend_from_slice(&[0, 0, self.r#type as u8]);
+        bytes.extend_from_slice(&self.change_hash);
+        bytes
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> {
-        self.as_bytes().to_vec()
+    pub fn decode_ordered(bytes: &[u8]) -> Result<Self, BTreeError> {
+        let mut id = Vec::new();
+        let mut index = 0;
+        loop {
+            match (bytes.get(index), bytes.get(index + 1)) {
+                (Some(0), Some(0)) => {
+                    index += 2;
+                    break;
+                }
+                (Some(0), Some(255)) => {
+                    id.push(0);
+                    index += 2;
+                }
+                (Some(byte), _) => {
+                    id.push(*byte);
+                    index += 1;
+                }
+                _ => return Err(BTreeError::InvalidDocument),
+            }
+        }
+        let r#type = match bytes.get(index) {
+            Some(0) => DocumentType::Snapshot,
+            Some(1) => DocumentType::Incremental,
+            _ => return Err(BTreeError::InvalidDocument),
+        };
+        let hash: DocumentChangeHash = bytes
+            .get(index + 1..)
+            .ok_or(BTreeError::InvalidDocument)?
+            .try_into()
+            .map_err(|_| BTreeError::InvalidDocument)?;
+        Ok(Self::new(id, r#type, hash))
     }
 
     pub fn min_for_id(id: DocumentId) -> Self {
@@ -146,5 +181,39 @@ impl PartialOrd for DocumentChangeKey {
 impl fmt::Display for DocumentChangeKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:x?}|{}|{:x?}", self.id, self.r#type, self.change_hash)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DocumentChangeKey, DocumentType};
+
+    #[test]
+    fn ordered_codec_round_trips_and_preserves_order() {
+        let keys = [
+            DocumentChangeKey::new(vec![], DocumentType::Snapshot, [0; 32]),
+            DocumentChangeKey::new(vec![0], DocumentType::Snapshot, [0; 32]),
+            DocumentChangeKey::new(vec![0, 1], DocumentType::Snapshot, [0; 32]),
+            DocumentChangeKey::new(vec![1], DocumentType::Snapshot, [0; 32]),
+            DocumentChangeKey::new(vec![1], DocumentType::Incremental, [0; 32]),
+            DocumentChangeKey::new(vec![1], DocumentType::Incremental, [1; 32]),
+        ];
+        for pair in keys.windows(2) {
+            assert_eq!(
+                pair[0].cmp(&pair[1]),
+                pair[0].encode_ordered().cmp(&pair[1].encode_ordered())
+            );
+            assert_eq!(
+                DocumentChangeKey::decode_ordered(&pair[0].encode_ordered()).unwrap(),
+                pair[0]
+            );
+        }
+    }
+
+    #[test]
+    fn ordered_codec_rejects_malformed_bytes() {
+        for bytes in [vec![], vec![0], vec![0, 1], vec![0, 0, 2], vec![0, 0, 0]] {
+            assert!(DocumentChangeKey::decode_ordered(&bytes).is_err());
+        }
     }
 }

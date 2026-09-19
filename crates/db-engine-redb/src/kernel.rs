@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use async_stream::stream;
 use db_btree::{BTreeRead, BTreeTransaction};
-use db_btree_redb::{RedbDatabase, RedbDatabaseTransaction};
+use db_btree_redb::{Bytes, RedbDatabase, RedbDatabaseTransaction};
 use db_engine::{EngineError, EngineResult, Kernel, KernelTransaction};
-use db_value::Row;
+
 use futures::Stream;
 
 #[derive(Clone)]
@@ -43,7 +43,7 @@ impl RedbKernelTransaction {
     pub(crate) fn entries(
         &self,
         table: &str,
-    ) -> db_btree_redb::RedbBTreeScopedTransaction<'_, Row, Row> {
+    ) -> db_btree_redb::RedbBTreeScopedTransaction<'_, Bytes, Bytes> {
         self.database.table(table)
     }
 }
@@ -51,44 +51,46 @@ impl RedbKernelTransaction {
 impl KernelTransaction for RedbKernelTransaction {
     async fn ensure_table(&mut self, name: &str) -> EngineResult<()> {
         self.database
-            .create_table::<Row, Row>(name)
+            .create_table::<Bytes, Bytes>(name)
             .map_err(EngineError::custom)
     }
 
     async fn drop_table(&mut self, name: &str) -> EngineResult<()> {
         self.database
-            .drop_table::<Row, Row>(name)
+            .drop_table::<Bytes, Bytes>(name)
             .map(|_| ())
             .map_err(EngineError::custom)
     }
 
-    async fn get_entry(&self, table: &str, key: &Row) -> EngineResult<Option<Row>> {
+    async fn get_bytes(&self, table: &str, key: &[u8]) -> EngineResult<Option<Vec<u8>>> {
         self.entries(table)
-            .get(key)
+            .get(&Bytes(key.to_vec()))
             .await
+            .map(|value| value.map(|value| value.0))
             .map_err(EngineError::custom)
     }
 
-    fn scan_entries(&self, table: &str) -> impl Stream<Item = EngineResult<(Row, Row)>> {
+    fn scan_bytes(&self, table: &str) -> impl Stream<Item = EngineResult<(Vec<u8>, Vec<u8>)>> {
         stream! {
             let entries = self.entries(table);
             for await entry in entries.range(..) {
-                yield entry.map_err(EngineError::custom);
+                yield entry.map(|(key, value)| (key.0, value.0)).map_err(EngineError::custom);
             }
         }
     }
 
-    async fn put_entry(&mut self, table: &str, key: Row, value: Row) -> EngineResult<()> {
+    async fn put_bytes(&mut self, table: &str, key: Vec<u8>, value: Vec<u8>) -> EngineResult<()> {
         self.entries(table)
-            .insert(key, value)
+            .insert(Bytes(key), Bytes(value))
             .await
             .map_err(EngineError::custom)
     }
 
-    async fn remove_entry(&mut self, table: &str, key: &Row) -> EngineResult<Option<Row>> {
+    async fn remove_bytes(&mut self, table: &str, key: &[u8]) -> EngineResult<Option<Vec<u8>>> {
         self.entries(table)
-            .remove(key)
+            .remove(&Bytes(key.to_vec()))
             .await
+            .map(|value| value.map(|value| value.0))
             .map_err(EngineError::custom)
     }
 

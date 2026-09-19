@@ -437,6 +437,8 @@ name = "db-engine"
 version = "0.1.0"
 dependencies = [
  "async-lock",
+ "async-stream",
+ "db-btree",
  "db-query",
  "db-schema",
  "db-value",

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use db_value::{Row, Value};
 use futures::Stream;
 
-use crate::{EngineResult, KernelTransaction, TableGenerationId};
+use crate::{EngineResult, KernelTransaction, RowTable, TableGenerationId};
 use uuid::Uuid;
 
 const ROWS: &str = "__db_rows";

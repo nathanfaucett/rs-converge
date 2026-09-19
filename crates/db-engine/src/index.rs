@@ -6,7 +6,7 @@ use futures::{StreamExt, pin_mut};
 
 use crate::{
     ColumnGenerationId, EngineError, EngineResult, IndexGenerationId, KernelTransaction, RowCodec,
-    TableGenerationId,
+    RowTable, TableGenerationId,
     catalog::ENGINE_INDICES,
     executor::{materialize_defaults, row_id},
     schema::{columns, table_label, table_schema_for},

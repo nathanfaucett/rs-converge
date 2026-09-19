@@ -6,7 +6,7 @@ use futures::{StreamExt, pin_mut};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ColumnGenerationId, EngineError, EngineResult, IndexGenerationId, KernelTransaction,
+    ColumnGenerationId, EngineError, EngineResult, IndexGenerationId, KernelTransaction, RowTable,
     TableGenerationId,
     catalog::{ENGINE_SCHEMA_TOMBSTONES, ENGINE_TABLE_FIELDS, ENGINE_TABLES},
 };

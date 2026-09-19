@@ -20,6 +20,7 @@ std = [
   "async-lock/std",
   "serde/std",
   "serde_json/std",
+  "db-btree/std",
   "db-schema/std",
   "db-value/std",
   "db-query/std"
@@ -29,16 +30,18 @@ wasm = ["dep:tsify", "dep:serde-wasm-bindgen", "dep:wasm-bindgen", "db-value/was
 
 [dependencies]
 # internal dependencies
-db-value = { path = "../db-value", default-features = false, features = [] }
+db-btree = { path = "../db-btree", default-features = false, features = [] }
 db-query = { path = "../db-query", default-features = false, features = [] }
 db-schema = { path = "../db-schema", default-features = false, features = [] }
+db-value = { path = "../db-value", default-features = false, features = [] }
 
 
-async-lock = { version = "3.4", default-features = false, features = [
-] }
+# external dependencies
+async-lock = { version = "3.4", default-features = false, features = [] }
+async-stream = { version = "0.3", default-features = false, features = [] }
 futures = { version = "0.3", default-features = false, features = [] }
-serde = { version = "1.0", default-features = false, features = ["alloc", "derive"] }
 postcard = { version = "1.1", default-features = false, features = ["alloc"] }
+serde = { version = "1.0", default-features = false, features = ["alloc", "derive"] }
 serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
 sha2 = { version = "0.10", default-features = false, features = [] }
 thiserror = { version = "2.0", default-features = false }

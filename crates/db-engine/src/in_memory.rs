@@ -1,7 +1,7 @@
 use alloc::{collections::BTreeMap, string::String, sync::Arc, vec, vec::Vec};
 
 use async_lock::RwLock;
-use db_value::Row;
+
 use futures::{Stream, stream};
 
 use crate::{
@@ -10,7 +10,7 @@ use crate::{
     kernel::{Kernel, KernelTransaction},
 };
 
-type Tables = BTreeMap<String, BTreeMap<Row, Row>>;
+type Tables = BTreeMap<String, BTreeMap<Vec<u8>, Vec<u8>>>;
 
 struct State {
     revision: u64,
@@ -63,19 +63,19 @@ impl Kernel for InMemoryKernel {
 }
 
 impl InMemoryKernelTransaction {
-    fn table(&self, name: &str) -> EngineResult<&BTreeMap<Row, Row>> {
+    fn table(&self, name: &str) -> EngineResult<&BTreeMap<Vec<u8>, Vec<u8>>> {
         self.tables
             .get(name)
             .ok_or_else(|| EngineError::custom("Table not found"))
     }
 
-    fn table_mut(&mut self, name: &str) -> EngineResult<&mut BTreeMap<Row, Row>> {
+    fn table_mut(&mut self, name: &str) -> EngineResult<&mut BTreeMap<Vec<u8>, Vec<u8>>> {
         self.tables
             .get_mut(name)
             .ok_or_else(|| EngineError::custom("Table not found"))
     }
 
-    fn scan(&self, name: &str) -> Vec<EngineResult<(Row, Row)>> {
+    fn scan(&self, name: &str) -> Vec<EngineResult<(Vec<u8>, Vec<u8>)>> {
         match self.table(name) {
             Ok(table) => table
                 .iter()
@@ -99,20 +99,20 @@ impl KernelTransaction for InMemoryKernelTransaction {
             .ok_or_else(|| EngineError::custom("Table not found"))
     }
 
-    async fn get_entry(&self, table: &str, key: &Row) -> EngineResult<Option<Row>> {
+    async fn get_bytes(&self, table: &str, key: &[u8]) -> EngineResult<Option<Vec<u8>>> {
         Ok(self.table(table)?.get(key).cloned())
     }
 
-    fn scan_entries(&self, table: &str) -> impl Stream<Item = EngineResult<(Row, Row)>> {
+    fn scan_bytes(&self, table: &str) -> impl Stream<Item = EngineResult<(Vec<u8>, Vec<u8>)>> {
         stream::iter(self.scan(table))
     }
 
-    async fn put_entry(&mut self, table: &str, key: Row, value: Row) -> EngineResult<()> {
+    async fn put_bytes(&mut self, table: &str, key: Vec<u8>, value: Vec<u8>) -> EngineResult<()> {
         self.table_mut(table)?.insert(key, value);
         Ok(())
     }
 
-    async fn remove_entry(&mut self, table: &str, key: &Row) -> EngineResult<Option<Row>> {
+    async fn remove_bytes(&mut self, table: &str, key: &[u8]) -> EngineResult<Option<Vec<u8>>> {
         Ok(self.table_mut(table)?.remove(key))
     }
 

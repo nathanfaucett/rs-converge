@@ -6,7 +6,9 @@ use std::{
     },
 };
 
-use db_engine::{DirectRowCodec, Engine, Kernel, KernelTransaction, RowCodec, TableGenerationId};
+use db_engine::{
+    DirectRowCodec, Engine, Kernel, KernelTransaction, RowCodec, RowTable, TableGenerationId,
+};
 use db_engine_automerge::AutomergeRowCodec;
 use db_engine_redb::RedbKernel;
 use db_query::{
