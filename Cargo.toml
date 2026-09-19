@@ -29,9 +29,10 @@ db-sql-translator = { path = "crates/db-sql-translator", default-features = fals
 
 [dev-dependencies]
 db-examples-util = { path = "crates/db-examples-util" }
+db-sync = { path = "crates/db-sync", default-features = false, features = [] }
 db-test = { path = "crates/db-test", default-features = false, features = [] }
-redb = { version = "4.1" }
-tokio = { version = "1.52", features = ["full"] }
+redb = { version = "4.3" }
+tokio = { version = "1.53", features = ["full"] }
 uuid = { version = "1.23", features = ["v7"] }
 
 [workspace]
@@ -42,6 +43,7 @@ members = [
   "crates/db-btree-redb",
   "crates/db-btree-automerge",
   "crates/db-sql-translator",
+  "crates/db-sync",
   "crates/db-wasm",
   "crates/db-btree",
   "crates/db-value",

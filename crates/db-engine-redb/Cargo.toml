@@ -22,4 +22,4 @@ db-value = { path = "../db-value", default-features = false, features = ["redb",
 # external dependencies
 async-stream = { version = "0.3", default-features = false, features = [] }
 futures = { version = "0.3", default-features = false, features = ["std"] }
-redb = { version = "4.1", default-features = false, features = ["uuid"] }
+redb = { version = "4.3", default-features = false, features = ["uuid"] }

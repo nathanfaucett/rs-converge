@@ -32,7 +32,7 @@ serde = { version = "1.0", default-features = false, features = ["alloc", "deriv
 serde_json = { version = "1.0", default-features = false, features = ["alloc"], optional = true }
 
 # redb
-redb = { version = "4.1", default-features = false, features = ["uuid"], optional = true }
+redb = { version = "4.3", default-features = false, features = ["uuid"], optional = true }
 postcard = { version = "1.1", default-features = false, features = ["heapless-cas"], optional = true }
 
 # automerge

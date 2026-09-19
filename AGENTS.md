@@ -1,5 +1,7 @@
 # AGENTS.md
 
+Dev mode: no users, no backwards compatibility, refactor freely.
+
 ## Patterns & Conventions
 
 - Default to `no_std`; enable `std` only when required (IO, threading, async runtimes).

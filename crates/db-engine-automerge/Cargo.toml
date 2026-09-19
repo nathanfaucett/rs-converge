@@ -34,4 +34,4 @@ db-schema = { path = "../db-schema", default-features = false, features = [] }
 
 # external dependencies
 futures = { version = "0.3", default-features = false, features = ["executor"] }
-redb = { version = "4.1", default-features = false, features = ["uuid"] }
+redb = { version = "4.3", default-features = false, features = ["uuid"] }

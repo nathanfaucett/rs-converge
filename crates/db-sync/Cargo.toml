@@ -1,0 +1,31 @@
+[package]
+name = "db-sync"
+description = "Transport-neutral synchronization for db-engine"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "db_sync"
+path = "src/lib.rs"
+
+[dependencies]
+# internal dependencies
+db-engine = { path = "../db-engine", default-features = false, features = [] }
+
+# external dependencies
+postcard = { version = "1.1", default-features = false, features = ["alloc"] }
+serde = { version = "1.0", default-features = false, features = ["alloc", "derive"] }
+thiserror = { version = "2.0", default-features = false, features = [] }
+
+[dev-dependencies]
+# internal dependencies
+db-engine = { path = "../db-engine", default-features = false, features = ["in-memory", "std"] }
+db-schema = { path = "../db-schema", default-features = false, features = [] }
+db-value = { path = "../db-value", default-features = false, features = [] }
+
+# external dependencies
+futures = { version = "0.3", default-features = false, features = ["async-await", "executor", "std"] }
