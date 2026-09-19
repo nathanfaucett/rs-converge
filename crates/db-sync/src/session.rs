@@ -16,17 +16,13 @@ pub enum SyncRole {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionConfig {
-    pub replication_domain: [u8; 32],
-    pub row_codec: [u8; 32],
     pub max_envelopes_per_frame: usize,
     pub checkpoint_threshold: Option<usize>,
 }
 
 impl SessionConfig {
-    pub const fn new(replication_domain: [u8; 32], row_codec: [u8; 32]) -> Self {
+    pub const fn new() -> Self {
         Self {
-            replication_domain,
-            row_codec,
             max_envelopes_per_frame: 64,
             checkpoint_threshold: None,
         }
@@ -56,12 +52,6 @@ pub enum SyncError<E> {
     #[error("incompatible protocol version: {0}")]
     IncompatibleProtocol(u16),
 
-    #[error("incompatible replication domain")]
-    IncompatibleReplicationDomain,
-
-    #[error("incompatible row codec")]
-    IncompatibleRowCodec,
-
     #[error("unexpected sync message")]
     UnexpectedMessage,
 }
@@ -84,12 +74,12 @@ where
 
     match role {
         SyncRole::Initiator => {
-            send_hello(engine, transport, config).await?;
-            receive_hello(transport, config).await?;
+            send_hello(engine, transport).await?;
+            receive_hello(transport).await?;
         }
         SyncRole::Responder => {
-            receive_hello(transport, config).await?;
-            send_hello(engine, transport, config).await?;
+            receive_hello(transport).await?;
+            send_hello(engine, transport).await?;
         }
     }
 
@@ -109,7 +99,6 @@ where
 async fn send_hello<K, R, T>(
     engine: &Engine<K, R>,
     transport: &mut T,
-    config: &SessionConfig,
 ) -> Result<(), SyncError<T::Error>>
 where
     K: Kernel,
@@ -119,17 +108,12 @@ where
 {
     let hello = SyncHello {
         protocol_version: PROTOCOL_VERSION,
-        replication_domain: config.replication_domain,
-        row_codec: config.row_codec,
         frontier: engine.frontier().await?,
     };
     send_message(transport, &SyncMessage::Hello(hello)).await
 }
 
-async fn receive_hello<T>(
-    transport: &mut T,
-    config: &SessionConfig,
-) -> Result<(), SyncError<T::Error>>
+async fn receive_hello<T>(transport: &mut T) -> Result<(), SyncError<T::Error>>
 where
     T: SyncTransport,
     T::Error: core::fmt::Display,
@@ -139,12 +123,6 @@ where
     };
     if hello.protocol_version != PROTOCOL_VERSION {
         return Err(SyncError::IncompatibleProtocol(hello.protocol_version));
-    }
-    if hello.replication_domain != config.replication_domain {
-        return Err(SyncError::IncompatibleReplicationDomain);
-    }
-    if hello.row_codec != config.row_codec {
-        return Err(SyncError::IncompatibleRowCodec);
     }
     Ok(())
 }

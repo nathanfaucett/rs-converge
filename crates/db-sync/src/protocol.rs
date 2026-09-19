@@ -3,13 +3,11 @@ use alloc::vec::Vec;
 use db_engine::Frontier;
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 1;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SyncHello {
     pub protocol_version: u16,
-    pub replication_domain: [u8; 32],
-    pub row_codec: [u8; 32],
     pub frontier: Frontier,
 }
 

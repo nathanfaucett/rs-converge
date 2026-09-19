@@ -136,7 +136,7 @@ fn table(name: &str) -> TableSchema {
 }
 
 fn config() -> SessionConfig {
-    SessionConfig::new([1; 32], [2; 32])
+    SessionConfig::new()
 }
 
 #[test]

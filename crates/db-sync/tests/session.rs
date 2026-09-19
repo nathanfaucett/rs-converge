@@ -73,7 +73,7 @@ async fn sync(
     left: &Engine<InMemoryKernel, DirectRowCodec>,
     right: &Engine<InMemoryKernel, DirectRowCodec>,
 ) {
-    let config = SessionConfig::new([1; 32], [2; 32]);
+    let config = SessionConfig::new();
     let _ = sync_with(left, right, &config).await;
 }
 
@@ -169,7 +169,7 @@ fn bootstraps_an_empty_replica_with_a_checkpoint() {
         let left = Engine::new(InMemoryKernel::new(), DirectRowCodec);
         let right = Engine::new(InMemoryKernel::new(), DirectRowCodec);
         left.create_table(table("users")).await.unwrap();
-        let mut config = SessionConfig::new([1; 32], [2; 32]);
+        let mut config = SessionConfig::new();
         config.checkpoint_threshold = Some(0);
 
         let frames = sync_with(&left, &right, &config).await;
@@ -190,7 +190,7 @@ fn disabled_threshold_uses_envelopes_only() {
         let right = Engine::new(InMemoryKernel::new(), DirectRowCodec);
         left.create_table(table("users")).await.unwrap();
 
-        let frames = sync_with(&left, &right, &SessionConfig::new([1; 32], [2; 32])).await;
+        let frames = sync_with(&left, &right, &SessionConfig::new()).await;
 
         assert!(
             !frames
@@ -206,7 +206,7 @@ fn transfers_writes_made_during_checkpoint_bootstrap() {
         let left = Engine::new(InMemoryKernel::new(), DirectRowCodec);
         let right = Engine::new(InMemoryKernel::new(), DirectRowCodec);
         left.create_table(table("users")).await.unwrap();
-        let mut config = SessionConfig::new([1; 32], [2; 32]);
+        let mut config = SessionConfig::new();
         config.checkpoint_threshold = Some(0);
         let (left_transport, mut right_transport) = transport_pair();
         let mut left_transport = WriteAfterCheckpoint {
@@ -238,13 +238,11 @@ fn rejects_malformed_checkpoint_frames() {
     block_on(async {
         let engine = Engine::new(InMemoryKernel::new(), DirectRowCodec);
         engine.create_table(table("users")).await.unwrap();
-        let mut config = SessionConfig::new([1; 32], [2; 32]);
+        let mut config = SessionConfig::new();
         config.checkpoint_threshold = Some(0);
         let (mut transport, peer) = transport_pair();
         let hello = SyncMessage::Hello(SyncHello {
             protocol_version: PROTOCOL_VERSION,
-            replication_domain: config.replication_domain,
-            row_codec: config.row_codec,
             frontier: Frontier::default(),
         });
         for message in [

@@ -14,7 +14,7 @@ fn cluster(nodes: usize) -> Cluster<InMemoryKernel, DirectRowCodec> {
 }
 
 fn config() -> SessionConfig {
-    SessionConfig::new([1; 32], [2; 32])
+    SessionConfig::new()
 }
 
 #[tokio::test]
