@@ -1,13 +1,8 @@
-use db::{
-    engine::{DirectRowCodec, Engine, InMemoryKernel},
-    sql_translator::SqlTranslator,
-};
+use db::{DirectRowCodec, Engine, InMemoryKernel, SqlTranslator};
 
-#[tokio::main]
-async fn main() {
-    db_examples_util::run(
+fn main() {
+    futures::executor::block_on(db_examples_util::run(
         Engine::new(InMemoryKernel::new(), DirectRowCodec),
         SqlTranslator,
-    )
-    .await;
+    ));
 }

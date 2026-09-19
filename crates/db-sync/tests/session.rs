@@ -1,7 +1,7 @@
 use core::fmt;
 use std::{cell::RefCell, rc::Rc};
 
-use db_engine::{DirectRowCodec, Engine, Frontier, InMemoryKernel};
+use db_engine::{CheckpointRow, DirectRowCodec, Engine, Frontier, InMemoryKernel, SchemaChange};
 use db_schema::{ColumnSchema, TableSchema};
 use db_sync::{
     PROTOCOL_VERSION, SessionConfig, SyncError, SyncHello, SyncMessage, SyncRole, SyncTransport,
@@ -307,12 +307,27 @@ fn delayed_child_applies_after_checkpoint_bootstrap() {
 }
 
 #[test]
-fn rejects_malformed_checkpoint_frames() {
+fn rejects_malformed_checkpoint_frames_without_partial_imports() {
     block_on(async {
         let engine = Engine::new(InMemoryKernel::new(), DirectRowCodec);
         engine.create_table(table("users")).await.unwrap();
-        let mut config = SessionConfig::new();
-        config.checkpoint_threshold = Some(0);
+        let initial_frontier = engine.frontier().await.unwrap();
+        let source = Engine::new(InMemoryKernel::new(), DirectRowCodec);
+        source.create_table(table("malformed")).await.unwrap();
+        let mut checkpoint = source.export_checkpoint().await.unwrap();
+        let table = checkpoint
+            .schema
+            .iter()
+            .find_map(|change| match change {
+                SchemaChange::CreateTable { table, .. } => Some(*table),
+                _ => None,
+            })
+            .unwrap();
+        checkpoint.rows.push(CheckpointRow {
+            table,
+            row: table.0,
+            state: vec![0xff],
+        });
         let (mut transport, peer) = transport_pair();
         let hello = SyncMessage::Hello(SyncHello {
             protocol_version: PROTOCOL_VERSION,
@@ -321,17 +336,24 @@ fn rejects_malformed_checkpoint_frames() {
         for message in [
             hello,
             SyncMessage::Frontier(Frontier::default()),
-            SyncMessage::Checkpoint(vec![0]),
+            SyncMessage::Checkpoint(checkpoint.encode().unwrap()),
         ] {
             peer.sender
                 .unbounded_send(postcard::to_allocvec(&message).unwrap())
                 .unwrap();
         }
 
-        let error = synchronize(&engine, &mut transport, &config, SyncRole::Initiator)
-            .await
-            .unwrap_err();
+        let error = synchronize(
+            &engine,
+            &mut transport,
+            &SessionConfig::new(),
+            SyncRole::Initiator,
+        )
+        .await
+        .unwrap_err();
 
-        assert!(matches!(error, SyncError::Protocol(_)));
+        assert!(matches!(error, SyncError::Engine(_)));
+        assert_eq!(engine.frontier().await.unwrap(), initial_frontier);
+        assert!(engine.table_schema("malformed").await.is_err());
     });
 }

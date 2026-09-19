@@ -34,8 +34,12 @@ db-value = { path = "crates/db-value", default-features = false, features = [] }
 uuid = { version = "1.23", default-features = false, features = [] }
 
 [dev-dependencies]
+# Internal dependencies
 db-examples-util = { path = "crates/db-examples-util" }
 db-test = { path = "crates/db-test", default-features = false, features = [] }
+
+# External dependencies
+futures = { version = "0.3", default-features = false, features = ["async-await", "executor", "std"] }
 
 [workspace]
 members = [

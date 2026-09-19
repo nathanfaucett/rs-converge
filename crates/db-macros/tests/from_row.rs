@@ -1,3 +1,5 @@
+extern crate db_value as db;
+
 use db_macros::FromRow;
 use db_value::{FromRow as _, Row, Value};
 use uuid::Uuid;

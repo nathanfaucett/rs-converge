@@ -15,6 +15,9 @@ pub use db_macros::FromRow;
 #[cfg(feature = "sql")]
 pub use db_sql_translator::SqlTranslator;
 #[cfg(feature = "sync")]
-pub use db_sync::{SessionConfig, SyncError, SyncHello, SyncMessage, SyncResult};
+pub use db_sync::{
+    SessionConfig, SyncError, SyncHello, SyncMessage, SyncResult, SyncRole, SyncTransport,
+    synchronize,
+};
 pub use db_value::{FromRow, FromRowError, FromValue, Row, Value, ValueType, decode, value};
 pub use uuid::Uuid;

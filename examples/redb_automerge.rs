@@ -3,9 +3,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use db::{
-    automerge::AutomergeRowCodec, engine::Engine, redb::RedbKernel, sql_translator::SqlTranslator,
-};
+use db::{AutomergeRowCodec, Engine, RedbKernel, SqlTranslator, redb};
 
 fn database_path() -> std::path::PathBuf {
     let nanos = SystemTime::now()
@@ -15,12 +13,13 @@ fn database_path() -> std::path::PathBuf {
     std::env::temp_dir().join(format!("db-redb-automerge-example-{nanos}.redb"))
 }
 
-#[tokio::main]
-async fn main() {
-    let path = database_path();
-    let database = Arc::new(redb::Database::create(&path).expect("open Redb database"));
-    let engine = Engine::new(RedbKernel::new(database), AutomergeRowCodec::new());
+fn main() {
+    futures::executor::block_on(async {
+        let path = database_path();
+        let database = Arc::new(redb::Database::create(&path).expect("open Redb database"));
+        let engine = Engine::new(RedbKernel::new(database), AutomergeRowCodec::new());
 
-    db_examples_util::run(engine, SqlTranslator).await;
-    std::fs::remove_file(path).expect("remove Redb database");
+        db_examples_util::run(engine, SqlTranslator).await;
+        std::fs::remove_file(path).expect("remove Redb database");
+    });
 }

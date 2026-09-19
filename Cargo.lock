@@ -388,6 +388,7 @@ dependencies = [
  "db-sync",
  "db-test",
  "db-value",
+ "futures",
  "uuid",
 ]
 

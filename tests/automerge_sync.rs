@@ -1,98 +1,144 @@
-#![cfg(all(feature = "automerge", feature = "redb"))]
+#![cfg(all(feature = "automerge", feature = "redb", feature = "sync"))]
 
-use db::{Row, SessionConfig, Uuid, Value};
-use db_test::{automerge_redb_cluster, run};
+use std::{
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
-const CREATE_PEOPLE: &str = "CREATE TABLE people (id UUID PRIMARY KEY, name TEXT, city TEXT)";
-const INSERT_ADA: &str =
-    "INSERT INTO people VALUES (CAST('018f0f8e-7b6d-7c4a-8f12-123456789abc' AS UUID), 'Ada', NULL)";
-const SELECT_PEOPLE: &str = "SELECT id, name, city FROM people";
+use db::{
+    AutomergeRowCodec, Engine, RedbKernel, SessionConfig, SqlTranslator, SyncRole, Value, redb,
+    synchronize,
+};
+use db_test::{in_memory_transport_pair, run};
 
-fn key() -> Row {
-    Row::new(vec![Value::Uuid(
-        Uuid::parse_str("018f0f8e-7b6d-7c4a-8f12-123456789abc").unwrap(),
-    )])
+static DATABASE_ID: AtomicU64 = AtomicU64::new(0);
+
+fn database_path() -> PathBuf {
+    let id = DATABASE_ID.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("db-root-sync-{}-{id}.redb", std::process::id()))
+}
+
+fn replica(path: &Path) -> Engine<RedbKernel, AutomergeRowCodec> {
+    Engine::new(
+        RedbKernel::new(Arc::new(redb::Database::create(path).unwrap())),
+        AutomergeRowCodec::new(),
+    )
+}
+
+async fn execute(engine: &Engine<RedbKernel, AutomergeRowCodec>, sql: &str) -> Vec<db::Row> {
+    engine
+        .translate_and_execute(sql, &SqlTranslator)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap()
+        .rows
+}
+
+async fn sync(
+    left: &Engine<RedbKernel, AutomergeRowCodec>,
+    right: &Engine<RedbKernel, AutomergeRowCodec>,
+    config: &SessionConfig,
+) {
+    let (mut left_transport, mut right_transport) = in_memory_transport_pair();
+    let (left_result, right_result) = futures::join!(
+        synchronize(left, &mut left_transport, config, SyncRole::Initiator),
+        synchronize(right, &mut right_transport, config, SyncRole::Responder),
+    );
+    left_result.unwrap();
+    right_result.unwrap();
 }
 
 #[test]
-fn persistent_automerge_replicas_merge_different_columns() {
+fn durable_automerge_engines_bootstrap_an_empty_peer_from_a_checkpoint() {
     run(async {
-        let (_cleanup, cluster) = automerge_redb_cluster(2);
-        let config = SessionConfig::new();
-        cluster.exec(0, CREATE_PEOPLE).await;
-        cluster.exec(0, INSERT_ADA).await;
-        cluster.sync(0, 1, &config).await.unwrap();
-        cluster.exec(0, "UPDATE people SET name = 'Grace' WHERE id = CAST('018f0f8e-7b6d-7c4a-8f12-123456789abc' AS UUID)").await;
-        cluster.exec(1, "UPDATE people SET city = 'Paris' WHERE id = CAST('018f0f8e-7b6d-7c4a-8f12-123456789abc' AS UUID)").await;
-        cluster.sync_all(&config).await.unwrap();
-        cluster.assert_converged(SELECT_PEOPLE).await;
-    });
-}
+        let source_path = database_path();
+        let destination_path = database_path();
+        let source = replica(&source_path);
+        let destination = replica(&destination_path);
+        let mut config = SessionConfig::new();
+        config.checkpoint_threshold = Some(0);
 
-#[test]
-fn same_column_conflicts_resolve_and_replicate() {
-    run(async {
-        let (_cleanup, cluster) = automerge_redb_cluster(2);
-        let config = SessionConfig::new();
-        cluster.exec(0, CREATE_PEOPLE).await;
-        cluster.exec(0, INSERT_ADA).await;
-        cluster.sync(0, 1, &config).await.unwrap();
-        cluster.exec(0, "UPDATE people SET name = 'Grace' WHERE id = CAST('018f0f8e-7b6d-7c4a-8f12-123456789abc' AS UUID)").await;
-        cluster.exec(1, "UPDATE people SET name = 'Linus' WHERE id = CAST('018f0f8e-7b6d-7c4a-8f12-123456789abc' AS UUID)").await;
-        cluster.sync_all(&config).await.unwrap();
+        execute(
+            &source,
+            "CREATE TABLE people (id UUID PRIMARY KEY, name TEXT, city TEXT)",
+        )
+        .await;
+        execute(
+            &source,
+            "INSERT INTO people VALUES (CAST('018f0f8e-7b6d-7c4a-8f12-123456789abc' AS UUID), 'Ada', NULL)",
+        )
+        .await;
+        sync(&source, &destination, &config).await;
+
         assert_eq!(
-            cluster.row_conflicts(0, "people", &key()).await.unwrap(),
-            vec!["name"]
+            execute(&destination, "SELECT id, name, city FROM people").await,
+            execute(&source, "SELECT id, name, city FROM people").await
         );
-        cluster
-            .resolve_row(
-                0,
-                "people",
-                &key(),
-                vec![("name".into(), Value::from("Margaret"))],
-            )
-            .await
-            .unwrap();
-        cluster.sync_all(&config).await.unwrap();
-        assert!(
-            cluster
-                .row_conflicts(0, "people", &key())
-                .await
-                .unwrap()
-                .is_empty()
+        assert_eq!(
+            source.frontier().await.unwrap(),
+            destination.frontier().await.unwrap()
         );
-        assert!(
-            cluster
-                .row_conflicts(1, "people", &key())
-                .await
-                .unwrap()
-                .is_empty()
-        );
-        cluster.assert_converged(SELECT_PEOPLE).await;
+        drop((source, destination));
+        std::fs::remove_file(source_path).unwrap();
+        std::fs::remove_file(destination_path).unwrap();
     });
 }
 
 #[test]
-fn row_tombstone_supersedes_delayed_update() {
+fn durable_automerge_engines_converge_offline_writes_after_sync() {
     run(async {
-        let (_cleanup, cluster) = automerge_redb_cluster(2);
+        let left_path = database_path();
+        let right_path = database_path();
+        let left = replica(&left_path);
+        let right = replica(&right_path);
         let config = SessionConfig::new();
-        cluster.exec(0, CREATE_PEOPLE).await;
-        cluster.exec(0, INSERT_ADA).await;
-        cluster.sync(0, 1, &config).await.unwrap();
-        cluster.exec(0, "UPDATE people SET name = 'Grace' WHERE id = CAST('018f0f8e-7b6d-7c4a-8f12-123456789abc' AS UUID)").await;
-        let update = cluster
-            .export_missing_envelopes(0, 1)
-            .await
-            .unwrap()
-            .pop()
-            .unwrap();
-        cluster.exec(1, "DELETE FROM people WHERE id = CAST('018f0f8e-7b6d-7c4a-8f12-123456789abc' AS UUID)").await;
-        assert!(matches!(
-            cluster.import_envelope(1, update).await.unwrap(),
-            db::EnvelopeOutcome::Superseded
-        ));
-        cluster.sync_all(&config).await.unwrap();
-        cluster.assert_converged(SELECT_PEOPLE).await;
+
+        execute(
+            &left,
+            "CREATE TABLE people (id UUID PRIMARY KEY, name TEXT, city TEXT)",
+        )
+        .await;
+        execute(
+            &left,
+            "INSERT INTO people VALUES (CAST('018f0f8e-7b6d-7c4a-8f12-123456789abc' AS UUID), 'Ada', NULL)",
+        )
+        .await;
+        sync(&left, &right, &config).await;
+        execute(
+            &left,
+            "UPDATE people SET name = 'Grace' WHERE id = CAST('018f0f8e-7b6d-7c4a-8f12-123456789abc' AS UUID)",
+        )
+        .await;
+        execute(
+            &right,
+            "UPDATE people SET city = 'Paris' WHERE id = CAST('018f0f8e-7b6d-7c4a-8f12-123456789abc' AS UUID)",
+        )
+        .await;
+        sync(&left, &right, &config).await;
+
+        let expected = vec![db::Row::new(vec![
+            Value::Uuid(db::Uuid::parse_str("018f0f8e-7b6d-7c4a-8f12-123456789abc").unwrap()),
+            Value::from("Grace"),
+            Value::from("Paris"),
+        ])];
+        assert_eq!(
+            execute(&left, "SELECT id, name, city FROM people").await,
+            expected
+        );
+        assert_eq!(
+            execute(&right, "SELECT id, name, city FROM people").await,
+            expected
+        );
+        assert_eq!(
+            left.frontier().await.unwrap(),
+            right.frontier().await.unwrap()
+        );
+        drop((left, right));
+        std::fs::remove_file(left_path).unwrap();
+        std::fs::remove_file(right_path).unwrap();
     });
 }
