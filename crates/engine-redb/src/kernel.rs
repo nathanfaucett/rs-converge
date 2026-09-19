@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_stream::stream;
 use btree::{BTreeRead, BTreeTransaction};
-use btree_reconverge::{Bytes, RedbDatabase, RedbDatabaseTransaction};
+use btree_redb::{Bytes, RedbDatabase, RedbDatabaseTransaction};
 use engine::{EngineError, EngineResult, Kernel, KernelTransaction};
 
 use futures::Stream;
@@ -13,7 +13,7 @@ pub struct RedbKernel {
 }
 
 impl RedbKernel {
-    pub fn new(database: Arc<reconverge::Database>) -> Self {
+    pub fn new(database: Arc<redb::Database>) -> Self {
         Self {
             database: RedbDatabase::new(database),
         }
@@ -43,7 +43,7 @@ impl RedbKernelTransaction {
     pub(crate) fn entries(
         &self,
         table: &str,
-    ) -> btree_reconverge::RedbBTreeScopedTransaction<'_, Bytes, Bytes> {
+    ) -> btree_redb::RedbBTreeScopedTransaction<'_, Bytes, Bytes> {
         self.database.table(table)
     }
 }

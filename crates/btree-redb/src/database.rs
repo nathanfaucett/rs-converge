@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
-use reconverge::{Database, WriteTransaction};
+use redb::{Database, WriteTransaction};
 
 use btree::BTreeResult;
 
 use crate::{
     RedbBTreeScopedTransaction,
-    reconverge::{RedbKey, RedbValue, table_definition},
+    redb::{RedbKey, RedbValue, table_definition},
 };
 
 #[derive(Clone)]

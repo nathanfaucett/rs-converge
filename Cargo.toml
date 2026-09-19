@@ -37,7 +37,7 @@ uuid = { version = "1.23", default-features = false, features = [] }
 [dev-dependencies]
 # Internal dependencies
 examples-util = { path = "crates/examples-util" }
-test = { path = "crates/test", default-features = false, features = [] }
+converge-test = { package = "test", path = "crates/test", default-features = false, features = [] }
 
 # External dependencies
 futures = { version = "0.3", default-features = false, features = ["async-await", "executor", "std"] }

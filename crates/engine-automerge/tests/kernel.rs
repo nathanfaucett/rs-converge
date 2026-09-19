@@ -10,7 +10,7 @@ use engine::{
     DirectRowCodec, Engine, Kernel, KernelTransaction, RowCodec, RowTable, TableGenerationId,
 };
 use engine_automerge::AutomergeRowCodec;
-use engine_reconverge::RedbKernel;
+use engine_redb::RedbKernel;
 use futures::executor::block_on;
 use query::{
     AlterTableOperation, DataDefinition, Query, QueryColumn, QueryDelete, QueryExpr,
@@ -60,7 +60,7 @@ fn people_schema() -> TableSchema {
 
 fn replica(path: &PathBuf) -> Engine<RedbKernel, AutomergeRowCodec> {
     Engine::new(
-        RedbKernel::new(Arc::new(reconverge::Database::create(path).unwrap())),
+        RedbKernel::new(Arc::new(redb::Database::create(path).unwrap())),
         AutomergeRowCodec::new(),
     )
 }
@@ -144,7 +144,7 @@ async fn add_column(engine: &Engine<RedbKernel, AutomergeRowCodec>, name: &str, 
 #[test]
 fn logical_rows_persist_in_one_kernel_transaction() {
     let path = database_path();
-    let kernel = RedbKernel::new(Arc::new(reconverge::Database::create(&path).unwrap()));
+    let kernel = RedbKernel::new(Arc::new(redb::Database::create(&path).unwrap()));
     block_on(async {
         let reconciler = AutomergeRowCodec::new();
         let table = TableGenerationId(Uuid::from_u128(100));
@@ -181,7 +181,7 @@ fn logical_rows_persist_in_one_kernel_transaction() {
 #[test]
 fn redb_kernel_pairs_with_a_non_automerge_reconciler() {
     let path = database_path();
-    let kernel = RedbKernel::new(Arc::new(reconverge::Database::create(&path).unwrap()));
+    let kernel = RedbKernel::new(Arc::new(redb::Database::create(&path).unwrap()));
     block_on(async {
         let reconciler = DirectRowCodec;
         let table = TableGenerationId(Uuid::from_u128(101));
@@ -214,7 +214,7 @@ fn redb_kernel_pairs_with_a_non_automerge_reconciler() {
 #[test]
 fn removing_a_logical_row_writes_a_tombstone() {
     let path = database_path();
-    let kernel = RedbKernel::new(Arc::new(reconverge::Database::create(&path).unwrap()));
+    let kernel = RedbKernel::new(Arc::new(redb::Database::create(&path).unwrap()));
     block_on(async {
         let reconciler = AutomergeRowCodec::new();
         let table = TableGenerationId(Uuid::from_u128(102));
@@ -258,7 +258,7 @@ fn removing_a_logical_row_writes_a_tombstone() {
 #[test]
 fn engine_persists_a_logical_row_through_the_public_transaction_seam() {
     let path = database_path();
-    let database = Arc::new(reconverge::Database::create(&path).unwrap());
+    let database = Arc::new(redb::Database::create(&path).unwrap());
     let schema = TableSchema {
         name: "people".into(),
         columns: vec![
@@ -336,15 +336,11 @@ fn received_automerge_incremental_change_materializes_a_row() {
             ],
         };
         let source = Engine::new(
-            RedbKernel::new(Arc::new(
-                reconverge::Database::create(&source_path).unwrap(),
-            )),
+            RedbKernel::new(Arc::new(redb::Database::create(&source_path).unwrap())),
             AutomergeRowCodec::new(),
         );
         let destination = Engine::new(
-            RedbKernel::new(Arc::new(
-                reconverge::Database::create(&destination_path).unwrap(),
-            )),
+            RedbKernel::new(Arc::new(redb::Database::create(&destination_path).unwrap())),
             AutomergeRowCodec::new(),
         );
         for engine in [&source, &destination] {
@@ -380,7 +376,7 @@ fn received_automerge_incremental_change_materializes_a_row() {
 #[test]
 fn rollback_discards_catalog_and_logical_row_changes() {
     let path = database_path();
-    let kernel = RedbKernel::new(Arc::new(reconverge::Database::create(&path).unwrap()));
+    let kernel = RedbKernel::new(Arc::new(redb::Database::create(&path).unwrap()));
     block_on(async {
         let reconciler = AutomergeRowCodec::new();
         let table = TableGenerationId(Uuid::from_u128(103));

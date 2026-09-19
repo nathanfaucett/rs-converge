@@ -2,14 +2,14 @@ use std::{marker::PhantomData, ops::RangeBounds, sync::Arc};
 
 use async_stream::stream;
 use futures::Stream;
-use reconverge::{Database, ReadableDatabase};
+use redb::{Database, ReadableDatabase};
 
 use btree::{BTree, BTreeError, BTreeRead, BTreeResult};
 
 use crate::{
     RedbBTreeTransaction,
     key::Key,
-    reconverge::{RedbKey, RedbValue, table_definition},
+    redb::{RedbKey, RedbValue, table_definition},
 };
 
 #[derive(Clone)]

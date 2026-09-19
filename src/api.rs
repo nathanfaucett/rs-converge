@@ -9,7 +9,7 @@ pub use engine::{InMemoryKernel, InMemoryKernelTransaction};
 #[cfg(feature = "automerge")]
 pub use engine_automerge::AutomergeRowCodec;
 #[cfg(feature = "redb")]
-pub use engine_reconverge::{RedbKernel, RedbKernelTransaction, redb};
+pub use engine_redb::{RedbKernel, RedbKernelTransaction, redb};
 #[cfg(feature = "macros")]
 pub use macros::FromRow;
 pub use query::{

@@ -5,7 +5,7 @@ struct User {
     id: Uuid,
     name: String,
 }
-use test::{Case, assert_case, direct_in_memory_cluster, run};
+use converge_test::{Case, assert_case, direct_in_memory_cluster, run};
 
 #[test]
 fn derive_from_row_uses_the_db_facade() {

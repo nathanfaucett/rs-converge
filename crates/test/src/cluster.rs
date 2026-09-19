@@ -11,7 +11,7 @@ use engine::{
     TransactionEnvelope,
 };
 use engine_automerge::AutomergeRowCodec;
-use engine_reconverge::RedbKernel;
+use engine_redb::RedbKernel;
 use futures::join;
 use sql_translator::SqlTranslator;
 use sync::{SessionConfig, SyncError, SyncRole, synchronize};
@@ -60,7 +60,7 @@ fn redb_cluster<R>(
     new_row_codec: fn() -> R,
 ) -> (RedbClusterCleanup, Cluster<RedbKernel, R>)
 where
-    R: RowCodec<engine_reconverge::RedbKernelTransaction>,
+    R: RowCodec<engine_redb::RedbKernelTransaction>,
 {
     let directory = database_directory();
     let nodes = (0..n)
@@ -68,7 +68,7 @@ where
             id,
             engine: Engine::new(
                 RedbKernel::new(Arc::new(
-                    reconverge::Database::create(directory.join(format!("{id}.redb"))).unwrap(),
+                    redb::Database::create(directory.join(format!("{id}.redb"))).unwrap(),
                 )),
                 new_row_codec(),
             ),

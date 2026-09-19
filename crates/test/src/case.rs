@@ -8,7 +8,7 @@ use std::{
 
 use engine::{DirectRowCodec, Engine, Kernel, RowCodec};
 use engine_automerge::AutomergeRowCodec;
-use engine_reconverge::RedbKernel;
+use engine_redb::RedbKernel;
 use futures::executor::block_on;
 use sql_translator::SqlTranslator;
 use value::Row;
@@ -41,7 +41,7 @@ where
 
 fn run_redb_case<R>(backend: &str, case: &Case, new_codec: impl FnOnce() -> R)
 where
-    R: RowCodec<engine_reconverge::RedbKernelTransaction>,
+    R: RowCodec<engine_redb::RedbKernelTransaction>,
 {
     let path = database_path();
     let engine = Engine::new(redb_kernel(&path), new_codec());
@@ -81,7 +81,7 @@ fn assert_rows(backend: &str, case: &Case, actual: Vec<Row>) {
 }
 
 fn redb_kernel(path: &PathBuf) -> RedbKernel {
-    RedbKernel::new(Arc::new(reconverge::Database::create(path).unwrap()))
+    RedbKernel::new(Arc::new(redb::Database::create(path).unwrap()))
 }
 
 fn database_path() -> PathBuf {

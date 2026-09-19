@@ -12,7 +12,7 @@ use converge::{
     AutomergeRowCodec, Engine, RedbKernel, SessionConfig, SqlTranslator, SyncRole, Value, redb,
     synchronize,
 };
-use test::{in_memory_transport_pair, run};
+use converge_test::{in_memory_transport_pair, run};
 
 static DATABASE_ID: AtomicU64 = AtomicU64::new(0);
 

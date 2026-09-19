@@ -2,13 +2,13 @@ use std::{marker::PhantomData, ops::RangeBounds};
 
 use async_stream::stream;
 use futures::Stream;
-use reconverge::{ReadableTable, WriteTransaction};
+use redb::{ReadableTable, WriteTransaction};
 
 use btree::{BTreeError, BTreeRead, BTreeResult, BTreeTransaction};
 
 use crate::{
     key::Key,
-    reconverge::{RedbKey, RedbValue, table_definition},
+    redb::{RedbKey, RedbValue, table_definition},
     value::Value,
 };
 

@@ -9,7 +9,7 @@ impl From<Vec<u8>> for Bytes {
     }
 }
 
-impl reconverge::Value for Bytes {
+impl redb::Value for Bytes {
     type SelfType<'a>
         = Bytes
     where
@@ -30,12 +30,12 @@ impl reconverge::Value for Bytes {
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a> {
         &value.0
     }
-    fn type_name() -> reconverge::TypeName {
-        reconverge::TypeName::new(core::any::type_name::<Self>())
+    fn type_name() -> redb::TypeName {
+        redb::TypeName::new(core::any::type_name::<Self>())
     }
 }
 
-impl reconverge::Key for Bytes {
+impl redb::Key for Bytes {
     fn compare(a: &[u8], b: &[u8]) -> Ordering {
         a.cmp(b)
     }

@@ -43,8 +43,8 @@ where
 
 impl<K> PartialEq for Key<K>
 where
-    K: reconverge::Key + 'static,
-    for<'a> K: reconverge::Value<SelfType<'a> = K>,
+    K: redb::Key + 'static,
+    for<'a> K: redb::Value<SelfType<'a> = K>,
 {
     fn eq(&self, other: &Self) -> bool {
         K::compare(
@@ -56,15 +56,15 @@ where
 
 impl<K> Eq for Key<K>
 where
-    K: reconverge::Key + 'static,
-    for<'a> K: reconverge::Value<SelfType<'a> = K>,
+    K: redb::Key + 'static,
+    for<'a> K: redb::Value<SelfType<'a> = K>,
 {
 }
 
 impl<K> PartialOrd for Key<K>
 where
-    K: reconverge::Key + 'static,
-    for<'a> K: reconverge::Value<SelfType<'a> = K>,
+    K: redb::Key + 'static,
+    for<'a> K: redb::Value<SelfType<'a> = K>,
 {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
@@ -73,8 +73,8 @@ where
 
 impl<K> Ord for Key<K>
 where
-    K: reconverge::Key + 'static,
-    for<'a> K: reconverge::Value<SelfType<'a> = K>,
+    K: redb::Key + 'static,
+    for<'a> K: redb::Value<SelfType<'a> = K>,
 {
     fn cmp(&self, other: &Self) -> Ordering {
         K::compare(
@@ -84,10 +84,10 @@ where
     }
 }
 
-impl<K> reconverge::Value for Key<K>
+impl<K> redb::Value for Key<K>
 where
-    K: reconverge::Key + 'static,
-    for<'a> K: reconverge::Value<SelfType<'a> = K>,
+    K: redb::Key + 'static,
+    for<'a> K: redb::Value<SelfType<'a> = K>,
 {
     type SelfType<'a>
         = Key<K::SelfType<'a>>
@@ -116,15 +116,15 @@ where
         K::as_bytes(&value.0)
     }
 
-    fn type_name() -> reconverge::TypeName {
-        reconverge::TypeName::new(type_name::<Self>())
+    fn type_name() -> redb::TypeName {
+        redb::TypeName::new(type_name::<Self>())
     }
 }
 
-impl<K> reconverge::Key for Key<K>
+impl<K> redb::Key for Key<K>
 where
-    K: reconverge::Key + 'static,
-    for<'a> K: reconverge::Value<SelfType<'a> = K>,
+    K: redb::Key + 'static,
+    for<'a> K: redb::Value<SelfType<'a> = K>,
 {
     fn compare(a: &[u8], b: &[u8]) -> Ordering {
         K::compare(a, b)

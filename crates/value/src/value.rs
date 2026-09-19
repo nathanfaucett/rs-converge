@@ -350,7 +350,7 @@ impl PartialOrd for ValueType {
 }
 
 #[cfg(feature = "redb")]
-impl reconverge::Value for Value {
+impl redb::Value for Value {
     type SelfType<'a>
         = Value
     where
@@ -376,15 +376,15 @@ impl reconverge::Value for Value {
         postcard::to_allocvec(value).expect("Failed to serialize Value to bytes")
     }
 
-    fn type_name() -> reconverge::TypeName {
-        reconverge::TypeName::new(core::any::type_name::<Self>())
+    fn type_name() -> redb::TypeName {
+        redb::TypeName::new(core::any::type_name::<Self>())
     }
 }
 
 #[cfg(feature = "redb")]
-impl reconverge::Key for Value {
+impl redb::Key for Value {
     fn compare(a: &[u8], b: &[u8]) -> Ordering {
-        use reconverge::Value;
+        use redb::Value;
         let a_value = Self::from_bytes(a);
         let b_value = Self::from_bytes(b);
         a_value.cmp(&b_value)
@@ -392,7 +392,7 @@ impl reconverge::Key for Value {
 }
 
 #[cfg(feature = "redb")]
-impl reconverge::Value for Row {
+impl redb::Value for Row {
     type SelfType<'a>
         = Row
     where
@@ -418,15 +418,15 @@ impl reconverge::Value for Row {
         postcard::to_allocvec(value).expect("Failed to serialize Value to bytes")
     }
 
-    fn type_name() -> reconverge::TypeName {
-        reconverge::TypeName::new(core::any::type_name::<Self>())
+    fn type_name() -> redb::TypeName {
+        redb::TypeName::new(core::any::type_name::<Self>())
     }
 }
 
 #[cfg(feature = "redb")]
-impl reconverge::Key for Row {
+impl redb::Key for Row {
     fn compare(a: &[u8], b: &[u8]) -> Ordering {
-        use reconverge::Value;
+        use redb::Value;
         let a_value = Self::from_bytes(a);
         let b_value = Self::from_bytes(b);
         a_value.cmp(&b_value)

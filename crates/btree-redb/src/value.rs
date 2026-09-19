@@ -13,10 +13,10 @@ impl<K> Value<K> {
     }
 }
 
-impl<K> reconverge::Value for Value<K>
+impl<K> redb::Value for Value<K>
 where
-    K: reconverge::Value + 'static,
-    for<'a> K: reconverge::Value<SelfType<'a> = K>,
+    K: redb::Value + 'static,
+    for<'a> K: redb::Value<SelfType<'a> = K>,
 {
     type SelfType<'a>
         = Value<K::SelfType<'a>>
@@ -45,7 +45,7 @@ where
         K::as_bytes(&value.0)
     }
 
-    fn type_name() -> reconverge::TypeName {
-        reconverge::TypeName::new(type_name::<Self>())
+    fn type_name() -> redb::TypeName {
+        redb::TypeName::new(type_name::<Self>())
     }
 }
