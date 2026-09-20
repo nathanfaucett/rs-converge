@@ -11,7 +11,7 @@ use uuid::Uuid;
 const ROWS: &str = "__db_rows";
 const TOMBSTONES: &str = "__db_row_tombstones";
 
-pub trait RowCodec<T>
+pub trait RowCodec<T>: Send + Sync
 where
     T: KernelTransaction,
 {
@@ -19,36 +19,36 @@ where
         &self,
         transaction: &mut T,
         table: TableGenerationId,
-    ) -> impl Future<Output = EngineResult<()>>;
+    ) -> impl Future<Output = EngineResult<()>> + Send;
     fn drop_table(
         &self,
         transaction: &mut T,
         table: TableGenerationId,
-    ) -> impl Future<Output = EngineResult<()>>;
+    ) -> impl Future<Output = EngineResult<()>> + Send;
     fn get_row(
         &self,
         transaction: &T,
         table: &TableGenerationId,
         row: &Uuid,
-    ) -> impl Future<Output = EngineResult<Option<Row>>>;
+    ) -> impl Future<Output = EngineResult<Option<Row>>> + Send;
     fn scan_rows(
         &self,
         transaction: &T,
         table: &TableGenerationId,
-    ) -> impl Stream<Item = EngineResult<(Uuid, Row)>>;
+    ) -> impl Stream<Item = EngineResult<(Uuid, Row)>> + Send;
     fn put_row(
         &self,
         transaction: &mut T,
         table: TableGenerationId,
         row: Uuid,
         value: Row,
-    ) -> impl Future<Output = EngineResult<()>>;
+    ) -> impl Future<Output = EngineResult<()>> + Send;
     fn remove_row(
         &self,
         transaction: &mut T,
         table: &TableGenerationId,
         row: &Uuid,
-    ) -> impl Future<Output = EngineResult<Option<Row>>>;
+    ) -> impl Future<Output = EngineResult<Option<Row>>> + Send;
     fn encode_row(
         &self,
         transaction: &T,
@@ -56,13 +56,13 @@ where
         row: &Uuid,
         value: &Row,
         changed_columns: &[usize],
-    ) -> impl Future<Output = EngineResult<Vec<u8>>>;
+    ) -> impl Future<Output = EngineResult<Vec<u8>>> + Send;
     fn conflicted_columns(
         &self,
         transaction: &T,
         table: &TableGenerationId,
         row: &Uuid,
-    ) -> impl Future<Output = EngineResult<alloc::vec::Vec<usize>>>;
+    ) -> impl Future<Output = EngineResult<alloc::vec::Vec<usize>>> + Send;
     fn encode_resolution(
         &self,
         transaction: &T,
@@ -70,38 +70,38 @@ where
         row: &Uuid,
         value: &Row,
         changed_columns: &[usize],
-    ) -> impl Future<Output = EngineResult<Vec<u8>>>;
+    ) -> impl Future<Output = EngineResult<Vec<u8>>> + Send;
     fn merge_row(
         &self,
         transaction: &mut T,
         table: &TableGenerationId,
         row: Uuid,
         value: &[u8],
-    ) -> impl Future<Output = EngineResult<Option<Row>>>;
+    ) -> impl Future<Output = EngineResult<Option<Row>>> + Send;
     fn export_row_state(
         &self,
         transaction: &T,
         table: &TableGenerationId,
         row: &Uuid,
-    ) -> impl Future<Output = EngineResult<Option<Vec<u8>>>>;
+    ) -> impl Future<Output = EngineResult<Option<Vec<u8>>>> + Send;
     fn merge_row_state(
         &self,
         transaction: &mut T,
         table: &TableGenerationId,
         row: Uuid,
         state: &[u8],
-    ) -> impl Future<Output = EngineResult<Option<Row>>>;
+    ) -> impl Future<Output = EngineResult<Option<Row>>> + Send;
     fn tombstone_row(
         &self,
         transaction: &mut T,
         table: &TableGenerationId,
         row: &Uuid,
-    ) -> impl Future<Output = EngineResult<Option<Row>>>;
+    ) -> impl Future<Output = EngineResult<Option<Row>>> + Send;
     fn row_tombstones(
         &self,
         transaction: &T,
         table: &TableGenerationId,
-    ) -> impl Stream<Item = EngineResult<Uuid>>;
+    ) -> impl Stream<Item = EngineResult<Uuid>> + Send;
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]

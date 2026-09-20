@@ -108,7 +108,7 @@ impl<K, R> Engine<K, R> {
 impl<K, R> Engine<K, R>
 where
     K: Kernel,
-    R: RowCodec<K::Transaction>,
+    R: RowCodec<K::Transaction> + Send + Sync,
 {
     pub async fn index_schema(&self, name: &str) -> EngineResult<IndexSchema> {
         let transaction = self.kernel.transaction().await?;

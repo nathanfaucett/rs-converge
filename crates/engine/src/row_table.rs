@@ -6,7 +6,11 @@ use value::{Row, Value};
 use crate::{EngineError, EngineResult, KernelTransaction};
 
 pub trait RowTable: KernelTransaction {
-    fn get_entry(&self, table: &str, key: &Row) -> impl Future<Output = EngineResult<Option<Row>>> {
+    fn get_entry(
+        &self,
+        table: &str,
+        key: &Row,
+    ) -> impl Future<Output = EngineResult<Option<Row>>> + Send {
         async move {
             self.get_bytes(table, &encode_key(key))
                 .await?
@@ -15,7 +19,7 @@ pub trait RowTable: KernelTransaction {
         }
     }
 
-    fn scan_entries(&self, table: &str) -> impl Stream<Item = EngineResult<(Row, Row)>> {
+    fn scan_entries(&self, table: &str) -> impl Stream<Item = EngineResult<(Row, Row)>> + Send {
         self.scan_bytes(table).map(|entry| {
             let (key, value) = entry?;
             Ok((decode_key(&key)?, decode_value(value)?))
@@ -27,7 +31,7 @@ pub trait RowTable: KernelTransaction {
         table: &str,
         key: Row,
         value: Row,
-    ) -> impl Future<Output = EngineResult<()>> {
+    ) -> impl Future<Output = EngineResult<()>> + Send {
         self.put_bytes(table, encode_key(&key), encode_value(&value))
     }
 
@@ -35,7 +39,7 @@ pub trait RowTable: KernelTransaction {
         &mut self,
         table: &str,
         key: &Row,
-    ) -> impl Future<Output = EngineResult<Option<Row>>> {
+    ) -> impl Future<Output = EngineResult<Option<Row>>> + Send {
         async move {
             self.remove_bytes(table, &encode_key(key))
                 .await?

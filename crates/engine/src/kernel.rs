@@ -4,7 +4,7 @@ use futures::Stream;
 
 use crate::EngineResult;
 
-pub trait KernelTransaction: Send {
+pub trait KernelTransaction: Send + Sync {
     fn ensure_table(&mut self, name: &str) -> impl Future<Output = EngineResult<()>> + Send;
     fn drop_table(&mut self, name: &str) -> impl Future<Output = EngineResult<()>> + Send;
 
