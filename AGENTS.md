@@ -1,6 +1,10 @@
 # AGENTS.md
 
-Dev mode: no users, no backwards compatibility, refactor freely.
+## Refactoring Protocol
+
+- ALWAYS choose rewriting and deleting over modifying or wrapping old code.
+- NEVER write glue code to support old versions or maintain past state.
+- ALWAYS clean up and purge any files, functions, or blocks rendered obsolete by new implementations.
 
 ## Patterns & Conventions
 
