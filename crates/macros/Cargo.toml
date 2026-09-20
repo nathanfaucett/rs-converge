@@ -18,3 +18,4 @@ syn = { version = "2.0", default-features = false, features = ["derive", "parsin
 [dev-dependencies]
 value = { path = "../value", default-features = false, features = [] }
 uuid = { version = "1.23", default-features = false, features = [] }
+converge = { path = "../../" }

@@ -28,7 +28,6 @@ macro_rules! database_call {
             Database::File($engine) => $body,
             #[cfg(all(feature = "automerge", feature = "in-memory"))]
             Database::InMemory($engine) => $body,
-            _ => unreachable!(),
         }
     }};
 }

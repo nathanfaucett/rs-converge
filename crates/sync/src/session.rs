@@ -20,8 +20,8 @@ pub struct SessionConfig {
     pub checkpoint_threshold: Option<usize>,
 }
 
-impl SessionConfig {
-    pub const fn new() -> Self {
+impl Default for SessionConfig {
+    fn default() -> Self {
         Self {
             max_envelopes_per_frame: 64,
             checkpoint_threshold: None,

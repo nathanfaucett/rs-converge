@@ -73,7 +73,7 @@ async fn sync(
     left: &Engine<InMemoryKernel, DirectRowCodec>,
     right: &Engine<InMemoryKernel, DirectRowCodec>,
 ) {
-    let config = SessionConfig::new();
+    let config = SessionConfig::default();
     let _ = sync_with(left, right, &config).await;
 }
 
@@ -169,8 +169,10 @@ fn bootstraps_an_empty_replica_with_a_checkpoint() {
         let left = Engine::new(InMemoryKernel::new(), DirectRowCodec);
         let right = Engine::new(InMemoryKernel::new(), DirectRowCodec);
         left.create_table(table("users")).await.unwrap();
-        let mut config = SessionConfig::new();
-        config.checkpoint_threshold = Some(0);
+        let config = SessionConfig {
+            checkpoint_threshold: Some(0),
+            ..Default::default()
+        };
 
         let frames = sync_with(&left, &right, &config).await;
 
@@ -190,7 +192,7 @@ fn disabled_threshold_uses_envelopes_only() {
         let right = Engine::new(InMemoryKernel::new(), DirectRowCodec);
         left.create_table(table("users")).await.unwrap();
 
-        let frames = sync_with(&left, &right, &SessionConfig::new()).await;
+        let frames = sync_with(&left, &right, &SessionConfig::default()).await;
 
         assert!(
             !frames
@@ -206,8 +208,10 @@ fn transfers_writes_made_during_checkpoint_bootstrap() {
         let left = Engine::new(InMemoryKernel::new(), DirectRowCodec);
         let right = Engine::new(InMemoryKernel::new(), DirectRowCodec);
         left.create_table(table("users")).await.unwrap();
-        let mut config = SessionConfig::new();
-        config.checkpoint_threshold = Some(0);
+        let config = SessionConfig {
+            checkpoint_threshold: Some(0),
+            ..Default::default()
+        };
         let (left_transport, mut right_transport) = transport_pair();
         let mut left_transport = WriteAfterCheckpoint {
             inner: left_transport,
@@ -242,9 +246,10 @@ fn respects_checkpoint_thresholds_and_envelope_batches() {
             left.create_table(table(name)).await.unwrap();
         }
 
-        let mut config = SessionConfig::new();
-        config.max_envelopes_per_frame = 2;
-        config.checkpoint_threshold = Some(3);
+        let mut config = SessionConfig {
+            max_envelopes_per_frame: 2,
+            checkpoint_threshold: Some(3),
+        };
         let frames = sync_with(&left, &right, &config).await;
         assert!(
             !frames
@@ -346,7 +351,7 @@ fn rejects_malformed_checkpoint_frames_without_partial_imports() {
         let error = synchronize(
             &engine,
             &mut transport,
-            &SessionConfig::new(),
+            &SessionConfig::default(),
             SyncRole::Initiator,
         )
         .await

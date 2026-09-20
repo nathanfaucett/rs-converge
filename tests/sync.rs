@@ -16,8 +16,10 @@ fn bootstrap_and_noop_repair_converge() {
     run(async {
         for checkpoint_threshold in [None, Some(0)] {
             let cluster = direct_in_memory_cluster(2);
-            let mut config = SessionConfig::new();
-            config.checkpoint_threshold = checkpoint_threshold;
+            let config = SessionConfig {
+                checkpoint_threshold,
+                ..Default::default()
+            };
             cluster.exec(0, CREATE_USERS).await;
             cluster.exec(0, INSERT_ADA).await;
             cluster.sync(0, 1, &config).await.unwrap();
@@ -32,7 +34,7 @@ fn bootstrap_and_noop_repair_converge() {
 fn offline_writes_and_ordered_three_replica_repair_converge() {
     run(async {
         let cluster = direct_in_memory_cluster(3);
-        let config = SessionConfig::new();
+        let config = SessionConfig::default();
         cluster.exec(0, CREATE_USERS).await;
         cluster
             .sync_pairs(&[(0, 1), (1, 2)], &config)
@@ -56,7 +58,7 @@ fn persistent_direct_replicas_sync() {
         let (_cleanup, cluster) = direct_redb_cluster(2);
         cluster.exec(0, CREATE_USERS).await;
         cluster.exec(0, INSERT_ADA).await;
-        cluster.sync(0, 1, &SessionConfig::new()).await.unwrap();
+        cluster.sync(0, 1, &SessionConfig::default()).await.unwrap();
         cluster.assert_converged(SELECT_USERS).await;
     });
 }
@@ -65,7 +67,7 @@ fn persistent_direct_replicas_sync() {
 fn relay_survives_an_unavailable_source() {
     run(async {
         let cluster = direct_in_memory_cluster(3);
-        let config = SessionConfig::new();
+        let config = SessionConfig::default();
         cluster.exec(0, CREATE_USERS).await;
         cluster.exec(0, INSERT_ADA).await;
         cluster.sync(0, 1, &config).await.unwrap();
@@ -120,7 +122,7 @@ fn every_directional_frame_failure_retries() {
         ] {
             for frame in frames {
                 let cluster = direct_in_memory_cluster(2);
-                let config = SessionConfig::new();
+                let config = SessionConfig::default();
                 cluster.exec(0, CREATE_USERS).await;
                 cluster.exec(0, INSERT_ADA).await;
                 assert!(
@@ -173,7 +175,12 @@ fn seeded_partition_history_reproduces_from_its_seed() {
                 },
             ],
         };
-        run_chaos(direct_in_memory_cluster(2), scenario, &SessionConfig::new()).await;
+        run_chaos(
+            direct_in_memory_cluster(2),
+            scenario,
+            &SessionConfig::default(),
+        )
+        .await;
     });
 }
 
@@ -181,8 +188,10 @@ fn seeded_partition_history_reproduces_from_its_seed() {
 fn checkpoint_merges_destination_offline_writes() {
     run(async {
         let cluster = direct_in_memory_cluster(2);
-        let mut config = SessionConfig::new();
-        config.checkpoint_threshold = Some(0);
+        let config = SessionConfig {
+            checkpoint_threshold: Some(0),
+            ..Default::default()
+        };
         cluster.exec(0, CREATE_USERS).await;
         cluster.exec(0, INSERT_ADA).await;
         cluster
