@@ -43,7 +43,6 @@ impl ClusterRealtimeRunner {
     }
 }
 
-#[async_trait::async_trait]
 impl TestRunner for ClusterRealtimeRunner {
     type Error = RunnerError;
 

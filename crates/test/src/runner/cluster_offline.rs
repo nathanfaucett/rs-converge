@@ -43,7 +43,6 @@ impl ClusterOfflineRunner {
     }
 }
 
-#[async_trait::async_trait]
 impl TestRunner for ClusterOfflineRunner {
     type Error = RunnerError;
 

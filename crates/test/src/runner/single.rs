@@ -53,7 +53,6 @@ impl SingleNodeRunner {
     }
 }
 
-#[async_trait::async_trait]
 impl TestRunner for SingleNodeRunner {
     type Error = RunnerError;
 

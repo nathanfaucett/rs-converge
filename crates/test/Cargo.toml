@@ -21,7 +21,6 @@ sync = { path = "../sync", default-features = false, features = [] }
 value = { path = "../value", default-features = false, features = ["std"] }
 
 # External dependencies
-async-trait = "0.1"
 futures = { version = "0.3", default-features = false, features = ["async-await", "executor", "std"] }
 rand = { version = "0.10", default-features = false, features = ["std", "std_rng", "sys_rng"] }
 redb = { version = "4.3", default-features = false, features = ["std", "uuid"] }

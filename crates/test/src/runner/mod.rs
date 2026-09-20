@@ -1,4 +1,4 @@
-use std::borrow::Cow;
+use std::{borrow::Cow, future::Future};
 
 use value::Row;
 
@@ -84,16 +84,18 @@ pub enum RunnerError {
     Chaos(String),
 }
 
-#[async_trait::async_trait]
 pub trait TestRunner {
     type Error: std::error::Error + Send + Sync + 'static;
 
-    async fn run_case(&self, case: &TestCase) -> Result<(), Self::Error>;
-    async fn run_suite(&self, suite: &TestSuite) -> Result<(), Self::Error> {
-        for case in &suite.cases {
-            self.run_case(case).await?;
+    fn run_case(&self, case: &TestCase) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
+    fn run_suite(&self, suite: &TestSuite) -> impl Future<Output = Result<(), Self::Error>> {
+        async move {
+            for case in &suite.cases {
+                self.run_case(case).await?;
+            }
+            Ok(())
         }
-        Ok(())
     }
 }
 

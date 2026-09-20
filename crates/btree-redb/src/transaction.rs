@@ -72,24 +72,22 @@ where
     K: RedbKey,
     V: RedbValue,
 {
-    fn get(&self, key: &K) -> impl Future<Output = BTreeResult<Option<V>>> + Send {
-        async move {
-            let table = self
-                .tx
-                .transaction()
-                .open_table(table_definition::<K, V>(&self.name))
-                .map_err(BTreeError::custom)?;
+    async fn get(&self, key: &K) -> BTreeResult<Option<V>> {
+        let table = self
+            .tx
+            .transaction()
+            .open_table(table_definition::<K, V>(&self.name))
+            .map_err(BTreeError::custom)?;
 
-            let guard = match table
-                .get(Key::new(key.clone()))
-                .map_err(BTreeError::custom)?
-            {
-                Some(value) => value,
-                None => return Ok(None),
-            };
+        let guard = match table
+            .get(Key::new(key.clone()))
+            .map_err(BTreeError::custom)?
+        {
+            Some(value) => value,
+            None => return Ok(None),
+        };
 
-            Ok(Some(guard.value().into_inner()))
-        }
+        Ok(Some(guard.value().into_inner()))
     }
 
     fn range<R>(&self, range: R) -> impl Stream<Item = BTreeResult<(K, V)>> + Send
@@ -118,60 +116,50 @@ where
     K: RedbKey,
     V: RedbValue,
 {
-    fn insert(&mut self, key: K, value: V) -> impl Future<Output = BTreeResult<()>> + Send {
-        async move {
-            let mut table = self
-                .tx
-                .transaction()
-                .open_table(table_definition::<K, V>(&self.name))
-                .map_err(BTreeError::custom)?;
-            table
-                .insert(Key::new(key), Value::new(value))
-                .map_err(BTreeError::custom)?;
-            Ok(())
-        }
+    async fn insert(&mut self, key: K, value: V) -> BTreeResult<()> {
+        let mut table = self
+            .tx
+            .transaction()
+            .open_table(table_definition::<K, V>(&self.name))
+            .map_err(BTreeError::custom)?;
+        table
+            .insert(Key::new(key), Value::new(value))
+            .map_err(BTreeError::custom)?;
+        Ok(())
     }
 
-    fn update<F>(
-        &mut self,
-        key: K,
-        update_fn: F,
-    ) -> impl Future<Output = BTreeResult<Option<()>>> + Send
+    async fn update<F>(&mut self, key: K, update_fn: F) -> BTreeResult<Option<()>>
     where
         F: FnOnce(&mut V) -> BTreeResult<()> + Send,
     {
-        async move {
-            let mut table = self
-                .tx
-                .transaction()
-                .open_table(table_definition::<K, V>(&self.name))
-                .map_err(BTreeError::custom)?;
-            let Some(entry) = table.get_mut(Key::new(key)).map_err(BTreeError::custom)? else {
-                return Ok(None);
-            };
-            let mut value = entry.value().into_inner();
-            update_fn(&mut value)?;
-            Ok(Some(()))
-        }
+        let mut table = self
+            .tx
+            .transaction()
+            .open_table(table_definition::<K, V>(&self.name))
+            .map_err(BTreeError::custom)?;
+        let Some(entry) = table.get_mut(Key::new(key)).map_err(BTreeError::custom)? else {
+            return Ok(None);
+        };
+        let mut value = entry.value().into_inner();
+        update_fn(&mut value)?;
+        Ok(Some(()))
     }
 
-    fn remove(&mut self, key: &K) -> impl Future<Output = BTreeResult<Option<V>>> + Send {
-        async move {
-            let mut table = self
-                .tx
-                .transaction()
-                .open_table(table_definition::<K, V>(&self.name))
-                .map_err(BTreeError::custom)?;
-            let key = Key::new(key.clone());
-            let value = table
-                .get(&key)
-                .map_err(BTreeError::custom)?
-                .map(|entry| entry.value().into_inner());
-            if value.is_some() {
-                table.remove(&key).map_err(BTreeError::custom)?;
-            }
-            Ok(value)
+    async fn remove(&mut self, key: &K) -> BTreeResult<Option<V>> {
+        let mut table = self
+            .tx
+            .transaction()
+            .open_table(table_definition::<K, V>(&self.name))
+            .map_err(BTreeError::custom)?;
+        let key = Key::new(key.clone());
+        let value = table
+            .get(&key)
+            .map_err(BTreeError::custom)?
+            .map(|entry| entry.value().into_inner());
+        if value.is_some() {
+            table.remove(&key).map_err(BTreeError::custom)?;
         }
+        Ok(value)
     }
 
     fn remove_range<R>(&mut self, range: R) -> impl Stream<Item = BTreeResult<(K, V)>> + Send

@@ -58,7 +58,6 @@ impl ChaosRunner {
     }
 }
 
-#[async_trait::async_trait]
 impl TestRunner for ChaosRunner {
     type Error = RunnerError;
 

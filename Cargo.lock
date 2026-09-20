@@ -1388,7 +1388,6 @@ dependencies = [
 name = "test"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "engine",
  "engine-automerge",
  "engine-redb",
