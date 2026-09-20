@@ -34,7 +34,7 @@ pub async fn execute_statement<K, R>(
 ) -> EngineResult<Vec<QueryResult>>
 where
     K: Kernel,
-    R: RowCodec<K::Transaction>,
+    R: RowCodec<K::Transaction> + Send + Sync,
 {
     let mut transaction = engine.kernel.transaction().await?;
     if let Err(error) = ensure_catalog(&mut transaction).await {
