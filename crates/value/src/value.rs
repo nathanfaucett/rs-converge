@@ -313,6 +313,28 @@ impl Row {
     }
 }
 
+impl<T, const N: usize> From<[T; N]> for Row
+where
+    T: Into<Value>,
+{
+    fn from(values: [T; N]) -> Self {
+        Self {
+            values: values.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl<T> From<Vec<T>> for Row
+where
+    T: Into<Value>,
+{
+    fn from(values: Vec<T>) -> Self {
+        Self {
+            values: values.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(
     feature = "automerge",

@@ -1388,6 +1388,7 @@ dependencies = [
 name = "test"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "engine",
  "engine-automerge",
  "engine-redb",
@@ -1396,6 +1397,7 @@ dependencies = [
  "redb",
  "sql-translator",
  "sync",
+ "thiserror 2.0.18",
  "value",
 ]
 

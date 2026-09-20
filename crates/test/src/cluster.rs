@@ -106,18 +106,62 @@ impl<K: Kernel, R: RowCodec<K::Transaction>> Cluster<K, R> {
         self.nodes.is_empty()
     }
 
+    pub fn node(&self, id: usize) -> &Node<K, R> {
+        &self.nodes[id]
+    }
+
+    pub fn nodes(&self) -> &[Node<K, R>] {
+        &self.nodes
+    }
+
+    pub fn engine(&self, id: usize) -> &Engine<K, R> {
+        &self.nodes[id].engine
+    }
+
+    pub async fn have_same_frontiers(&self) -> bool {
+        if self.nodes.len() <= 1 {
+            return true;
+        }
+        let first = match self.nodes[0].engine.frontier().await {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
+        for node in &self.nodes[1..] {
+            match node.engine.frontier().await {
+                Ok(f) if f == first => {}
+                _ => return false,
+            }
+        }
+        true
+    }
+
+    pub async fn sync_until_converged(
+        &self,
+        config: &SessionConfig,
+        max_rounds: usize,
+    ) -> Result<(), SyncError<InMemoryTransportError>> {
+        if self.nodes.len() <= 1 {
+            return Ok(());
+        }
+        for _ in 0..max_rounds {
+            self.sync_all(config).await?;
+            if self.have_same_frontiers().await {
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+
     pub async fn exec(&self, node_id: usize, sql: &str) -> Vec<Row> {
         self.try_exec(node_id, sql).await.unwrap()
     }
 
     pub async fn try_exec(&self, node_id: usize, sql: &str) -> EngineResult<Vec<Row>> {
-        Ok(self.nodes[node_id]
+        let mut results = self.nodes[node_id]
             .engine
             .translate_and_execute(sql, &SqlTranslator)
-            .await?
-            .pop()
-            .unwrap()
-            .rows)
+            .await?;
+        Ok(results.pop().map(|r| r.rows).unwrap_or_default())
     }
 
     pub async fn sync(
@@ -158,8 +202,8 @@ impl<K: Kernel, R: RowCodec<K::Transaction>> Cluster<K, R> {
         pairs: &[(usize, usize)],
         config: &SessionConfig,
     ) -> Result<(), SyncError<InMemoryTransportError>> {
-        for &(left, right) in pairs {
-            self.sync(left, right, config).await?;
+        for (left, right) in pairs {
+            self.sync(*left, *right, config).await?;
         }
         Ok(())
     }
