@@ -2,16 +2,10 @@
 
 use std::{
     path::{Path, PathBuf},
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::atomic::{AtomicU64, Ordering},
 };
 
-use converge::{
-    AutomergeRowCodec, Engine, RedbKernel, SessionConfig, SqlTranslator, SyncRole, Value, redb,
-    synchronize,
-};
+use converge::{FileDatabase, SessionConfig, SqlTranslator, SyncRole, Value, synchronize};
 use converge_test::{in_memory_transport_pair, run};
 
 static DATABASE_ID: AtomicU64 = AtomicU64::new(0);
@@ -21,14 +15,11 @@ fn database_path() -> PathBuf {
     std::env::temp_dir().join(format!("db-root-sync-{}-{id}.redb", std::process::id()))
 }
 
-fn replica(path: &Path) -> Engine<RedbKernel, AutomergeRowCodec> {
-    Engine::new(
-        RedbKernel::new(Arc::new(reconverge::Database::create(path).unwrap())),
-        AutomergeRowCodec::new(),
-    )
+fn replica(path: &Path) -> FileDatabase {
+    FileDatabase::open(path).unwrap()
 }
 
-async fn execute(engine: &Engine<RedbKernel, AutomergeRowCodec>, sql: &str) -> Vec<converge::Row> {
+async fn execute(engine: &FileDatabase, sql: &str) -> Vec<converge::Row> {
     engine
         .translate_and_execute(sql, &SqlTranslator)
         .await
@@ -38,11 +29,7 @@ async fn execute(engine: &Engine<RedbKernel, AutomergeRowCodec>, sql: &str) -> V
         .rows
 }
 
-async fn sync(
-    left: &Engine<RedbKernel, AutomergeRowCodec>,
-    right: &Engine<RedbKernel, AutomergeRowCodec>,
-    config: &SessionConfig,
-) {
+async fn sync(left: &FileDatabase, right: &FileDatabase, config: &SessionConfig) {
     let (mut left_transport, mut right_transport) = in_memory_transport_pair();
     let (left_result, right_result) = futures::join!(
         synchronize(left, &mut left_transport, config, SyncRole::Initiator),
