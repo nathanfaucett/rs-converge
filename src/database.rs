@@ -1,3 +1,9 @@
+#[cfg(not(feature = "std"))]
+use alloc::{
+    string::{String, ToString},
+    vec::Vec,
+};
+
 #[cfg(feature = "in-memory")]
 use engine::InMemoryKernel;
 use engine::{
