@@ -47,17 +47,25 @@ where
 
 macro_rules! read {
     ($type:ty) => {
-        impl<T: KernelTransaction> BTreeRead<Vec<u8>, Vec<u8>> for $type {
-            async fn get(&self, key: &Vec<u8>) -> BTreeResult<Option<Vec<u8>>> {
-                self.transaction
-                    .get_bytes(self.table, key)
-                    .await
-                    .map_err(BTreeError::custom)
+        impl<T: KernelTransaction + Send + Sync> BTreeRead<Vec<u8>, Vec<u8>> for $type {
+            fn get(
+                &self,
+                key: &Vec<u8>,
+            ) -> impl Future<Output = BTreeResult<Option<Vec<u8>>>> + Send {
+                async move {
+                    self.transaction
+                        .get_bytes(self.table, key)
+                        .await
+                        .map_err(BTreeError::custom)
+                }
             }
 
-            fn range<R>(&self, range: R) -> impl Stream<Item = BTreeResult<(Vec<u8>, Vec<u8>)>>
+            fn range<R>(
+                &self,
+                range: R,
+            ) -> impl Stream<Item = BTreeResult<(Vec<u8>, Vec<u8>)>> + Send
             where
-                R: RangeBounds<Vec<u8>>,
+                R: RangeBounds<Vec<u8>> + Send,
             {
                 let entries = self.transaction.scan_bytes(self.table);
                 stream! {
@@ -77,47 +85,67 @@ macro_rules! read {
 read!(BytesTable<'_, T>);
 read!(BytesTableTransaction<'_, T>);
 
-impl<T: KernelTransaction + Send> BTreeTransaction<Vec<u8>, Vec<u8>>
+impl<T: KernelTransaction + Send + Sync> BTreeTransaction<Vec<u8>, Vec<u8>>
     for BytesTableTransaction<'_, T>
 {
-    async fn insert(&mut self, key: Vec<u8>, value: Vec<u8>) -> BTreeResult<()> {
-        self.transaction
-            .put_bytes(self.table, key, value)
-            .await
-            .map_err(BTreeError::custom)
+    fn insert(
+        &mut self,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> impl Future<Output = BTreeResult<()>> + Send {
+        async move {
+            self.transaction
+                .put_bytes(self.table, key, value)
+                .await
+                .map_err(BTreeError::custom)
+        }
     }
 
-    async fn update<F>(&mut self, key: Vec<u8>, update_fn: F) -> BTreeResult<Option<()>>
+    fn update<F>(
+        &mut self,
+        key: Vec<u8>,
+        update_fn: F,
+    ) -> impl Future<Output = BTreeResult<Option<()>>> + Send
     where
-        F: FnOnce(&mut Vec<u8>) -> BTreeResult<()>,
+        F: FnOnce(&mut Vec<u8>) -> BTreeResult<()> + Send,
     {
-        let Some(mut value) = self.get(&key).await? else {
-            return Ok(None);
-        };
-        update_fn(&mut value)?;
-        self.insert(key, value).await?;
-        Ok(Some(()))
+        async move {
+            let Some(mut value) = self.get(&key).await? else {
+                return Ok(None);
+            };
+            update_fn(&mut value)?;
+            self.insert(key, value).await?;
+            Ok(Some(()))
+        }
     }
 
-    async fn remove(&mut self, key: &Vec<u8>) -> BTreeResult<Option<Vec<u8>>> {
-        self.transaction
-            .remove_bytes(self.table, key)
-            .await
-            .map_err(BTreeError::custom)
+    fn remove(
+        &mut self,
+        key: &Vec<u8>,
+    ) -> impl Future<Output = BTreeResult<Option<Vec<u8>>>> + Send {
+        async move {
+            self.transaction
+                .remove_bytes(self.table, key)
+                .await
+                .map_err(BTreeError::custom)
+        }
     }
 
-    fn remove_range<R>(&mut self, _: R) -> impl Stream<Item = BTreeResult<(Vec<u8>, Vec<u8>)>>
+    fn remove_range<R>(
+        &mut self,
+        _: R,
+    ) -> impl Stream<Item = BTreeResult<(Vec<u8>, Vec<u8>)>> + Send
     where
-        R: RangeBounds<Vec<u8>>,
+        R: RangeBounds<Vec<u8>> + Send,
     {
         stream! { yield Err(BTreeError::UnsupportedOperation); }
     }
 
-    async fn commit(self) -> BTreeResult<()> {
-        Ok(())
+    fn commit(self) -> impl Future<Output = BTreeResult<()>> + Send {
+        async move { Ok(()) }
     }
 
-    async fn rollback(self) -> BTreeResult<()> {
-        Ok(())
+    fn rollback(self) -> impl Future<Output = BTreeResult<()>> + Send {
+        async move { Ok(()) }
     }
 }

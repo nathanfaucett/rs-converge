@@ -50,42 +50,46 @@ pub trait BTreeKey: BTreeValue + Ord {}
 
 impl<T> BTreeKey for T where T: BTreeValue + Ord {}
 
-pub trait BTreeRead<K, V>
+pub trait BTreeRead<K, V>: Send + Sync
 where
-    K: BTreeKey,
-    V: BTreeValue,
+    K: BTreeKey + Send + Sync,
+    V: BTreeValue + Send + Sync,
 {
-    fn get(&self, key: &K) -> impl Future<Output = BTreeResult<Option<V>>>;
-    fn range<R>(&self, range: R) -> impl Stream<Item = BTreeResult<(K, V)>>
+    fn get(&self, key: &K) -> impl Future<Output = BTreeResult<Option<V>>> + Send;
+    fn range<R>(&self, range: R) -> impl Stream<Item = BTreeResult<(K, V)>> + Send
     where
-        R: RangeBounds<K>;
+        R: RangeBounds<K> + Send;
 }
 
-pub trait BTreeTransaction<K, V>: BTreeRead<K, V> + Send
+pub trait BTreeTransaction<K, V>: BTreeRead<K, V> + Send + Sync
 where
-    K: BTreeKey,
-    V: BTreeValue,
+    K: BTreeKey + Send + Sync,
+    V: BTreeValue + Send + Sync,
 {
-    fn insert(&mut self, key: K, value: V) -> impl Future<Output = BTreeResult<()>>;
-    fn update<F>(&mut self, key: K, update_fn: F) -> impl Future<Output = BTreeResult<Option<()>>>
+    fn insert(&mut self, key: K, value: V) -> impl Future<Output = BTreeResult<()>> + Send;
+    fn update<F>(
+        &mut self,
+        key: K,
+        update_fn: F,
+    ) -> impl Future<Output = BTreeResult<Option<()>>> + Send
     where
-        F: FnOnce(&mut V) -> BTreeResult<()>;
+        F: FnOnce(&mut V) -> BTreeResult<()> + Send;
 
-    fn remove(&mut self, key: &K) -> impl Future<Output = BTreeResult<Option<V>>>;
-    fn remove_range<R>(&mut self, range: R) -> impl Stream<Item = BTreeResult<(K, V)>>
+    fn remove(&mut self, key: &K) -> impl Future<Output = BTreeResult<Option<V>>> + Send;
+    fn remove_range<R>(&mut self, range: R) -> impl Stream<Item = BTreeResult<(K, V)>> + Send
     where
-        R: RangeBounds<K>;
+        R: RangeBounds<K> + Send;
 
-    fn commit(self) -> impl Future<Output = BTreeResult<()>>;
-    fn rollback(self) -> impl Future<Output = BTreeResult<()>>;
+    fn commit(self) -> impl Future<Output = BTreeResult<()>> + Send;
+    fn rollback(self) -> impl Future<Output = BTreeResult<()>> + Send;
 }
 
 pub trait BTree<K, V>: BTreeRead<K, V>
 where
-    K: BTreeKey,
-    V: BTreeValue,
+    K: BTreeKey + Send + Sync,
+    V: BTreeValue + Send + Sync,
 {
     type Transaction: BTreeTransaction<K, V>;
 
-    fn transaction(&self) -> impl Future<Output = BTreeResult<Self::Transaction>>;
+    fn transaction(&self) -> impl Future<Output = BTreeResult<Self::Transaction>> + Send;
 }

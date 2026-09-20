@@ -77,7 +77,7 @@ where
 
     async fn update<F>(&mut self, key: DocumentChangeKey, update_fn: F) -> BTreeResult<Option<()>>
     where
-        F: FnOnce(&mut Vec<u8>) -> BTreeResult<()>,
+        F: FnOnce(&mut Vec<u8>) -> BTreeResult<()> + Send,
     {
         self.inner.update(key.encode_ordered(), update_fn).await
     }

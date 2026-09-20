@@ -876,13 +876,10 @@ mod tests {
             translate("UPDATE users SET name = 'Ada' WHERE id <> 1")[0],
             Statement::Query(Query::Update(_))
         ));
-        let error = block_on(async {
-            SqlTranslator
-                .translate_with_params("DELETE FROM users WHERE id <= 1", None)
-                .await
-                .unwrap_err()
-        });
-        assert!(error.to_string().contains("No tables in DELETE"));
+        assert!(matches!(
+            translate("DELETE FROM users WHERE id <= 1")[..],
+            [Statement::Query(Query::Delete(_))]
+        ));
         assert!(matches!(
             translate("DROP INDEX IF EXISTS users_name")[0],
             Statement::DataDefinition(DataDefinition::DropIndex { .. })
