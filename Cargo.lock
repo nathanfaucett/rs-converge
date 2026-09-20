@@ -355,6 +355,7 @@ dependencies = [
  "futures",
  "macros",
  "query",
+ "schema",
  "sql-translator",
  "sync",
  "test",

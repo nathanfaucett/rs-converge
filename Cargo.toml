@@ -9,7 +9,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [features]
-default = ["macros", "sql", "std", "sync"]
+default = ["macros", "sql", "std", "sync", "redb", "automerge"]
 std = ["engine/std", "value/std", "uuid/std"]
 macros = ["dep:macros"]
 sql = ["dep:sql-translator", "sql-translator/std"]
@@ -28,6 +28,7 @@ engine-automerge = { path = "crates/engine-automerge", default-features = false,
 engine-redb = { path = "crates/engine-redb", default-features = false, features = [], optional = true }
 macros = { path = "crates/macros", default-features = false, features = [], optional = true }
 query = { path = "crates/query", default-features = false, features = [] }
+schema = { path = "crates/schema", default-features = false, features = [] }
 sql-translator = { path = "crates/sql-translator", default-features = false, features = [], optional = true }
 sync = { path = "crates/sync", default-features = false, features = [], optional = true }
 value = { path = "crates/value", default-features = false, features = [] }

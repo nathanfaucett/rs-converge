@@ -15,7 +15,13 @@ fn main() {
         let path = database_path();
         let database = Database::open(&path).expect("open Redb database");
 
-        examples_util::cli(database.into_inner(), SqlTranslator).await;
+        database
+            .translate_and_execute(
+                "CREATE TABLE users (id UUID PRIMARY KEY, name TEXT)",
+                &SqlTranslator,
+            )
+            .await
+            .expect("create users");
         std::fs::remove_file(path).expect("remove Redb database");
     });
 }

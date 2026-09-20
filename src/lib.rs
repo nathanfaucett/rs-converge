@@ -8,7 +8,3 @@ mod database;
 
 pub use api::*;
 pub use database::Database;
-#[cfg(all(feature = "automerge", feature = "redb"))]
-pub use database::FileDatabase;
-#[cfg(all(feature = "automerge", feature = "in-memory"))]
-pub use database::InMemoryDatabase;
