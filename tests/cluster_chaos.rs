@@ -1,7 +1,7 @@
 mod common;
 
 use common::{case_concurrent_user_inserts, standard_suite};
-use converge_test::{ChaosRunner, TestRunner, run};
+use ofdb_test::{ChaosRunner, TestRunner, run};
 
 #[test]
 #[ignore = "chaos testing is intended for chaos CI workflow"]

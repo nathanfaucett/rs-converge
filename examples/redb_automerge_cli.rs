@@ -1,6 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use converge::{Database, SqlTranslator};
+use ofdb::{Database, SqlTranslator};
 
 fn database_path() -> std::path::PathBuf {
     let nanos = SystemTime::now()

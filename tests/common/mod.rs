@@ -1,4 +1,4 @@
-use converge_test::{ExpectedError, Row, TestCase, TestSuite, Value};
+use ofdb_test::{ExpectedError, Row, TestCase, TestSuite, Value};
 
 /// Canonical concurrent insert scenario from ADR 0001.
 pub fn case_concurrent_user_inserts() -> TestCase {

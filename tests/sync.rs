@@ -1,5 +1,5 @@
-use converge::{EnvelopeOutcome, SessionConfig};
-use converge_test::{
+use ofdb::{EnvelopeOutcome, SessionConfig};
+use ofdb_test::{
     ChaosScenario, ChaosStep, TransportDirection, direct_in_memory_cluster, direct_redb_cluster,
     run, run_chaos,
 };

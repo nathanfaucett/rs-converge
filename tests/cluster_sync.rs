@@ -1,7 +1,7 @@
 mod common;
 
 use common::{case_concurrent_user_inserts, standard_suite};
-use converge_test::{ClusterOfflineRunner, ClusterRealtimeRunner, TestRunner, run};
+use ofdb_test::{ClusterOfflineRunner, ClusterRealtimeRunner, TestRunner, run};
 
 #[test]
 fn test_cluster_offline_suite() {

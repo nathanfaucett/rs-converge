@@ -2,14 +2,14 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use converge::{Database, SqlTranslator};
+use ofdb::{Database, SqlTranslator};
 
 fn path() -> std::path::PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system time before Unix epoch")
         .as_nanos();
-    std::env::temp_dir().join(format!("converge-database-{nanos}.redb"))
+    std::env::temp_dir().join(format!("ofdb-database-{nanos}.redb"))
 }
 
 #[test]

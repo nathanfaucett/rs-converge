@@ -37,16 +37,16 @@ pub fn derive_from_row(input: TokenStream) -> TokenStream {
             }
         }
         quote! {
-            #ident: ::converge::decode::<#ty>(::converge::value(row, columns, #column)?, #column)?
+            #ident: ::ofdb::decode::<#ty>(::ofdb::value(row, columns, #column)?, #column)?
         }
     });
 
     quote! {
-        impl ::converge::FromRow for #name {
+        impl ::ofdb::FromRow for #name {
             fn from_row(
-                row: &::converge::Row,
+                row: &::ofdb::Row,
                 columns: &[&str],
-            ) -> ::core::result::Result<Self, ::converge::FromRowError> {
+            ) -> ::core::result::Result<Self, ::ofdb::FromRowError> {
                 ::core::result::Result::Ok(Self { #(#fields),* })
             }
         }

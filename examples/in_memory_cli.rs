@@ -1,4 +1,4 @@
-use converge::{Database, SqlTranslator};
+use ofdb::{Database, SqlTranslator};
 
 fn main() {
     futures::executor::block_on(async {

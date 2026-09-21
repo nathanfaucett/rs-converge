@@ -1,6 +1,6 @@
-use converge::{FromRow, Row, Uuid, Value};
+use ofdb::{FromRow, Row, Uuid, Value};
 
-#[derive(converge::FromRow, Debug, PartialEq)]
+#[derive(ofdb::FromRow, Debug, PartialEq)]
 struct User {
     id: Uuid,
     name: String,

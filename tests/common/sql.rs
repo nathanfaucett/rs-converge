@@ -1,5 +1,5 @@
-use converge::Uuid;
-use converge_test::{ExpectedError, Row, TestCase, TestSuite, Value};
+use ofdb::Uuid;
+use ofdb_test::{ExpectedError, Row, TestCase, TestSuite, Value};
 
 fn uuid(s: &str) -> Value {
     Value::Uuid(Uuid::parse_str(s).unwrap())

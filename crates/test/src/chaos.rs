@@ -118,7 +118,7 @@ pub async fn run_chaos<K: Kernel, R: RowCodec<K::Transaction>>(
                 }
                 assert!(
                     cluster.is_converged(query).await,
-                    "{name} (seed {seed}): replicas did not converge on query: {query}"
+                    "{name} (seed {seed}): replicas did not ofdb on query: {query}"
                 );
             }
             ChaosStep::CurrentlyDiverged { a, b, query } => {

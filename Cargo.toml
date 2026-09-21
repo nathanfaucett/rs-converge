@@ -1,5 +1,5 @@
 [package]
-name = "converge"
+name = "ofdb"
 version = "0.1.0"
 publish = true
 authors.workspace = true
@@ -19,7 +19,7 @@ automerge = ["dep:engine-automerge", "std"]
 in-memory = ["engine/in-memory"]
 
 [lib]
-name = "converge"
+name = "ofdb"
 
 [dependencies]
 # Internal dependencies
@@ -38,7 +38,7 @@ uuid = { version = "1.23", default-features = false, features = [] }
 [dev-dependencies]
 # Internal dependencies
 examples-util = { path = "crates/examples-util" }
-converge-test = { package = "test", path = "crates/test", default-features = false, features = [] }
+ofdb-test = { package = "test", path = "crates/test", default-features = false, features = [] }
 
 # External dependencies
 futures = { version = "0.3", default-features = false, features = ["async-await", "executor", "std"] }
@@ -82,7 +82,7 @@ edition = "2024"
 authors = ["nathanfaucett@gmail.com"]
 license = "MIT OR Apache-2.0"
 rust-version = "1.98"
-repository = "https://github.com/aicacia/converge-db"
+repository = "https://github.com/nathanfaucett/rs-ofdb"
 
 [workspace.lints.rust]
 ambiguous_negative_literals = "warn"

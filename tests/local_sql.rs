@@ -3,7 +3,7 @@ mod common;
 mod sql;
 
 use common::{case_concurrent_user_inserts, standard_suite};
-use converge_test::{SingleNodeRunner, TestRunner, run};
+use ofdb_test::{SingleNodeRunner, TestRunner, run};
 use sql::sql_suite;
 
 #[test]
