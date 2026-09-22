@@ -39,6 +39,56 @@ macro_rules! database_call {
 }
 
 impl Database {
+    /// Open a database from a URI string.
+    ///
+    /// Supports `:in_memory:` and `ofdb://<path>` schemes. The path is
+    /// interpreted as a filesystem path relative to the current working
+    /// directory when it does not begin with `/`.
+    ///
+    /// Returns `EngineError::Custom` when the URI scheme is unsupported
+    /// or when the required kernel features are not enabled.
+    pub fn open_uri(uri: &str) -> Result<Self, EngineError> {
+        match crate::uri::parse_uri(uri) {
+            Ok(crate::uri::Uri {
+                scheme: crate::uri::UriScheme::InMemory,
+                ..
+            }) => {
+                #[cfg(all(feature = "automerge", feature = "in-memory"))]
+                {
+                    Ok(Self::in_memory())
+                }
+                #[cfg(not(all(feature = "automerge", feature = "in-memory")))]
+                {
+                    Err(EngineError::custom(
+                        "in-memory kernel not available: enable features `automerge` and `in-memory`",
+                    ))
+                }
+            }
+            Ok(crate::uri::Uri {
+                scheme: crate::uri::UriScheme::File,
+                path,
+            }) => {
+                let path = path.ok_or_else(|| EngineError::custom("file URI missing path"))?;
+                #[cfg(all(feature = "automerge", feature = "redb"))]
+                {
+                    Self::open(path)
+                }
+                #[cfg(not(all(feature = "automerge", feature = "redb")))]
+                {
+                    Err(EngineError::custom(
+                        "redb kernel not available: enable features `automerge` and `redb`",
+                    ))
+                }
+            }
+            Err(crate::uri::UriError::UnsupportedScheme) => Err(EngineError::custom(format!(
+                "unsupported URI scheme: {uri}"
+            ))),
+            Err(crate::uri::UriError::MissingPath) => {
+                Err(EngineError::custom("file URI missing path"))
+            }
+        }
+    }
+
     #[cfg(all(feature = "automerge", feature = "redb"))]
     pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self, EngineError> {
         let database = redb::Database::create(path).map_err(EngineError::custom)?;

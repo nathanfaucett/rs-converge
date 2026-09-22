@@ -5,6 +5,8 @@ extern crate alloc;
 
 mod api;
 mod database;
+mod uri;
 
 pub use api::*;
 pub use database::Database;
+pub use uri::{Uri, UriError, UriScheme, parse_uri};
