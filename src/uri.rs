@@ -37,14 +37,14 @@ pub enum UriError {
 /// Returns `UriError::UnsupportedScheme` for unknown schemes.
 /// Returns `UriError::MissingPath` for `ofdb://` with no path.
 pub fn parse_uri(uri: &str) -> Result<Uri, UriError> {
-    if let Some(rest) = uri.strip_prefix(":in_memory:") {
+    if let Some(rest) = uri.strip_prefix(":in_memory:")
         // The sentinel ends with `:`; the full match means rest is empty.
-        if rest.is_empty() {
-            return Ok(Uri {
-                scheme: UriScheme::InMemory,
-                path: None,
-            });
-        }
+        && rest.is_empty()
+    {
+        return Ok(Uri {
+            scheme: UriScheme::InMemory,
+            path: None,
+        });
     }
 
     if let Some(rest) = uri.strip_prefix("ofdb://") {

@@ -88,47 +88,30 @@ read!(BytesTableTransaction<'_, T>);
 impl<T: KernelTransaction + Send + Sync> BTreeTransaction<Vec<u8>, Vec<u8>>
     for BytesTableTransaction<'_, T>
 {
-    fn insert(
-        &mut self,
-        key: Vec<u8>,
-        value: Vec<u8>,
-    ) -> impl Future<Output = BTreeResult<()>> + Send {
-        async move {
-            self.transaction
-                .put_bytes(self.table, key, value)
-                .await
-                .map_err(BTreeError::custom)
-        }
+    async fn insert(&mut self, key: Vec<u8>, value: Vec<u8>) -> BTreeResult<()> {
+        self.transaction
+            .put_bytes(self.table, key, value)
+            .await
+            .map_err(BTreeError::custom)
     }
 
-    fn update<F>(
-        &mut self,
-        key: Vec<u8>,
-        update_fn: F,
-    ) -> impl Future<Output = BTreeResult<Option<()>>> + Send
+    async fn update<F>(&mut self, key: Vec<u8>, update_fn: F) -> BTreeResult<Option<()>>
     where
         F: FnOnce(&mut Vec<u8>) -> BTreeResult<()> + Send,
     {
-        async move {
-            let Some(mut value) = self.get(&key).await? else {
-                return Ok(None);
-            };
-            update_fn(&mut value)?;
-            self.insert(key, value).await?;
-            Ok(Some(()))
-        }
+        let Some(mut value) = self.get(&key).await? else {
+            return Ok(None);
+        };
+        update_fn(&mut value)?;
+        self.insert(key, value).await?;
+        Ok(Some(()))
     }
 
-    fn remove(
-        &mut self,
-        key: &Vec<u8>,
-    ) -> impl Future<Output = BTreeResult<Option<Vec<u8>>>> + Send {
-        async move {
-            self.transaction
-                .remove_bytes(self.table, key)
-                .await
-                .map_err(BTreeError::custom)
-        }
+    async fn remove(&mut self, key: &Vec<u8>) -> BTreeResult<Option<Vec<u8>>> {
+        self.transaction
+            .remove_bytes(self.table, key)
+            .await
+            .map_err(BTreeError::custom)
     }
 
     fn remove_range<R>(
@@ -141,11 +124,11 @@ impl<T: KernelTransaction + Send + Sync> BTreeTransaction<Vec<u8>, Vec<u8>>
         stream! { yield Err(BTreeError::UnsupportedOperation); }
     }
 
-    fn commit(self) -> impl Future<Output = BTreeResult<()>> + Send {
-        async move { Ok(()) }
+    async fn commit(self) -> BTreeResult<()> {
+        Ok(())
     }
 
-    fn rollback(self) -> impl Future<Output = BTreeResult<()>> + Send {
-        async move { Ok(()) }
+    async fn rollback(self) -> BTreeResult<()> {
+        Ok(())
     }
 }

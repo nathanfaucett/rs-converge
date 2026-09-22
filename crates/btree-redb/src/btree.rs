@@ -34,26 +34,24 @@ where
     K: RedbKey,
     V: RedbValue,
 {
-    fn get(&self, key: &K) -> impl Future<Output = BTreeResult<Option<V>>> + Send {
-        async move {
-            let db = self.db.begin_read().map_err(BTreeError::custom)?;
+    async fn get(&self, key: &K) -> BTreeResult<Option<V>> {
+        let db = self.db.begin_read().map_err(BTreeError::custom)?;
 
-            let table = db
-                .open_table(table_definition::<K, V>(&self.name))
-                .map_err(BTreeError::custom)?;
+        let table = db
+            .open_table(table_definition::<K, V>(&self.name))
+            .map_err(BTreeError::custom)?;
 
-            let guard = match table
-                .get(Key::new(key.clone()))
-                .map_err(BTreeError::custom)?
-            {
-                Some(value) => value,
-                None => return Ok(None),
-            };
+        let guard = match table
+            .get(Key::new(key.clone()))
+            .map_err(BTreeError::custom)?
+        {
+            Some(value) => value,
+            None => return Ok(None),
+        };
 
-            let value: V = guard.value().into_inner();
+        let value: V = guard.value().into_inner();
 
-            Ok(Some(value))
-        }
+        Ok(Some(value))
     }
 
     fn range<R>(&self, range: R) -> impl Stream<Item = BTreeResult<(K, V)>> + Send
@@ -86,12 +84,10 @@ where
 {
     type Transaction = RedbBTreeTransaction<K, V>;
 
-    fn transaction(&self) -> impl Future<Output = BTreeResult<Self::Transaction>> + Send {
-        async move {
-            let tx = self.db.begin_write().map_err(BTreeError::custom)?;
+    async fn transaction(&self) -> BTreeResult<Self::Transaction> {
+        let tx = self.db.begin_write().map_err(BTreeError::custom)?;
 
-            Ok(RedbBTreeTransaction::new(tx, &self.name))
-        }
+        Ok(RedbBTreeTransaction::new(tx, &self.name))
     }
 }
 
