@@ -1,7 +1,8 @@
 use core::{cell::Cell, fmt};
 use std::rc::Rc;
 
-use engine::{DirectRowCodec, Engine, InMemoryKernel};
+use engine::{Engine, InMemoryKernel};
+use engine_automerge::AutomergeRowCodec;
 use futures::{StreamExt, channel::mpsc, executor::block_on};
 use schema::{ColumnSchema, TableSchema};
 use sync::{SessionConfig, SyncError, SyncResult, SyncRole, SyncTransport, synchronize};
@@ -142,8 +143,8 @@ fn config() -> SessionConfig {
 #[test]
 fn synchronizes_on_connect() {
     block_on(async {
-        let left = Engine::new(InMemoryKernel::new(), DirectRowCodec);
-        let right = Engine::new(InMemoryKernel::new(), DirectRowCodec);
+        let left = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
+        let right = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
         left.create_table(table("users")).await.unwrap();
         let (left_transport, right_transport) = transport_pair();
         let (mut left_connection, _) = Connection::connected(left_transport);
@@ -167,8 +168,8 @@ fn synchronizes_on_connect() {
 #[test]
 fn coalesces_duplicate_requests() {
     block_on(async {
-        let left = Engine::new(InMemoryKernel::new(), DirectRowCodec);
-        let right = Engine::new(InMemoryKernel::new(), DirectRowCodec);
+        let left = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
+        let right = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
         let (left_transport, right_transport) = transport_pair();
         let (mut left_connection, left_request) = Connection::connected(left_transport);
         let (mut right_connection, right_request) = Connection::connected(right_transport);
@@ -192,8 +193,8 @@ fn coalesces_duplicate_requests() {
 #[test]
 fn request_during_a_session_runs_once_more() {
     block_on(async {
-        let left = Engine::new(InMemoryKernel::new(), DirectRowCodec);
-        let right = Engine::new(InMemoryKernel::new(), DirectRowCodec);
+        let left = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
+        let right = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
         let (left_transport, right_transport) = transport_pair();
         let left_request = SyncRequest::default();
         left_request.request();
@@ -230,8 +231,8 @@ fn request_during_a_session_runs_once_more() {
 #[test]
 fn periodic_repair_after_reconnect_converges_offline_writes() {
     block_on(async {
-        let left = Engine::new(InMemoryKernel::new(), DirectRowCodec);
-        let right = Engine::new(InMemoryKernel::new(), DirectRowCodec);
+        let left = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
+        let right = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
         let (left_transport, right_transport) = transport_pair();
         let (mut left_connection, _) = Connection::connected(left_transport);
         let (mut right_connection, _) = Connection::connected(right_transport);
@@ -291,7 +292,7 @@ impl SyncTransport for FailingTransport {
 #[test]
 fn transport_failure_leaves_the_engine_unchanged() {
     block_on(async {
-        let engine = Engine::new(InMemoryKernel::new(), DirectRowCodec);
+        let engine = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
         engine.create_table(table("users")).await.unwrap();
         let frontier = engine.frontier().await.unwrap();
         let (transport, _) = Connection::connected(FailingTransport);

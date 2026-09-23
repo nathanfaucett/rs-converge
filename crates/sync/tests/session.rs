@@ -1,7 +1,8 @@
 use core::fmt;
 use std::{cell::RefCell, rc::Rc};
 
-use engine::{CheckpointRow, DirectRowCodec, Engine, Frontier, InMemoryKernel, SchemaChange};
+use engine::{CheckpointRow, Engine, Frontier, InMemoryKernel, SchemaChange};
+use engine_automerge::AutomergeRowCodec;
 use futures::{StreamExt, channel::mpsc, executor::block_on};
 use schema::{ColumnSchema, TableSchema};
 use sync::{
@@ -70,16 +71,16 @@ fn table(name: &str) -> TableSchema {
 }
 
 async fn sync(
-    left: &Engine<InMemoryKernel, DirectRowCodec>,
-    right: &Engine<InMemoryKernel, DirectRowCodec>,
+    left: &Engine<InMemoryKernel, AutomergeRowCodec>,
+    right: &Engine<InMemoryKernel, AutomergeRowCodec>,
 ) {
     let config = SessionConfig::default();
     let _ = sync_with(left, right, &config).await;
 }
 
 async fn sync_with(
-    left: &Engine<InMemoryKernel, DirectRowCodec>,
-    right: &Engine<InMemoryKernel, DirectRowCodec>,
+    left: &Engine<InMemoryKernel, AutomergeRowCodec>,
+    right: &Engine<InMemoryKernel, AutomergeRowCodec>,
     config: &SessionConfig,
 ) -> Vec<SyncMessage> {
     let (mut left_transport, mut right_transport) = transport_pair();
@@ -94,7 +95,7 @@ async fn sync_with(
 
 struct WriteAfterCheckpoint<'a> {
     inner: ChannelTransport,
-    engine: &'a Engine<InMemoryKernel, DirectRowCodec>,
+    engine: &'a Engine<InMemoryKernel, AutomergeRowCodec>,
     wrote: bool,
 }
 
@@ -122,8 +123,8 @@ impl SyncTransport for WriteAfterCheckpoint<'_> {
 #[test]
 fn catches_up_a_new_replica() {
     block_on(async {
-        let left = Engine::new(InMemoryKernel::new(), DirectRowCodec);
-        let right = Engine::new(InMemoryKernel::new(), DirectRowCodec);
+        let left = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
+        let right = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
         left.create_table(table("users")).await.unwrap();
 
         sync(&left, &right).await;
@@ -139,8 +140,8 @@ fn catches_up_a_new_replica() {
 #[test]
 fn converges_offline_concurrent_writes() {
     block_on(async {
-        let left = Engine::new(InMemoryKernel::new(), DirectRowCodec);
-        let right = Engine::new(InMemoryKernel::new(), DirectRowCodec);
+        let left = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
+        let right = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
         left.create_table(table("users")).await.unwrap();
         sync(&left, &right).await;
 
@@ -166,8 +167,8 @@ fn converges_offline_concurrent_writes() {
 #[test]
 fn bootstraps_an_empty_replica_with_a_checkpoint() {
     block_on(async {
-        let left = Engine::new(InMemoryKernel::new(), DirectRowCodec);
-        let right = Engine::new(InMemoryKernel::new(), DirectRowCodec);
+        let left = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
+        let right = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
         left.create_table(table("users")).await.unwrap();
         let config = SessionConfig {
             checkpoint_threshold: Some(0),
@@ -188,8 +189,8 @@ fn bootstraps_an_empty_replica_with_a_checkpoint() {
 #[test]
 fn disabled_threshold_uses_envelopes_only() {
     block_on(async {
-        let left = Engine::new(InMemoryKernel::new(), DirectRowCodec);
-        let right = Engine::new(InMemoryKernel::new(), DirectRowCodec);
+        let left = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
+        let right = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
         left.create_table(table("users")).await.unwrap();
 
         let frames = sync_with(&left, &right, &SessionConfig::default()).await;
@@ -205,8 +206,8 @@ fn disabled_threshold_uses_envelopes_only() {
 #[test]
 fn transfers_writes_made_during_checkpoint_bootstrap() {
     block_on(async {
-        let left = Engine::new(InMemoryKernel::new(), DirectRowCodec);
-        let right = Engine::new(InMemoryKernel::new(), DirectRowCodec);
+        let left = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
+        let right = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
         left.create_table(table("users")).await.unwrap();
         let config = SessionConfig {
             checkpoint_threshold: Some(0),
@@ -240,8 +241,8 @@ fn transfers_writes_made_during_checkpoint_bootstrap() {
 #[test]
 fn respects_checkpoint_thresholds_and_envelope_batches() {
     block_on(async {
-        let left = Engine::new(InMemoryKernel::new(), DirectRowCodec);
-        let right = Engine::new(InMemoryKernel::new(), DirectRowCodec);
+        let left = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
+        let right = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
         for name in ["one", "two", "three"] {
             left.create_table(table(name)).await.unwrap();
         }
@@ -267,7 +268,7 @@ fn respects_checkpoint_thresholds_and_envelope_batches() {
             vec![2, 1]
         );
 
-        let destination = Engine::new(InMemoryKernel::new(), DirectRowCodec);
+        let destination = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
         config.checkpoint_threshold = Some(2);
         let frames = sync_with(&left, &destination, &config).await;
         assert!(
@@ -281,8 +282,8 @@ fn respects_checkpoint_thresholds_and_envelope_batches() {
 #[test]
 fn delayed_child_applies_after_checkpoint_bootstrap() {
     block_on(async {
-        let source = Engine::new(InMemoryKernel::new(), DirectRowCodec);
-        let destination = Engine::new(InMemoryKernel::new(), DirectRowCodec);
+        let source = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
+        let destination = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
         source.create_table(table("parent")).await.unwrap();
         let checkpoint = source.export_checkpoint().await.unwrap();
         source.create_table(table("child")).await.unwrap();
@@ -314,22 +315,22 @@ fn delayed_child_applies_after_checkpoint_bootstrap() {
 #[test]
 fn rejects_malformed_checkpoint_frames_without_partial_imports() {
     block_on(async {
-        let engine = Engine::new(InMemoryKernel::new(), DirectRowCodec);
+        let engine = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
         engine.create_table(table("users")).await.unwrap();
         let initial_frontier = engine.frontier().await.unwrap();
-        let source = Engine::new(InMemoryKernel::new(), DirectRowCodec);
+        let source = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
         source.create_table(table("malformed")).await.unwrap();
         let mut checkpoint = source.export_checkpoint().await.unwrap();
         let table = checkpoint
             .schema
             .iter()
             .find_map(|change| match change {
-                SchemaChange::CreateTable { table, .. } => Some(*table),
+                SchemaChange::CreateTable { table, .. } => Some(table),
                 _ => None,
             })
             .unwrap();
         checkpoint.rows.push(CheckpointRow {
-            table,
+            table: *table,
             row: table.0,
             state: vec![0xff],
         });

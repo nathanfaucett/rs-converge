@@ -39,6 +39,10 @@ impl DocumentChangeKey {
         Self::new(id, DocumentType::Incremental, change_hash)
     }
 
+    pub fn new_metadata(id: DocumentId) -> Self {
+        Self::new(id, DocumentType::Metadata, [0; 32])
+    }
+
     pub fn id_to_uuid(id: &[u8]) -> Uuid {
         if id.len() == 16
             && let Some(uuid) = Uuid::from_slice(id).ok()
@@ -110,6 +114,7 @@ impl DocumentChangeKey {
         let r#type = match bytes.get(index) {
             Some(0) => DocumentType::Snapshot,
             Some(1) => DocumentType::Incremental,
+            Some(2) => DocumentType::Metadata,
             _ => return Err(BTreeError::InvalidDocument),
         };
         let hash: DocumentChangeHash = bytes
@@ -131,7 +136,7 @@ impl DocumentChangeKey {
     pub fn max_for_id(id: DocumentId) -> Self {
         Self {
             id,
-            r#type: DocumentType::Incremental,
+            r#type: DocumentType::Metadata,
             change_hash: [255u8; 32],
         }
     }
@@ -197,6 +202,7 @@ mod tests {
             DocumentChangeKey::new(vec![1], DocumentType::Snapshot, [0; 32]),
             DocumentChangeKey::new(vec![1], DocumentType::Incremental, [0; 32]),
             DocumentChangeKey::new(vec![1], DocumentType::Incremental, [1; 32]),
+            DocumentChangeKey::new(vec![1], DocumentType::Metadata, [0; 32]),
         ];
         for pair in keys.windows(2) {
             assert_eq!(
@@ -212,7 +218,7 @@ mod tests {
 
     #[test]
     fn ordered_codec_rejects_malformed_bytes() {
-        for bytes in [vec![], vec![0], vec![0, 1], vec![0, 0, 2], vec![0, 0, 0]] {
+        for bytes in [vec![], vec![0], vec![0, 1], vec![0, 0, 3], vec![0, 0, 0]] {
             assert!(DocumentChangeKey::decode_ordered(&bytes).is_err());
         }
     }

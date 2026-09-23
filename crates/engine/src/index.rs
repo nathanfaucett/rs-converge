@@ -2,30 +2,26 @@ use alloc::{vec, vec::Vec};
 
 use futures::{StreamExt, pin_mut};
 use schema::{ColumnSchemaIndex, IndexSchema};
+use uuid::Uuid;
 use value::{Row, Value};
 
 use crate::{
     ColumnGenerationId, EngineError, EngineResult, IndexGenerationId, KernelTransaction, RowCodec,
     RowTable, TableGenerationId,
-    catalog::ENGINE_INDICES,
+    catalog::INTERNAL_INDICES,
+    catalog::internal_table_storage_uuid,
     executor::{materialize_defaults, row_id},
-    schema::{columns, table_label, table_schema_for},
+    schema::{columns, index_deleted, table_label, table_schema_for},
 };
-
-pub(crate) const ENGINE_INDEX_RECORDS: &str = "__db_index_records";
-
-pub(crate) async fn ensure_index_records<T>(transaction: &mut T) -> EngineResult<()>
-where
-    T: KernelTransaction,
-{
-    transaction.ensure_table(ENGINE_INDEX_RECORDS).await
-}
 
 async fn index<T>(transaction: &T, name: &str) -> EngineResult<Option<(IndexGenerationId, Row)>>
 where
     T: KernelTransaction,
 {
-    let entries = transaction.scan_entries(ENGINE_INDICES);
+    let storage = internal_table_storage_uuid(INTERNAL_INDICES).ok_or(EngineError::custom(
+        "Internal index table is not configured",
+    ))?;
+    let entries = transaction.scan_entries_owned(storage);
     pin_mut!(entries);
     let mut winner = None;
     while let Some(entry) = entries.next().await {
@@ -36,12 +32,7 @@ where
         if value.values.first().and_then(Value::as_text) != Some(name) {
             continue;
         }
-        let tombstone = Row::new(vec![Value::from("index"), Value::Uuid(id)]);
-        if transaction
-            .get_entry("__schema_tombstones", &tombstone)
-            .await?
-            .is_some()
-        {
+        if index_deleted(transaction, id).await? {
             continue;
         }
         if winner
@@ -94,7 +85,12 @@ where
         .ok_or(EngineError::custom("Invalid index uniqueness"))?;
     let columns = columns(transaction, table).await?;
     let mut positions = Vec::new();
-    for column in value.values.iter().skip(3) {
+    let end = if value.values.last().and_then(Value::to_bool).is_some() {
+        value.values.len() - 1
+    } else {
+        value.values.len()
+    };
+    for column in value.values[3..end].iter() {
         let column = column
             .as_uuid()
             .copied()
@@ -137,7 +133,10 @@ async fn indexes_for_table<T>(
 where
     T: KernelTransaction,
 {
-    let entries = transaction.scan_entries(ENGINE_INDICES);
+    let storage = internal_table_storage_uuid(INTERNAL_INDICES).ok_or(EngineError::custom(
+        "Internal index table is not configured",
+    ))?;
+    let entries = transaction.scan_entries_owned(storage);
     pin_mut!(entries);
     let mut facts = Vec::new();
     while let Some(entry) = entries.next().await {
@@ -150,12 +149,7 @@ where
 
     let mut visible = Vec::new();
     for (id, value) in facts {
-        let tombstone = Row::new(vec![Value::from("index"), Value::Uuid(id.0)]);
-        if transaction
-            .get_entry("__schema_tombstones", &tombstone)
-            .await?
-            .is_none()
-        {
+        if !index_deleted(transaction, id.0).await? {
             visible.push((id, value));
         }
     }
@@ -227,14 +221,13 @@ where
             "Index key has the wrong column count",
         ));
     }
-    let entries = transaction.scan_entries(ENGINE_INDEX_RECORDS);
+    let storage = id.0;
+    let entries = transaction.scan_entries_owned(storage);
     pin_mut!(entries);
     let mut winner = None;
     while let Some(entry) = entries.next().await {
         let (key, value) = entry?;
-        if key.values.first().and_then(Value::as_uuid) != Some(&id.0)
-            || key.values.get(1..=values.values.len()) != Some(values.values.as_slice())
-        {
+        if key.values.get(1..=values.values.len()) != Some(values.values.as_slice()) {
             continue;
         }
         winner = Some(winner.map_or(value.clone(), |current: Row| current.min(value)));
@@ -244,7 +237,7 @@ where
         return Ok(None);
     };
     let table = table_id_from_index(&schema, transaction).await?;
-    codec.get_row(transaction, &table, &row).await
+    codec.get_row(transaction, table.0, &row).await
 }
 
 async fn table_id_from_index<T>(
@@ -267,34 +260,32 @@ where
     T: KernelTransaction,
     R: RowCodec<T>,
 {
-    ensure_index_records(transaction).await?;
     let indexes = indexes_for_table(transaction, table).await?;
-    let ids: Vec<_> = indexes.iter().map(|(id, _)| id.0).collect();
-    let stale = {
-        let entries = transaction.scan_entries(ENGINE_INDEX_RECORDS);
-        pin_mut!(entries);
-        let mut stale = Vec::new();
-        while let Some(entry) = entries.next().await {
-            let (key, _) = entry?;
-            if key
-                .values
-                .first()
-                .and_then(Value::as_uuid)
-                .is_some_and(|id| ids.contains(id))
-            {
+    if indexes.is_empty() {
+        return Ok(());
+    }
+    for (id, _) in &indexes {
+        let storage = id.0;
+        transaction.ensure_table(storage).await?;
+        let stale = {
+            let entries = transaction.scan_entries_owned(storage);
+            pin_mut!(entries);
+            let mut stale = Vec::new();
+            while let Some(entry) = entries.next().await {
+                let (key, _) = entry?;
                 stale.push(key);
             }
+            stale
+        };
+        for key in stale {
+            transaction.remove_entry(storage, &key).await?;
         }
-        stale
-    };
-    for key in stale {
-        transaction.remove_entry(ENGINE_INDEX_RECORDS, &key).await?;
     }
 
     let schema =
         table_schema_for(transaction, table, table_label(transaction, table).await?).await?;
     let rows_to_index = {
-        let rows = codec.scan_rows(transaction, &table);
+        let rows = codec.scan_rows(transaction, table.0);
         pin_mut!(rows);
         let mut rows_to_index = Vec::new();
         while let Some(row) = rows.next().await {
@@ -319,14 +310,15 @@ pub(crate) async fn update_row<T>(
 where
     T: KernelTransaction,
 {
-    ensure_index_records(transaction).await?;
     let schema =
         table_schema_for(transaction, table, table_label(transaction, table).await?).await?;
     for (id, index) in indexes_for_table(transaction, table).await? {
+        let storage = id.0;
+        transaction.ensure_table(storage).await?;
         if let Some(row) = old {
             transaction
                 .remove_entry(
-                    ENGINE_INDEX_RECORDS,
+                    storage,
                     &record_key(
                         id,
                         &index,
@@ -345,28 +337,24 @@ where
                 && !key.values[1..=index.column_indices.len()]
                     .iter()
                     .any(|value| matches!(value, Value::Null))
-                && unique_key_exists(transaction, &key).await?
+                && unique_key_exists(transaction, storage, &key).await?
             {
                 return Err(EngineError::InvalidQuery("Unique index violation"));
             }
             transaction
-                .put_entry(
-                    ENGINE_INDEX_RECORDS,
-                    key,
-                    Row::new(vec![Value::Uuid(row_id)]),
-                )
+                .put_entry(storage, key, Row::new(vec![Value::Uuid(row_id)]))
                 .await?;
         }
     }
     Ok(())
 }
 
-async fn unique_key_exists<T>(transaction: &T, key: &Row) -> EngineResult<bool>
+async fn unique_key_exists<T>(transaction: &T, storage: Uuid, key: &Row) -> EngineResult<bool>
 where
     T: KernelTransaction,
 {
     let values = &key.values[0..key.values.len() - 1];
-    let entries = transaction.scan_entries(ENGINE_INDEX_RECORDS);
+    let entries = transaction.scan_entries(storage);
     pin_mut!(entries);
     while let Some(entry) = entries.next().await {
         let (candidate, _) = entry?;

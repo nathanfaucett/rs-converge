@@ -498,6 +498,7 @@ dependencies = [
  "query",
  "redb",
  "schema",
+ "serde",
  "uuid",
  "value",
 ]
@@ -512,6 +513,7 @@ dependencies = [
  "engine",
  "futures",
  "redb",
+ "uuid",
  "value",
 ]
 
@@ -1376,6 +1378,7 @@ name = "sync"
 version = "0.1.0"
 dependencies = [
  "engine",
+ "engine-automerge",
  "futures",
  "postcard",
  "schema",

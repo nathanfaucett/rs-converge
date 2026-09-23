@@ -1,16 +1,16 @@
-use alloc::{collections::BTreeMap, string::String, sync::Arc, vec, vec::Vec};
+use alloc::{collections::BTreeMap, sync::Arc, vec, vec::Vec};
 
 use async_lock::RwLock;
 
 use futures::{Stream, stream};
+use uuid::Uuid;
 
 use crate::{
     EngineError, EngineResult,
-    catalog::{ENGINE_INDICES, ENGINE_TABLE_FIELDS, ENGINE_TABLES},
     kernel::{Kernel, KernelTransaction},
 };
 
-type Tables = BTreeMap<String, BTreeMap<Vec<u8>, Vec<u8>>>;
+type Tables = BTreeMap<Uuid, BTreeMap<Vec<u8>, Vec<u8>>>;
 
 struct State {
     revision: u64,
@@ -24,14 +24,10 @@ pub struct InMemoryKernel {
 
 impl InMemoryKernel {
     pub fn new() -> Self {
-        let mut tables = Tables::new();
-        for name in [ENGINE_TABLES, ENGINE_TABLE_FIELDS, ENGINE_INDICES] {
-            tables.insert(String::from(name), BTreeMap::new());
-        }
         Self {
             state: Arc::new(RwLock::new(State {
                 revision: 0,
-                tables,
+                tables: Tables::new(),
             })),
         }
     }
@@ -63,20 +59,20 @@ impl Kernel for InMemoryKernel {
 }
 
 impl InMemoryKernelTransaction {
-    fn table(&self, name: &str) -> EngineResult<&BTreeMap<Vec<u8>, Vec<u8>>> {
+    fn table(&self, table: Uuid) -> EngineResult<&BTreeMap<Vec<u8>, Vec<u8>>> {
         self.tables
-            .get(name)
+            .get(&table)
             .ok_or_else(|| EngineError::custom("Table not found"))
     }
 
-    fn table_mut(&mut self, name: &str) -> EngineResult<&mut BTreeMap<Vec<u8>, Vec<u8>>> {
+    fn table_mut(&mut self, table: Uuid) -> EngineResult<&mut BTreeMap<Vec<u8>, Vec<u8>>> {
         self.tables
-            .get_mut(name)
+            .get_mut(&table)
             .ok_or_else(|| EngineError::custom("Table not found"))
     }
 
-    fn scan(&self, name: &str) -> Vec<EngineResult<(Vec<u8>, Vec<u8>)>> {
-        match self.table(name) {
+    fn scan(&self, table: Uuid) -> Vec<EngineResult<(Vec<u8>, Vec<u8>)>> {
+        match self.table(table) {
             Ok(table) => table
                 .iter()
                 .map(|(key, value)| Ok((key.clone(), value.clone())))
@@ -87,32 +83,32 @@ impl InMemoryKernelTransaction {
 }
 
 impl KernelTransaction for InMemoryKernelTransaction {
-    async fn ensure_table(&mut self, name: &str) -> EngineResult<()> {
-        self.tables.entry(String::from(name)).or_default();
+    async fn ensure_table(&mut self, table: Uuid) -> EngineResult<()> {
+        self.tables.entry(table).or_default();
         Ok(())
     }
 
-    async fn drop_table(&mut self, name: &str) -> EngineResult<()> {
+    async fn drop_table(&mut self, table: Uuid) -> EngineResult<()> {
         self.tables
-            .remove(name)
+            .remove(&table)
             .map(|_| ())
             .ok_or_else(|| EngineError::custom("Table not found"))
     }
 
-    async fn get_bytes(&self, table: &str, key: &[u8]) -> EngineResult<Option<Vec<u8>>> {
+    async fn get_bytes(&self, table: Uuid, key: &[u8]) -> EngineResult<Option<Vec<u8>>> {
         Ok(self.table(table)?.get(key).cloned())
     }
 
-    fn scan_bytes(&self, table: &str) -> impl Stream<Item = EngineResult<(Vec<u8>, Vec<u8>)>> {
+    fn scan_bytes(&self, table: Uuid) -> impl Stream<Item = EngineResult<(Vec<u8>, Vec<u8>)>> {
         stream::iter(self.scan(table))
     }
 
-    async fn put_bytes(&mut self, table: &str, key: Vec<u8>, value: Vec<u8>) -> EngineResult<()> {
+    async fn put_bytes(&mut self, table: Uuid, key: Vec<u8>, value: Vec<u8>) -> EngineResult<()> {
         self.table_mut(table)?.insert(key, value);
         Ok(())
     }
 
-    async fn remove_bytes(&mut self, table: &str, key: &[u8]) -> EngineResult<Option<Vec<u8>>> {
+    async fn remove_bytes(&mut self, table: Uuid, key: &[u8]) -> EngineResult<Option<Vec<u8>>> {
         Ok(self.table_mut(table)?.remove(key))
     }
 
@@ -133,5 +129,41 @@ impl KernelTransaction for InMemoryKernelTransaction {
 
     async fn rollback(self) -> EngineResult<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use futures::executor::block_on;
+
+    use super::InMemoryKernel;
+    use crate::{Kernel, KernelTransaction};
+    use uuid::Uuid;
+
+    #[test]
+    fn backing_uuids_are_isolated() {
+        block_on(async {
+            let kernel = InMemoryKernel::new();
+            let first = Uuid::from_u128(1);
+            let second = Uuid::from_u128(2);
+            let key = b"key";
+
+            let mut transaction = kernel.transaction().await.unwrap();
+            transaction.ensure_table(first).await.unwrap();
+            transaction.ensure_table(second).await.unwrap();
+            transaction
+                .put_bytes(first, key.to_vec(), b"first".to_vec())
+                .await
+                .unwrap();
+            transaction.commit().await.unwrap();
+
+            let transaction = kernel.transaction().await.unwrap();
+            assert_eq!(
+                transaction.get_bytes(first, key).await.unwrap(),
+                Some(b"first".to_vec())
+            );
+            assert_eq!(transaction.get_bytes(second, key).await.unwrap(), None);
+            transaction.rollback().await.unwrap();
+        });
     }
 }

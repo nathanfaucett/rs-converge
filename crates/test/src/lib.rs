@@ -7,8 +7,7 @@ pub mod transport;
 pub use case::{Expectation, ExpectedError, NodeId, Step, TestCase, TestCaseBuilder, TestSuite};
 pub use chaos::{ChaosNetwork, ChaosScenario, ChaosStep, run_chaos};
 pub use cluster::{
-    Cluster, Node, RedbClusterCleanup, automerge_redb_cluster, direct_in_memory_cluster,
-    direct_redb_cluster,
+    Cluster, Node, RedbClusterCleanup, automerge_in_memory_cluster, automerge_redb_cluster,
 };
 pub use runner::{
     ChaosRunner, ClusterOfflineRunner, ClusterRealtimeRunner, RunnerError, SingleNodeRunner,

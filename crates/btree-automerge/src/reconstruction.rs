@@ -28,6 +28,12 @@ impl ReconstructedDocument {
     }
 
     pub fn apply(&mut self, key: &DocumentChangeKey, data: &[u8]) -> BTreeResult<()> {
+        if key.r#type().is_metadata() {
+            self.doc = None;
+            self.deltas += 1;
+            self.bytes_size += data.len();
+            return Ok(());
+        }
         if let Some(doc) = self.doc.as_mut() {
             doc.load_incremental(data).map_err(BTreeError::custom)?;
         } else {

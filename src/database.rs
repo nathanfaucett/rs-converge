@@ -1,8 +1,6 @@
+use alloc::format;
 #[cfg(not(feature = "std"))]
-use alloc::{
-    string::{String, ToString},
-    vec::Vec,
-};
+use alloc::{string::String, vec::Vec};
 
 #[cfg(feature = "in-memory")]
 use engine::InMemoryKernel;
@@ -34,6 +32,11 @@ macro_rules! database_call {
             Database::File($engine) => $body,
             #[cfg(all(feature = "automerge", feature = "in-memory"))]
             Database::InMemory($engine) => $body,
+            #[cfg(not(any(
+                all(feature = "automerge", feature = "redb"),
+                all(feature = "automerge", feature = "in-memory"),
+            )))]
+            _ => Err(EngineError::custom("no database backend is enabled")),
         }
     }};
 }

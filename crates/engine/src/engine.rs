@@ -12,7 +12,6 @@ use value::{FromRow, Row, Value};
 use std::sync::Arc;
 
 use thiserror::Error;
-use uuid::Uuid;
 
 use query::{QueryParams, QueryResult, Statement, TranslateError, Translator};
 
@@ -25,10 +24,10 @@ use crate::{
         import_checkpoint, outcome, outcomes, quarantine,
     },
     executor::{
-        execute_statement, resolve_row as resolve_conflicted_row,
+        bootstrap_internal_tables, execute_statement, resolve_row as resolve_conflicted_row,
         row_conflicts as conflicted_row_columns,
     },
-    index::{ensure_index_records, index_generation_id, index_schema, lookup as index_lookup},
+    index::{index_generation_id, index_schema, lookup as index_lookup},
     kernel::{Kernel, KernelTransaction},
     schema::ensure,
 };
@@ -44,8 +43,8 @@ pub enum EngineError {
     #[error("Invalid query: {0}")]
     InvalidQuery(&'static str),
 
-    #[error("A UUID provider is required to generate a primary key")]
-    MissingUuidProvider,
+    #[error("A timestamp provider is required to generate a UUID")]
+    MissingTimestampProvider,
 
     #[error("Error: {0}")]
     Custom(String),
@@ -62,15 +61,15 @@ impl EngineError {
 
 pub type EngineResult<T> = Result<T, EngineError>;
 
-pub type UuidProvider = fn() -> Option<Uuid>;
+pub type TimestampProvider = fn() -> Option<uuid::Timestamp>;
 
 #[cfg(feature = "std")]
-fn default_uuid_provider() -> Option<Uuid> {
-    Some(Uuid::now_v7())
+fn default_timestamp_provider() -> Option<uuid::Timestamp> {
+    Some(uuid::Timestamp::now(uuid::NoContext))
 }
 
 #[cfg(not(feature = "std"))]
-fn default_uuid_provider() -> Option<Uuid> {
+fn default_timestamp_provider() -> Option<uuid::Timestamp> {
     None
 }
 
@@ -78,7 +77,7 @@ fn default_uuid_provider() -> Option<Uuid> {
 pub struct Engine<K, R> {
     pub(crate) kernel: Arc<K>,
     pub(crate) reconciler: Arc<R>,
-    pub(crate) uuid_provider: UuidProvider,
+    pub(crate) timestamp_provider: TimestampProvider,
 }
 
 impl<K, R> From<(K, R)> for Engine<K, R> {
@@ -86,7 +85,7 @@ impl<K, R> From<(K, R)> for Engine<K, R> {
         Self {
             kernel: Arc::new(kernel),
             reconciler: Arc::new(reconciler),
-            uuid_provider: default_uuid_provider,
+            timestamp_provider: default_timestamp_provider,
         }
     }
 }
@@ -96,11 +95,15 @@ impl<K, R> Engine<K, R> {
         Self::from((kernel, reconciler))
     }
 
-    pub fn with_uuid_provider(kernel: K, reconciler: R, uuid_provider: UuidProvider) -> Self {
+    pub fn with_timestamp_provider(
+        kernel: K,
+        reconciler: R,
+        timestamp_provider: TimestampProvider,
+    ) -> Self {
         Self {
             kernel: Arc::new(kernel),
             reconciler: Arc::new(reconciler),
-            uuid_provider,
+            timestamp_provider,
         }
     }
 }
@@ -230,7 +233,7 @@ where
 
     pub async fn frontier(&self) -> EngineResult<Frontier> {
         let mut transaction = self.kernel.transaction().await?;
-        ensure_replication_tables(&mut transaction).await?;
+        ensure_replication_tables(&mut transaction, self.reconciler.as_ref()).await?;
         let result = frontier(&transaction).await?;
         transaction.commit().await?;
         Ok(result)
@@ -238,7 +241,7 @@ where
 
     pub async fn export_checkpoint(&self) -> EngineResult<Checkpoint> {
         let mut transaction = self.kernel.transaction().await?;
-        ensure_replication_tables(&mut transaction).await?;
+        ensure_replication_tables(&mut transaction, self.reconciler.as_ref()).await?;
         let result = checkpoint(&transaction, self.reconciler.as_ref()).await?;
         transaction.commit().await?;
         Ok(result)
@@ -246,7 +249,7 @@ where
 
     pub async fn import_checkpoint(&self, checkpoint: Checkpoint) -> EngineResult<()> {
         let mut transaction = self.kernel.transaction().await?;
-        ensure_replication_tables(&mut transaction).await?;
+        ensure_replication_tables(&mut transaction, self.reconciler.as_ref()).await?;
         let result =
             import_checkpoint(&mut transaction, self.reconciler.as_ref(), checkpoint).await;
         match result {
@@ -263,7 +266,7 @@ where
         frontier: &Frontier,
     ) -> EngineResult<Vec<TransactionEnvelope>> {
         let mut transaction = self.kernel.transaction().await?;
-        ensure_replication_tables(&mut transaction).await?;
+        ensure_replication_tables(&mut transaction, self.reconciler.as_ref()).await?;
         let result = envelopes_missing(&transaction, frontier).await?;
         transaction.commit().await?;
         Ok(result)
@@ -271,7 +274,7 @@ where
 
     pub async fn envelope_outcome(&self, id: EnvelopeId) -> EngineResult<Option<EnvelopeOutcome>> {
         let mut transaction = self.kernel.transaction().await?;
-        ensure_replication_tables(&mut transaction).await?;
+        ensure_replication_tables(&mut transaction, self.reconciler.as_ref()).await?;
         let result = outcome(&transaction, id).await?;
         transaction.commit().await?;
         Ok(result)
@@ -279,7 +282,7 @@ where
 
     pub async fn envelope_outcomes(&self) -> EngineResult<Vec<(EnvelopeId, EnvelopeOutcome)>> {
         let mut transaction = self.kernel.transaction().await?;
-        ensure_replication_tables(&mut transaction).await?;
+        ensure_replication_tables(&mut transaction, self.reconciler.as_ref()).await?;
         let outcomes = outcomes(&transaction).await?;
         transaction.commit().await?;
         Ok(outcomes)
@@ -300,11 +303,11 @@ where
         values: Vec<(String, Value)>,
     ) -> EngineResult<()> {
         let mut transaction = self.kernel.transaction().await?;
-        ensure_replication_tables(&mut transaction).await?;
+        ensure_replication_tables(&mut transaction, self.reconciler.as_ref()).await?;
         let result = resolve_conflicted_row(
             &mut transaction,
             self.reconciler.as_ref(),
-            self.uuid_provider,
+            self.timestamp_provider,
             table_name,
             key,
             values,
@@ -324,7 +327,7 @@ where
         envelope: TransactionEnvelope,
     ) -> EngineResult<EnvelopeOutcome> {
         let mut transaction = self.kernel.transaction().await?;
-        ensure_replication_tables(&mut transaction).await?;
+        ensure_replication_tables(&mut transaction, self.reconciler.as_ref()).await?;
         let outcome = import_envelope(&mut transaction, self.reconciler.as_ref(), envelope).await?;
         transaction.commit().await?;
         Ok(outcome)
@@ -344,18 +347,19 @@ where
         reason: String,
     ) -> EngineResult<EnvelopeOutcome> {
         let mut transaction = self.kernel.transaction().await?;
-        ensure_replication_tables(&mut transaction).await?;
+        ensure_replication_tables(&mut transaction, self.reconciler.as_ref()).await?;
         let outcome = quarantine(&mut transaction, bytes, reason).await?;
         transaction.commit().await?;
         Ok(outcome)
     }
 }
 
-async fn ensure_replication_tables<T>(transaction: &mut T) -> EngineResult<()>
+async fn ensure_replication_tables<T, R>(transaction: &mut T, codec: &R) -> EngineResult<()>
 where
     T: KernelTransaction,
+    R: RowCodec<T>,
 {
     ensure(transaction).await?;
-    ensure_index_records(transaction).await?;
+    bootstrap_internal_tables(transaction, codec, &mut Vec::new()).await?;
     ensure_envelope_log(transaction).await
 }

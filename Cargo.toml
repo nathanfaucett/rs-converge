@@ -60,21 +60,45 @@ members = [
   "crates/test",
 ]
 
+[[test]]
+name = "sync"
+required-features = ["sync", "sql", "automerge", "redb", "in-memory"]
+
+[[test]]
+name = "database"
+required-features = ["sql", "automerge", "redb", "in-memory"]
+
+[[test]]
+name = "cluster_sync"
+required-features = ["sync", "sql", "automerge", "redb", "in-memory"]
+
+[[test]]
+name = "cluster_chaos"
+required-features = ["sync", "sql", "automerge", "redb", "in-memory"]
+
+[[test]]
+name = "local_sql"
+required-features = ["sql", "automerge", "redb", "in-memory"]
+
+[[test]]
+name = "sql_select"
+required-features = ["macros"]
+
 [[example]]
 name = "in_memory"
-required-features = ["in-memory"]
+required-features = ["sql", "automerge", "in-memory"]
 
 [[example]]
 name = "in_memory_cli"
-required-features = ["in-memory"]
+required-features = ["sql", "automerge", "in-memory"]
 
 [[example]]
 name = "redb_automerge"
-required-features = ["redb", "automerge"]
+required-features = ["sql", "redb", "automerge"]
 
 [[example]]
 name = "redb_automerge_cli"
-required-features = ["redb", "automerge"]
+required-features = ["sql", "redb", "automerge"]
 
 [workspace.package]
 version = "0.1.0"

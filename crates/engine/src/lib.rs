@@ -18,13 +18,15 @@ mod row_table;
 mod schema;
 
 pub use bytes_table::{BytesTable, BytesTableTransaction};
-pub use catalog::ENGINE_TABLE_FIELDS_FIELD_COLUMN_ID;
+pub use catalog::{
+    ENGINE_TABLE_FIELDS_FIELD_COLUMN_ID, ENGINE_TABLE_FIELDS_STORAGE, ENGINE_TABLES_STORAGE,
+};
 pub use change::{Change, ChangeKey};
-pub use codec::{DirectRowCodec, RowCodec};
-pub use engine::{Engine, EngineError, EngineResult, UuidProvider};
+pub use codec::RowCodec;
+pub use engine::{Engine, EngineError, EngineResult, TimestampProvider};
 pub use envelope::{
-    Checkpoint, CheckpointRow, EnvelopeHeader, EnvelopeId, EnvelopeOutcome, Frontier, RowTombstone,
-    TransactionEnvelope,
+    Checkpoint, CheckpointRow, CheckpointRowMetadata, EnvelopeHeader, EnvelopeId, EnvelopeOutcome,
+    Frontier, TransactionEnvelope,
 };
 pub use id::{ColumnGenerationId, IndexGenerationId, TableGenerationId};
 #[cfg(feature = "in-memory")]

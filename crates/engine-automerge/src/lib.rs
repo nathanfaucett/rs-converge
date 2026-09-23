@@ -1,3 +1,3 @@
 mod codec;
 
-pub use codec::AutomergeRowCodec;
+pub use codec::{AutomergeRowCodec, RowMetadata};

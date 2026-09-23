@@ -6,25 +6,26 @@ use btree::{BTreeError, BTreeRead, BTreeResult, BTreeTransaction};
 use futures::{Stream, StreamExt, pin_mut};
 
 use crate::KernelTransaction;
+use uuid::Uuid;
 
 pub struct BytesTable<'a, T> {
     transaction: &'a T,
-    table: &'a str,
+    table: Uuid,
 }
 
 pub struct BytesTableTransaction<'a, T> {
     transaction: &'a mut T,
-    table: &'a str,
+    table: Uuid,
 }
 
 impl<'a, T> BytesTable<'a, T> {
-    pub fn new(transaction: &'a T, table: &'a str) -> Self {
+    pub fn new(transaction: &'a T, table: Uuid) -> Self {
         Self { transaction, table }
     }
 }
 
 impl<'a, T> BytesTableTransaction<'a, T> {
-    pub fn new(transaction: &'a mut T, table: &'a str) -> Self {
+    pub fn new(transaction: &'a mut T, table: Uuid) -> Self {
         Self { transaction, table }
     }
 }

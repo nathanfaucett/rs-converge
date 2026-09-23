@@ -15,13 +15,17 @@ use crate::{
     Change, EngineError, EngineResult, KernelTransaction, RowCodec, RowTable, SchemaChange,
     TableGenerationId,
     catalog::{
-        ENGINE_ENVELOPE_FRONTIER, ENGINE_ENVELOPE_HEADERS, ENGINE_ENVELOPE_LOG,
-        ENGINE_ENVELOPE_SEQUENCE, ENGINE_ENVELOPE_STATUS, ENGINE_ENVELOPES,
-        ENGINE_QUARANTINED_ENVELOPES,
+        INTERNAL_ENVELOPE_FRONTIER, INTERNAL_ENVELOPE_HEADERS, INTERNAL_ENVELOPE_LOG,
+        INTERNAL_ENVELOPE_SEQUENCE, INTERNAL_ENVELOPE_STATUS, INTERNAL_ENVELOPES,
+        INTERNAL_QUARANTINED_ENVELOPES, INTERNAL_TABLE_NAMES, internal_table_storage_uuid,
+        is_internal_table_generation,
     },
     change::materialize_change,
     index::rebuild_table,
-    schema::{active_table_ids, checkpoint_changes, materialize as materialize_schema},
+    schema::{
+        active_table_ids, checkpoint_changes, materialize as materialize_schema,
+        table_id as schema_table_id,
+    },
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -42,6 +46,10 @@ impl Frontier {
 
 const WIRE_VERSION: u8 = 3;
 const CHECKPOINT_WIRE_VERSION: u8 = 1;
+
+fn storage(name: &str) -> Uuid {
+    internal_table_storage_uuid(name).expect("internal table name is registered")
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TransactionEnvelope {
@@ -64,9 +72,10 @@ pub struct CheckpointRow {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct RowTombstone {
+pub struct CheckpointRowMetadata {
     pub table: TableGenerationId,
     pub row: Uuid,
+    pub metadata: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -75,7 +84,7 @@ pub struct Checkpoint {
     pub headers: Vec<EnvelopeHeader>,
     pub schema: Vec<SchemaChange>,
     pub rows: Vec<CheckpointRow>,
-    pub row_tombstones: Vec<RowTombstone>,
+    pub row_metadata: Vec<CheckpointRowMetadata>,
 }
 
 impl Checkpoint {
@@ -166,16 +175,9 @@ pub(crate) async fn ensure_envelope_log<T>(transaction: &mut T) -> EngineResult<
 where
     T: KernelTransaction,
 {
-    for table in [
-        ENGINE_ENVELOPES,
-        ENGINE_ENVELOPE_FRONTIER,
-        ENGINE_ENVELOPE_LOG,
-        ENGINE_ENVELOPE_SEQUENCE,
-        ENGINE_ENVELOPE_STATUS,
-        ENGINE_ENVELOPE_HEADERS,
-        ENGINE_QUARANTINED_ENVELOPES,
-    ] {
-        transaction.ensure_table(table).await?;
+    for name in INTERNAL_TABLE_NAMES {
+        let storage = schema_table_id(transaction, name).await?.0;
+        transaction.ensure_table(storage).await?;
     }
     Ok(())
 }
@@ -184,7 +186,7 @@ pub(crate) async fn frontier<T>(transaction: &T) -> EngineResult<Frontier>
 where
     T: KernelTransaction,
 {
-    let entries = transaction.scan_entries(ENGINE_ENVELOPE_FRONTIER);
+    let entries = transaction.scan_entries_owned(storage(INTERNAL_ENVELOPE_FRONTIER));
     pin_mut!(entries);
     let mut heads = Vec::new();
     while let Some(entry) = entries.next().await {
@@ -246,18 +248,23 @@ where
     for change in &checkpoint.schema {
         let _ = materialize_schema(transaction, change).await?;
         if let SchemaChange::CreateTable { table, .. } = change {
-            codec.ensure_table(transaction, *table).await?;
+            codec.ensure_table(transaction, table.0).await?;
         }
     }
-    for tombstone in &checkpoint.row_tombstones {
+    for metadata in &checkpoint.row_metadata {
         codec
-            .tombstone_row(transaction, &tombstone.table, &tombstone.row)
+            .merge_row_metadata(
+                transaction,
+                metadata.table.0,
+                metadata.row,
+                &metadata.metadata,
+            )
             .await?;
     }
     let mut rebuild = BTreeSet::new();
     for row in &checkpoint.rows {
         if codec
-            .merge_row_state(transaction, &row.table, row.row, &row.state)
+            .merge_row_state(transaction, row.table.0, row.row, &row.state)
             .await?
             .is_some()
         {
@@ -270,13 +277,17 @@ where
     for header in &checkpoint.headers {
         for parent in &header.parents {
             transaction
-                .remove_entry(ENGINE_ENVELOPE_FRONTIER, &key(*parent))
+                .remove_entry(storage(INTERNAL_ENVELOPE_FRONTIER), &key(*parent))
                 .await?;
         }
     }
     for head in checkpoint.frontier.heads {
         transaction
-            .put_entry(ENGINE_ENVELOPE_FRONTIER, key(head), Row::default())
+            .put_entry(
+                storage(INTERNAL_ENVELOPE_FRONTIER),
+                key(head),
+                Row::default(),
+            )
             .await?;
     }
     retry_pending(transaction, codec).await
@@ -297,13 +308,17 @@ where
     };
     transaction
         .put_entry(
-            ENGINE_QUARANTINED_ENVELOPES,
+            storage(INTERNAL_QUARANTINED_ENVELOPES),
             key.clone(),
             Row::new(vec![Value::Blob(bytes), Value::from(reason.as_str())]),
         )
         .await?;
     transaction
-        .put_entry(ENGINE_ENVELOPE_STATUS, key, status_row(&outcome)?)
+        .put_entry(
+            storage(INTERNAL_ENVELOPE_STATUS),
+            key,
+            status_row(&outcome)?,
+        )
         .await?;
     Ok(outcome)
 }
@@ -318,20 +333,28 @@ where
     let schema = checkpoint_changes(transaction).await?;
     let tables = active_table_ids(transaction).await?;
     let mut rows = Vec::new();
-    let mut row_tombstones = Vec::new();
+    let mut row_metadata = Vec::new();
     for table in tables {
-        let table_rows = codec.scan_rows(transaction, &table);
+        if is_internal_table_generation(table) {
+            continue;
+        }
+        let table_rows = codec.scan_rows(transaction, table.0);
         pin_mut!(table_rows);
         while let Some(row) = table_rows.next().await {
             let (row, _) = row?;
-            if let Some(state) = codec.export_row_state(transaction, &table, &row).await? {
+            if let Some(state) = codec.export_row_state(transaction, table.0, &row).await? {
                 rows.push(CheckpointRow { table, row, state });
             }
         }
-        let tombstones = codec.row_tombstones(transaction, &table);
-        pin_mut!(tombstones);
-        while let Some(row) = tombstones.next().await {
-            row_tombstones.push(RowTombstone { table, row: row? });
+        let metadata = codec.export_row_metadata(transaction, table.0);
+        pin_mut!(metadata);
+        while let Some(entry) = metadata.next().await {
+            let (row, metadata) = entry?;
+            row_metadata.push(CheckpointRowMetadata {
+                table,
+                row,
+                metadata,
+            });
         }
     }
     Ok(Checkpoint {
@@ -339,7 +362,7 @@ where
         headers,
         schema,
         rows,
-        row_tombstones,
+        row_metadata,
     })
 }
 
@@ -350,7 +373,7 @@ pub(crate) async fn envelopes_missing<T>(
 where
     T: KernelTransaction,
 {
-    let entries = transaction.scan_entries(ENGINE_ENVELOPES);
+    let entries = transaction.scan_entries_owned(storage(INTERNAL_ENVELOPES));
     pin_mut!(entries);
     let mut stored = BTreeMap::new();
     while let Some(entry) = entries.next().await {
@@ -408,7 +431,7 @@ where
 {
     loop {
         let ready = {
-            let entries = transaction.scan_entries(ENGINE_ENVELOPES);
+            let entries = transaction.scan_entries_owned(storage(INTERNAL_ENVELOPES));
             pin_mut!(entries);
             let mut ready = None;
             while let Some(entry) = entries.next().await {
@@ -454,14 +477,14 @@ where
     .await?;
     transaction
         .put_entry(
-            ENGINE_ENVELOPES,
+            storage(INTERNAL_ENVELOPES),
             envelope_key.clone(),
             Row::new(vec![Value::Blob(envelope.encode()?)]),
         )
         .await?;
     transaction
         .put_entry(
-            ENGINE_ENVELOPE_STATUS,
+            storage(INTERNAL_ENVELOPE_STATUS),
             envelope_key.clone(),
             status_row(&outcome)?,
         )
@@ -474,7 +497,7 @@ where
     }
     for parent in &envelope.parents {
         transaction
-            .remove_entry(ENGINE_ENVELOPE_FRONTIER, &key(*parent))
+            .remove_entry(storage(INTERNAL_ENVELOPE_FRONTIER), &key(*parent))
             .await?;
     }
     let has_known_child = headers(transaction)
@@ -484,7 +507,7 @@ where
     if !has_known_child {
         transaction
             .put_entry(
-                ENGINE_ENVELOPE_FRONTIER,
+                storage(INTERNAL_ENVELOPE_FRONTIER),
                 envelope_key.clone(),
                 Row::default(),
             )
@@ -492,7 +515,7 @@ where
     }
     let sequence_key = Row::default();
     let sequence = match transaction
-        .get_entry(ENGINE_ENVELOPE_SEQUENCE, &sequence_key)
+        .get_entry(storage(INTERNAL_ENVELOPE_SEQUENCE), &sequence_key)
         .await?
     {
         Some(value) => match value.values.as_slice() {
@@ -505,14 +528,14 @@ where
     };
     transaction
         .put_entry(
-            ENGINE_ENVELOPE_SEQUENCE,
+            storage(INTERNAL_ENVELOPE_SEQUENCE),
             sequence_key,
             Row::new(vec![Value::Integer(sequence)]),
         )
         .await?;
     transaction
         .put_entry(
-            ENGINE_ENVELOPE_LOG,
+            storage(INTERNAL_ENVELOPE_LOG),
             Row::new(vec![Value::Integer(sequence)]),
             Row::new(vec![Value::Blob(envelope.id.0.to_vec())]),
         )
@@ -528,7 +551,7 @@ where
             outcome(transaction, *parent).await?,
             Some(EnvelopeOutcome::Applied | EnvelopeOutcome::Superseded)
         ) || transaction
-            .get_entry(ENGINE_ENVELOPE_HEADERS, &key(*parent))
+            .get_entry(storage(INTERNAL_ENVELOPE_HEADERS), &key(*parent))
             .await?
             .is_some()
         {
@@ -551,14 +574,17 @@ where
     let key = key(header.id);
     let value = postcard::to_allocvec(header).map_err(EngineError::custom)?;
     let value = Row::new(vec![Value::Blob(value)]);
-    match transaction.get_entry(ENGINE_ENVELOPE_HEADERS, &key).await? {
+    match transaction
+        .get_entry(storage(INTERNAL_ENVELOPE_HEADERS), &key)
+        .await?
+    {
         Some(existing) if existing != value => {
             Err(EngineError::custom("Conflicting envelope header"))
         }
         Some(_) => Ok(()),
         None => {
             transaction
-                .put_entry(ENGINE_ENVELOPE_HEADERS, key, value)
+                .put_entry(storage(INTERNAL_ENVELOPE_HEADERS), key, value)
                 .await
         }
     }
@@ -568,7 +594,7 @@ async fn headers<T>(transaction: &T) -> EngineResult<Vec<EnvelopeHeader>>
 where
     T: KernelTransaction,
 {
-    let entries = transaction.scan_entries(ENGINE_ENVELOPE_HEADERS);
+    let entries = transaction.scan_entries_owned(storage(INTERNAL_ENVELOPE_HEADERS));
     pin_mut!(entries);
     let mut headers = Vec::new();
     while let Some(entry) = entries.next().await {
@@ -591,7 +617,7 @@ pub(crate) async fn outcomes<T>(transaction: &T) -> EngineResult<Vec<(EnvelopeId
 where
     T: KernelTransaction,
 {
-    let entries = transaction.scan_entries(ENGINE_ENVELOPE_STATUS);
+    let entries = transaction.scan_entries_owned(storage(INTERNAL_ENVELOPE_STATUS));
     pin_mut!(entries);
     let mut result = Vec::new();
     while let Some(entry) = entries.next().await {
@@ -616,7 +642,7 @@ where
     T: KernelTransaction,
 {
     transaction
-        .get_entry(ENGINE_ENVELOPE_STATUS, &key(id))
+        .get_entry(storage(INTERNAL_ENVELOPE_STATUS), &key(id))
         .await?
         .map(|row| {
             let Some(Value::Blob(bytes)) = row.values.first() else {

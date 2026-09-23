@@ -1,5 +1,6 @@
 #[cfg(not(feature = "std"))]
 use alloc::string::String;
+use alloc::string::ToString;
 
 /// The scheme of an ofdb URI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

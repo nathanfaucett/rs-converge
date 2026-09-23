@@ -95,16 +95,24 @@ where
         R: RangeBounds<K> + Send,
     {
         stream!({
-            let table = self
-                .tx
-                .transaction()
-                .open_table(table_definition::<K, V>(&self.name))
-                .map_err(BTreeError::custom)?;
-            let results = table.range(Key::range(range)).map_err(BTreeError::custom)?;
+            let entries = {
+                let table = self
+                    .tx
+                    .transaction()
+                    .open_table(table_definition::<K, V>(&self.name))
+                    .map_err(BTreeError::custom)?;
+                let results = table.range(Key::range(range)).map_err(BTreeError::custom)?;
+                let mut entries = Vec::new();
 
-            for result in results {
-                let (key, value) = result.map_err(BTreeError::custom)?;
-                yield Ok((key.value().into_inner(), value.value().into_inner()));
+                for result in results {
+                    let (key, value) = result.map_err(BTreeError::custom)?;
+                    entries.push((key.value().into_inner(), value.value().into_inner()));
+                }
+                entries
+            };
+
+            for entry in entries {
+                yield Ok(entry);
             }
         })
     }

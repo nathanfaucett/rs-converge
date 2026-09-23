@@ -7,7 +7,7 @@ use std::{
 };
 
 use engine::{
-    Checkpoint, DirectRowCodec, Engine, EngineResult, EnvelopeOutcome, Frontier, Kernel, RowCodec,
+    Checkpoint, Engine, EngineResult, EnvelopeOutcome, Frontier, Kernel, RowCodec,
     TransactionEnvelope,
 };
 use engine_automerge::AutomergeRowCodec;
@@ -35,18 +35,14 @@ pub struct Cluster<K: Kernel, R: RowCodec<K::Transaction>> {
 
 pub struct RedbClusterCleanup(PathBuf);
 
-pub fn direct_in_memory_cluster(n: usize) -> Cluster<engine::InMemoryKernel, DirectRowCodec> {
-    Cluster::new(n, engine::InMemoryKernel::new, || DirectRowCodec)
+pub fn automerge_in_memory_cluster(n: usize) -> Cluster<engine::InMemoryKernel, AutomergeRowCodec> {
+    Cluster::new(n, engine::InMemoryKernel::new, AutomergeRowCodec::new)
 }
 
 impl Drop for RedbClusterCleanup {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
-}
-
-pub fn direct_redb_cluster(n: usize) -> (RedbClusterCleanup, Cluster<RedbKernel, DirectRowCodec>) {
-    redb_cluster(n, || DirectRowCodec)
 }
 
 pub fn automerge_redb_cluster(

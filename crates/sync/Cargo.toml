@@ -24,6 +24,7 @@ thiserror = { version = "2.0", default-features = false, features = [] }
 [dev-dependencies]
 # internal dependencies
 engine = { path = "../engine", default-features = false, features = ["in-memory", "std"] }
+engine-automerge = { path = "../engine-automerge", default-features = false, features = [] }
 schema = { path = "../schema", default-features = false, features = [] }
 value = { path = "../value", default-features = false, features = [] }
 

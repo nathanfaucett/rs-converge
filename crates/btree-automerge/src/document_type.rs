@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 pub enum DocumentType {
     Snapshot = 0,
     Incremental = 1,
+    Metadata = 2,
 }
 
 impl fmt::Display for DocumentType {
@@ -13,6 +14,7 @@ impl fmt::Display for DocumentType {
         match self {
             DocumentType::Snapshot => write!(f, "Snapshot"),
             DocumentType::Incremental => write!(f, "Incremental"),
+            DocumentType::Metadata => write!(f, "Metadata"),
         }
     }
 }
@@ -24,5 +26,9 @@ impl DocumentType {
 
     pub fn is_incremental(self) -> bool {
         matches!(self, DocumentType::Incremental)
+    }
+
+    pub fn is_metadata(self) -> bool {
+        matches!(self, DocumentType::Metadata)
     }
 }

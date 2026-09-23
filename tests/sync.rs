@@ -1,7 +1,7 @@
 use ofdb::{EnvelopeOutcome, SessionConfig};
 use ofdb_test::{
-    ChaosScenario, ChaosStep, TransportDirection, direct_in_memory_cluster, direct_redb_cluster,
-    run, run_chaos,
+    ChaosScenario, ChaosStep, TransportDirection, automerge_in_memory_cluster,
+    automerge_redb_cluster, run, run_chaos,
 };
 
 const CREATE_USERS: &str = "CREATE TABLE users (id UUID PRIMARY KEY, name TEXT)";
@@ -15,7 +15,7 @@ const INSERT_LIN: &str =
 fn bootstrap_and_noop_repair_converge() {
     run(async {
         for checkpoint_threshold in [None, Some(0)] {
-            let cluster = direct_in_memory_cluster(2);
+            let cluster = automerge_in_memory_cluster(2);
             let config = SessionConfig {
                 checkpoint_threshold,
                 ..Default::default()
@@ -33,7 +33,7 @@ fn bootstrap_and_noop_repair_converge() {
 #[test]
 fn offline_writes_and_ordered_three_replica_repair_converge() {
     run(async {
-        let cluster = direct_in_memory_cluster(3);
+        let cluster = automerge_in_memory_cluster(3);
         let config = SessionConfig::default();
         cluster.exec(0, CREATE_USERS).await;
         cluster
@@ -55,7 +55,7 @@ fn offline_writes_and_ordered_three_replica_repair_converge() {
 #[test]
 fn persistent_direct_replicas_sync() {
     run(async {
-        let (_cleanup, cluster) = direct_redb_cluster(2);
+        let (_cleanup, cluster) = automerge_redb_cluster(2);
         cluster.exec(0, CREATE_USERS).await;
         cluster.exec(0, INSERT_ADA).await;
         cluster.sync(0, 1, &SessionConfig::default()).await.unwrap();
@@ -66,7 +66,7 @@ fn persistent_direct_replicas_sync() {
 #[test]
 fn relay_survives_an_unavailable_source() {
     run(async {
-        let cluster = direct_in_memory_cluster(3);
+        let cluster = automerge_in_memory_cluster(3);
         let config = SessionConfig::default();
         cluster.exec(0, CREATE_USERS).await;
         cluster.exec(0, INSERT_ADA).await;
@@ -79,7 +79,7 @@ fn relay_survives_an_unavailable_source() {
 #[test]
 fn reversed_duplicate_and_malformed_envelopes_are_safe() {
     run(async {
-        let cluster = direct_in_memory_cluster(2);
+        let cluster = automerge_in_memory_cluster(2);
         cluster.exec(0, CREATE_USERS).await;
         cluster.exec(0, INSERT_ADA).await;
         let mut envelopes = cluster.export_envelopes(0).await.unwrap();
@@ -121,7 +121,7 @@ fn every_directional_frame_failure_retries() {
             (TransportDirection::RightToLeft, 0..5),
         ] {
             for frame in frames {
-                let cluster = direct_in_memory_cluster(2);
+                let cluster = automerge_in_memory_cluster(2);
                 let config = SessionConfig::default();
                 cluster.exec(0, CREATE_USERS).await;
                 cluster.exec(0, INSERT_ADA).await;
@@ -176,7 +176,7 @@ fn seeded_partition_history_reproduces_from_its_seed() {
             ],
         };
         run_chaos(
-            direct_in_memory_cluster(2),
+            automerge_in_memory_cluster(2),
             scenario,
             &SessionConfig::default(),
         )
@@ -187,7 +187,7 @@ fn seeded_partition_history_reproduces_from_its_seed() {
 #[test]
 fn checkpoint_merges_destination_offline_writes() {
     run(async {
-        let cluster = direct_in_memory_cluster(2);
+        let cluster = automerge_in_memory_cluster(2);
         let config = SessionConfig {
             checkpoint_threshold: Some(0),
             ..Default::default()

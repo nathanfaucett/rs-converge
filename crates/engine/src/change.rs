@@ -77,7 +77,7 @@ where
         (ChangeKey::Schema(schema), None) => {
             let superseded = materialize_schema(transaction, schema).await?;
             if let SchemaChange::CreateTable { table, .. } = schema {
-                codec.ensure_table(transaction, *table).await?;
+                codec.ensure_table(transaction, table.0).await?;
             }
             match schema {
                 SchemaChange::CreateTable { table, .. }
@@ -97,8 +97,8 @@ where
             if columns(transaction, *table).await.is_err() {
                 return Ok(true);
             }
-            let old = codec.get_row(transaction, table, row).await?;
-            let Some(value) = codec.merge_row(transaction, table, *row, value).await? else {
+            let old = codec.get_row(transaction, table.0, row).await?;
+            let Some(value) = codec.merge_row(transaction, table.0, *row, value).await? else {
                 return Ok(true);
             };
             update_row(
@@ -114,7 +114,7 @@ where
             if columns(transaction, *table).await.is_err() {
                 return Ok(true);
             }
-            let old = codec.remove_row(transaction, table, row).await?;
+            let old = codec.remove_row(transaction, table.0, row).await?;
             update_row(transaction, *table, old.as_ref(), None, enforce_unique).await?;
         }
         (_, Some(_)) => return Err(EngineError::custom("Invalid schema change value")),

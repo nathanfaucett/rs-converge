@@ -6,10 +6,9 @@ use std::{
     },
 };
 
-use engine::{
-    DirectRowCodec, Engine, Kernel, KernelTransaction, RowCodec, RowTable, TableGenerationId,
-};
-use engine_automerge::AutomergeRowCodec;
+use btree_automerge::DocumentChangeKey;
+use engine::{Engine, Kernel, KernelTransaction, RowCodec, RowTable, TableGenerationId};
+use engine_automerge::{AutomergeRowCodec, RowMetadata};
 use engine_redb::RedbKernel;
 use futures::executor::block_on;
 use query::{
@@ -151,13 +150,13 @@ fn logical_rows_persist_in_one_kernel_transaction() {
         let row_id = Uuid::now_v7();
         let mut transaction = kernel.transaction().await.unwrap();
         reconciler
-            .ensure_table(&mut transaction, table)
+            .ensure_table(&mut transaction, table.0)
             .await
             .unwrap();
         reconciler
             .put_row(
                 &mut transaction,
-                table,
+                table.0,
                 row_id,
                 Row::new(vec![uuid_value(1), Value::from("Ada")]),
             )
@@ -168,7 +167,7 @@ fn logical_rows_persist_in_one_kernel_transaction() {
         let transaction = kernel.transaction().await.unwrap();
         assert_eq!(
             reconciler
-                .get_row(&transaction, &table, &row_id)
+                .get_row(&transaction, table.0, &row_id)
                 .await
                 .unwrap(),
             Some(Row::new(vec![uuid_value(1), Value::from("Ada")]))
@@ -183,17 +182,17 @@ fn redb_kernel_pairs_with_a_non_automerge_reconciler() {
     let path = database_path();
     let kernel = RedbKernel::new(Arc::new(redb::Database::create(&path).unwrap()));
     block_on(async {
-        let reconciler = DirectRowCodec;
+        let reconciler = AutomergeRowCodec::new();
         let table = TableGenerationId(Uuid::from_u128(101));
         let row_id = Uuid::now_v7();
         let row = Row::new(vec![uuid_value(1), Value::from("Ada")]);
         let mut transaction = kernel.transaction().await.unwrap();
         reconciler
-            .ensure_table(&mut transaction, table)
+            .ensure_table(&mut transaction, table.0)
             .await
             .unwrap();
         reconciler
-            .put_row(&mut transaction, table, row_id, row.clone())
+            .put_row(&mut transaction, table.0, row_id, row.clone())
             .await
             .unwrap();
         transaction.commit().await.unwrap();
@@ -201,7 +200,7 @@ fn redb_kernel_pairs_with_a_non_automerge_reconciler() {
         let transaction = kernel.transaction().await.unwrap();
         assert_eq!(
             reconciler
-                .get_row(&transaction, &table, &row_id)
+                .get_row(&transaction, table.0, &row_id)
                 .await
                 .unwrap(),
             Some(row)
@@ -221,13 +220,13 @@ fn removing_a_logical_row_writes_a_tombstone() {
         let row_id = Uuid::now_v7();
         let mut transaction = kernel.transaction().await.unwrap();
         reconciler
-            .ensure_table(&mut transaction, table)
+            .ensure_table(&mut transaction, table.0)
             .await
             .unwrap();
         reconciler
             .put_row(
                 &mut transaction,
-                table,
+                table.0,
                 row_id,
                 Row::new(vec![uuid_value(1), Value::from("Ada")]),
             )
@@ -235,21 +234,42 @@ fn removing_a_logical_row_writes_a_tombstone() {
             .unwrap();
         assert!(
             reconciler
-                .remove_row(&mut transaction, &table, &row_id)
+                .remove_row(&mut transaction, table.0, &row_id)
                 .await
                 .unwrap()
                 .is_some()
+        );
+        assert!(
+            reconciler
+                .put_row(
+                    &mut transaction,
+                    table.0,
+                    row_id,
+                    Row::new(vec![uuid_value(2), Value::from("Grace")]),
+                )
+                .await
+                .is_err()
         );
         transaction.commit().await.unwrap();
 
         let transaction = kernel.transaction().await.unwrap();
         assert!(
             reconciler
-                .get_row(&transaction, &table, &row_id)
+                .get_row(&transaction, table.0, &row_id)
                 .await
                 .unwrap()
                 .is_none()
         );
+        let metadata_key =
+            DocumentChangeKey::new_metadata(row_id.as_bytes().to_vec()).encode_ordered();
+        let metadata = transaction
+            .get_bytes(table.0, &metadata_key)
+            .await
+            .unwrap()
+            .map(|bytes| postcard::from_bytes::<RowMetadata>(&bytes).unwrap())
+            .unwrap();
+        assert_eq!(metadata.version, 1);
+        assert!(metadata.deleted);
         transaction.rollback().await.unwrap();
     });
     std::fs::remove_file(path).unwrap();
@@ -382,14 +402,17 @@ fn rollback_discards_catalog_and_logical_row_changes() {
         let table = TableGenerationId(Uuid::from_u128(103));
         let row_id = Uuid::now_v7();
         let mut transaction = kernel.transaction().await.unwrap();
-        transaction.ensure_table("tables").await.unwrap();
+        transaction
+            .ensure_table(engine::ENGINE_TABLES_STORAGE)
+            .await
+            .unwrap();
         reconciler
-            .ensure_table(&mut transaction, table)
+            .ensure_table(&mut transaction, table.0)
             .await
             .unwrap();
         transaction
             .put_entry(
-                "tables",
+                engine::ENGINE_TABLES_STORAGE,
                 Row::new(vec![Value::from("people")]),
                 Row::new(vec![Value::from("people")]),
             )
@@ -398,7 +421,7 @@ fn rollback_discards_catalog_and_logical_row_changes() {
         reconciler
             .put_row(
                 &mut transaction,
-                table,
+                table.0,
                 row_id,
                 Row::new(vec![uuid_value(1), Value::from("Ada")]),
             )
@@ -409,7 +432,10 @@ fn rollback_discards_catalog_and_logical_row_changes() {
         let transaction = kernel.transaction().await.unwrap();
         assert!(
             transaction
-                .get_entry("tables", &Row::new(vec![Value::from("people")]))
+                .get_entry(
+                    engine::ENGINE_TABLES_STORAGE,
+                    &Row::new(vec![Value::from("people")])
+                )
                 .await
                 .unwrap()
                 .is_none()
