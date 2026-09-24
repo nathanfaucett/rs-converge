@@ -8,20 +8,16 @@ use value::{Row, Value};
 use crate::{
     ColumnGenerationId, EngineError, EngineResult, IndexGenerationId, KernelTransaction, RowCodec,
     RowTable, TableGenerationId,
-    catalog::INTERNAL_INDICES,
-    catalog::internal_table_storage_uuid,
+    catalog::{ENGINE_INDEX_FIELDS_STORAGE, ENGINE_INDICES_STORAGE},
     executor::{materialize_defaults, row_id},
-    schema::{columns, index_deleted, table_label, table_schema_for},
+    schema::{columns, index_deleted, index_field_deleted, table_label, table_schema_for},
 };
 
 async fn index<T>(transaction: &T, name: &str) -> EngineResult<Option<(IndexGenerationId, Row)>>
 where
     T: KernelTransaction,
 {
-    let storage = internal_table_storage_uuid(INTERNAL_INDICES).ok_or(EngineError::custom(
-        "Internal index table is not configured",
-    ))?;
-    let entries = transaction.scan_entries_owned(storage);
+    let entries = transaction.scan_entries_owned(ENGINE_INDICES_STORAGE);
     pin_mut!(entries);
     let mut winner = None;
     while let Some(entry) = entries.next().await {
@@ -58,6 +54,41 @@ where
         .ok_or(EngineError::InvalidQuery("Index not found"))
 }
 
+async fn index_columns<T>(
+    transaction: &T,
+    index: IndexGenerationId,
+) -> EngineResult<Vec<ColumnGenerationId>>
+where
+    T: KernelTransaction,
+{
+    let entries = transaction.scan_entries_owned(ENGINE_INDEX_FIELDS_STORAGE);
+    pin_mut!(entries);
+    let mut fields = Vec::new();
+    while let Some(entry) = entries.next().await {
+        let (key, value) = entry?;
+        if key.values.first().and_then(Value::as_uuid) != Some(&index.0) {
+            continue;
+        }
+        let position = key
+            .values
+            .get(1)
+            .and_then(Value::to_integer)
+            .ok_or(EngineError::custom("Invalid index column position"))?;
+        if index_field_deleted(transaction, index.0, position).await? {
+            continue;
+        }
+        let column = value
+            .values
+            .first()
+            .and_then(Value::as_uuid)
+            .copied()
+            .ok_or(EngineError::custom("Invalid index column"))?;
+        fields.push((position, ColumnGenerationId(column)));
+    }
+    fields.sort_by_key(|(position, _)| *position);
+    Ok(fields.into_iter().map(|(_, column)| column).collect())
+}
+
 async fn schema_for<T>(
     transaction: &T,
     id: IndexGenerationId,
@@ -85,17 +116,7 @@ where
         .ok_or(EngineError::custom("Invalid index uniqueness"))?;
     let columns = columns(transaction, table).await?;
     let mut positions = Vec::new();
-    let end = if value.values.last().and_then(Value::to_bool).is_some() {
-        value.values.len() - 1
-    } else {
-        value.values.len()
-    };
-    for column in value.values[3..end].iter() {
-        let column = column
-            .as_uuid()
-            .copied()
-            .map(ColumnGenerationId)
-            .ok_or(EngineError::custom("Invalid index column"))?;
+    for column in index_columns(transaction, id).await? {
         positions.push(
             columns
                 .iter()
@@ -133,10 +154,7 @@ async fn indexes_for_table<T>(
 where
     T: KernelTransaction,
 {
-    let storage = internal_table_storage_uuid(INTERNAL_INDICES).ok_or(EngineError::custom(
-        "Internal index table is not configured",
-    ))?;
-    let entries = transaction.scan_entries_owned(storage);
+    let entries = transaction.scan_entries_owned(ENGINE_INDICES_STORAGE);
     pin_mut!(entries);
     let mut facts = Vec::new();
     while let Some(entry) = entries.next().await {

@@ -4,8 +4,8 @@ use async_stream::stream;
 use btree::{BTreeRead, BTreeTransaction};
 use btree_redb::{Bytes, RedbDatabase, RedbDatabaseTransaction};
 use engine::{
-    ENGINE_TABLE_FIELDS_STORAGE, ENGINE_TABLES_STORAGE, EngineError, EngineResult, Kernel,
-    KernelTransaction,
+    ENGINE_INDEX_FIELDS_STORAGE, ENGINE_INDICES_STORAGE, ENGINE_TABLE_FIELDS_STORAGE,
+    ENGINE_TABLES_STORAGE, EngineError, EngineResult, Kernel, KernelTransaction,
 };
 
 use futures::Stream;
@@ -57,6 +57,10 @@ fn physical_name(table: Uuid) -> String {
         String::from("tables")
     } else if table == ENGINE_TABLE_FIELDS_STORAGE {
         String::from("table_fields")
+    } else if table == ENGINE_INDICES_STORAGE {
+        String::from("indices")
+    } else if table == ENGINE_INDEX_FIELDS_STORAGE {
+        String::from("index_fields")
     } else {
         format!("__storage_{}", table)
     }
@@ -127,6 +131,72 @@ mod tests {
 
     use super::RedbKernel;
     use engine::{Kernel, KernelTransaction};
+
+    #[test]
+    fn permanent_catalog_names_are_stable() {
+        assert_eq!(
+            super::physical_name(engine::ENGINE_TABLES_STORAGE),
+            "tables"
+        );
+        assert_eq!(
+            super::physical_name(engine::ENGINE_TABLE_FIELDS_STORAGE),
+            "table_fields"
+        );
+        assert_eq!(
+            super::physical_name(engine::ENGINE_INDICES_STORAGE),
+            "indices"
+        );
+        assert_eq!(
+            super::physical_name(engine::ENGINE_INDEX_FIELDS_STORAGE),
+            "index_fields"
+        );
+    }
+
+    #[test]
+    fn permanent_catalog_names_persist_values() {
+        let path = PathBuf::from(format!(
+            "{}-engine-redb-catalog.redb",
+            std::env::temp_dir()
+                .join(Uuid::now_v7().to_string())
+                .display()
+        ));
+        let database = Arc::new(redb::Database::create(&path).unwrap());
+        let kernel = RedbKernel::new(database.clone());
+        let catalogs = [
+            (engine::ENGINE_TABLES_STORAGE, b"tables".to_vec()),
+            (
+                engine::ENGINE_TABLE_FIELDS_STORAGE,
+                b"table_fields".to_vec(),
+            ),
+            (engine::ENGINE_INDICES_STORAGE, b"indices".to_vec()),
+            (
+                engine::ENGINE_INDEX_FIELDS_STORAGE,
+                b"index_fields".to_vec(),
+            ),
+        ];
+        block_on(async {
+            let mut transaction = kernel.transaction().await.unwrap();
+            for (table, value) in &catalogs {
+                transaction.ensure_table(*table).await.unwrap();
+                transaction
+                    .put_bytes(*table, b"key".to_vec(), value.clone())
+                    .await
+                    .unwrap();
+            }
+            transaction.commit().await.unwrap();
+            let transaction = kernel.transaction().await.unwrap();
+            for (table, value) in &catalogs {
+                assert_eq!(
+                    transaction.get_bytes(*table, b"key").await.unwrap(),
+                    Some(value.clone())
+                );
+            }
+            transaction.rollback().await.unwrap();
+        });
+        drop(kernel);
+        drop(database);
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn backing_uuids_are_isolated() {

@@ -18,11 +18,9 @@ fn next_uuid(timestamp_provider: TimestampProvider) -> EngineResult<Uuid> {
 use crate::{
     Change, ColumnGenerationId, EngineError, EngineResult, IndexGenerationId, SchemaChange,
     TableGenerationId,
-    catalog::{INTERNAL_TABLE_NAMES, internal_table_columns, is_internal_table_name},
-    change::{apply_local_change, ensure_change_log},
+    change::apply_local_change,
     codec::RowCodec,
     engine::{Engine, TimestampProvider},
-    envelope::record_local,
     kernel::{Kernel, KernelTransaction},
     schema::{
         column_id, columns as schema_columns, ensure as ensure_schema, table_id,
@@ -44,16 +42,7 @@ where
         return Err(error);
     }
     let mut changes = Vec::new();
-    if let Err(error) =
-        bootstrap_internal_tables(&mut transaction, engine.reconciler.as_ref(), &mut changes).await
-    {
-        transaction.rollback().await?;
-        return Err(error);
-    }
-    if let Err(error) = ensure_change_log(&mut transaction).await {
-        transaction.rollback().await?;
-        return Err(error);
-    }
+
     let mut results = Vec::with_capacity(statements.len());
 
     for statement in statements {
@@ -88,7 +77,6 @@ where
         }
     }
 
-    record_local(&mut transaction, changes).await?;
     transaction.commit().await?;
     Ok(results)
 }
@@ -98,58 +86,6 @@ where
     T: KernelTransaction,
 {
     ensure_schema(transaction).await
-}
-
-pub(crate) async fn bootstrap_internal_tables<T, R>(
-    transaction: &mut T,
-    codec: &R,
-    changes: &mut Vec<Change>,
-) -> EngineResult<()>
-where
-    T: KernelTransaction,
-    R: RowCodec<T>,
-{
-    for (index, name) in INTERNAL_TABLE_NAMES.into_iter().enumerate() {
-        if table_generation_id(transaction, name).await.is_ok() {
-            continue;
-        }
-        let base = 0x494e_5445_524e_414c_0000_0000_0000_0000u128 + (index as u128) * 64;
-        let table = TableGenerationId(Uuid::from_u128(base));
-        apply_local_change(
-            transaction,
-            codec,
-            changes,
-            Change::schema(
-                Uuid::from_u128(base + 1),
-                SchemaChange::CreateTable {
-                    table,
-                    label: String::from(name),
-                },
-            ),
-        )
-        .await?;
-        for (position, column) in internal_table_columns(name).iter().enumerate() {
-            apply_local_change(
-                transaction,
-                codec,
-                changes,
-                Change::schema(
-                    Uuid::from_u128(base + 2 + position as u128),
-                    SchemaChange::AddColumn {
-                        table,
-                        column: ColumnGenerationId(Uuid::from_u128(base + 32 + position as u128)),
-                        label: String::from(column.name),
-                        value_type: column.value_type,
-                        default: Value::Null,
-                        position: position as u32,
-                        primary_key: position == 0,
-                    },
-                ),
-            )
-            .await?;
-        }
-    }
-    Ok(())
 }
 
 async fn execute_query<T, R>(
@@ -225,9 +161,6 @@ where
             schema,
             if_not_exists,
         } => {
-            if is_internal_table_name(&schema.name) {
-                return Err(EngineError::InvalidQuery("Internal table name is reserved"));
-            }
             if table_generation_id(transaction, &schema.name).await.is_ok() {
                 return if if_not_exists {
                     Ok(QueryResult::default())
@@ -243,9 +176,6 @@ where
             indexes,
             if_not_exists,
         } => {
-            if is_internal_table_name(&schema.name) {
-                return Err(EngineError::InvalidQuery("Internal table name is reserved"));
-            }
             if table_generation_id(transaction, &schema.name).await.is_ok() {
                 return if if_not_exists {
                     Ok(QueryResult::default())
@@ -263,9 +193,6 @@ where
             table_name,
             if_exists,
         } => {
-            if is_internal_table_name(&table_name) {
-                return Err(EngineError::InvalidQuery("Internal table name is reserved"));
-            }
             let table = match table_generation_id(transaction, &table_name).await {
                 Ok(table) => table,
                 Err(_) if if_exists => return Ok(QueryResult::default()),
@@ -457,9 +384,6 @@ where
     T: KernelTransaction,
     R: RowCodec<T>,
 {
-    if is_internal_table_name(&table_name) {
-        return Err(EngineError::InvalidQuery("Internal table name is reserved"));
-    }
     let table = match table_generation_id(transaction, &table_name).await {
         Ok(table) => table,
         Err(_) if if_exists => return Ok(QueryResult::default()),
@@ -1000,7 +924,6 @@ where
         Change::row(next_uuid(timestamp_provider)?, table, row_id, Some(value)),
     )
     .await?;
-    record_local(transaction, changes).await?;
     Ok(())
 }
 

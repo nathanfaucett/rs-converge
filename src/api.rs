@@ -1,7 +1,6 @@
 pub use engine::{
-    Checkpoint, ColumnGenerationId, Engine, EngineError, EngineResult, EnvelopeHeader, EnvelopeId,
-    EnvelopeOutcome, Frontier, IndexGenerationId, Kernel, KernelTransaction, RowCodec,
-    SchemaChange, TableGenerationId, TransactionEnvelope,
+    ColumnGenerationId, Engine, EngineError, EngineResult, IndexGenerationId, Kernel,
+    KernelTransaction, RowCodec, SchemaChange, TableGenerationId,
 };
 #[cfg(feature = "in-memory")]
 pub use engine::{InMemoryKernel, InMemoryKernelTransaction};

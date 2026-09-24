@@ -1,21 +1,55 @@
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec};
 
-use engine::Frontier;
+use engine::{DocumentChangeKey, SyncKey, SyncManifest, SyncStateUnit, TableGenerationId};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 3;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SyncHello {
     pub protocol_version: u16,
-    pub frontier: Frontier,
+    pub manifest: SyncManifest,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SyncRowInventory {
+    pub table: TableGenerationId,
+    pub row: Uuid,
+    pub changes: Vec<DocumentChangeKey>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SyncIncrementalChange {
+    pub table: TableGenerationId,
+    pub row: Uuid,
+    pub key: DocumentChangeKey,
+    pub payload: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+pub struct SyncSnapshotRequest {
+    pub table: TableGenerationId,
+    pub row: Uuid,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum SyncMessage {
     Hello(SyncHello),
-    Frontier(Frontier),
-    Checkpoint(Vec<u8>),
-    Envelopes(Vec<Vec<u8>>),
+    Manifest(SyncManifest),
+    Inventory(Vec<SyncRowInventory>),
+    State(Vec<SyncStateUnit>),
+    Changes(Vec<SyncIncrementalChange>),
+    RequestSnapshots(Vec<SyncSnapshotRequest>),
+    Abort(String),
     Done,
+}
+
+impl SyncRowInventory {
+    pub fn key(&self) -> SyncKey {
+        SyncKey::Row {
+            table: self.table,
+            row: self.row,
+        }
+    }
 }

@@ -1,4 +1,4 @@
-use alloc::vec::Vec;
+use alloc::{string::ToString, vec::Vec};
 
 use async_stream::stream;
 use futures::{Stream, StreamExt, pin_mut};

@@ -4,7 +4,7 @@ use futures::Stream;
 use uuid::Uuid;
 use value::Row;
 
-use crate::{EngineResult, KernelTransaction};
+use crate::{DocumentChangeKey, EngineResult, KernelTransaction};
 
 pub trait RowCodec<T>: Send + Sync
 where
@@ -85,6 +85,26 @@ where
         table: Uuid,
         row: Uuid,
         state: &[u8],
+    ) -> impl Future<Output = EngineResult<Option<Row>>> + Send;
+    fn sync_change_inventory(
+        &self,
+        transaction: &T,
+        table: Uuid,
+        row: &Uuid,
+    ) -> impl Future<Output = EngineResult<Vec<DocumentChangeKey>>> + Send;
+    fn export_incremental_change(
+        &self,
+        transaction: &T,
+        table: Uuid,
+        key: &DocumentChangeKey,
+    ) -> impl Future<Output = EngineResult<Option<Vec<u8>>>> + Send;
+    fn apply_incremental_change(
+        &self,
+        transaction: &mut T,
+        table: Uuid,
+        row: Uuid,
+        key: &DocumentChangeKey,
+        payload: &[u8],
     ) -> impl Future<Output = EngineResult<Option<Row>>> + Send;
     fn delete_row(
         &self,

@@ -1383,7 +1383,9 @@ dependencies = [
  "postcard",
  "schema",
  "serde",
+ "sql-translator",
  "thiserror 2.0.18",
+ "uuid",
  "value",
 ]
 

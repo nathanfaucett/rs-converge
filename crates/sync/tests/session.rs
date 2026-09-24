@@ -1,14 +1,12 @@
 use core::fmt;
 use std::{cell::RefCell, rc::Rc};
 
-use engine::{CheckpointRow, Engine, Frontier, InMemoryKernel, SchemaChange};
+use engine::{Engine, InMemoryKernel};
 use engine_automerge::AutomergeRowCodec;
 use futures::{StreamExt, channel::mpsc, executor::block_on};
 use schema::{ColumnSchema, TableSchema};
-use sync::{
-    PROTOCOL_VERSION, SessionConfig, SyncError, SyncHello, SyncMessage, SyncRole, SyncTransport,
-    synchronize,
-};
+use sql_translator::SqlTranslator;
+use sync::{SessionConfig, SyncMessage, SyncRole, SyncTransport, synchronize};
 use value::{Value, ValueType};
 
 #[derive(Debug)]
@@ -70,15 +68,27 @@ fn table(name: &str) -> TableSchema {
     }
 }
 
-async fn sync(
-    left: &Engine<InMemoryKernel, AutomergeRowCodec>,
-    right: &Engine<InMemoryKernel, AutomergeRowCodec>,
-) {
-    let config = SessionConfig::default();
-    let _ = sync_with(left, right, &config).await;
+fn people_table() -> TableSchema {
+    TableSchema {
+        name: "people".into(),
+        columns: vec![
+            ColumnSchema {
+                name: "id".into(),
+                r#type: ValueType::Uuid,
+                default: Value::Null,
+                primary_key: true,
+            },
+            ColumnSchema {
+                name: "name".into(),
+                r#type: ValueType::Text,
+                default: Value::Null,
+                primary_key: false,
+            },
+        ],
+    }
 }
 
-async fn sync_with(
+async fn sync(
     left: &Engine<InMemoryKernel, AutomergeRowCodec>,
     right: &Engine<InMemoryKernel, AutomergeRowCodec>,
     config: &SessionConfig,
@@ -93,153 +103,201 @@ async fn sync_with(
     left_transport.sent.borrow().clone()
 }
 
-struct WriteAfterCheckpoint<'a> {
-    inner: ChannelTransport,
-    engine: &'a Engine<InMemoryKernel, AutomergeRowCodec>,
-    wrote: bool,
-}
-
-impl SyncTransport for WriteAfterCheckpoint<'_> {
-    type Error = Closed;
-
-    async fn receive(&mut self) -> Result<Vec<u8>, Self::Error> {
-        self.inner.receive().await
-    }
-
-    async fn send(&mut self, frame: Vec<u8>) -> Result<(), Self::Error> {
-        let checkpoint = matches!(postcard::from_bytes(&frame), Ok(SyncMessage::Checkpoint(_)));
-        self.inner.send(frame).await?;
-        if checkpoint && !self.wrote {
-            self.engine
-                .create_table(table("written_during_bootstrap"))
-                .await
-                .unwrap();
-            self.wrote = true;
-        }
-        Ok(())
-    }
-}
-
 #[test]
-fn catches_up_a_new_replica() {
+fn synchronizes_catalog_state_and_converges() {
     block_on(async {
         let left = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
         let right = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
         left.create_table(table("users")).await.unwrap();
 
-        sync(&left, &right).await;
+        let frames = sync(&left, &right, &SessionConfig::default()).await;
 
-        assert_eq!(
-            left.frontier().await.unwrap(),
-            right.frontier().await.unwrap()
-        );
         assert_eq!(right.table_schema("users").await.unwrap(), table("users"));
-    });
-}
-
-#[test]
-fn converges_offline_concurrent_writes() {
-    block_on(async {
-        let left = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
-        let right = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
-        left.create_table(table("users")).await.unwrap();
-        sync(&left, &right).await;
-
-        left.create_table(table("left_only")).await.unwrap();
-        right.create_table(table("right_only")).await.unwrap();
-        sync(&left, &right).await;
-
-        assert_eq!(
-            left.frontier().await.unwrap(),
-            right.frontier().await.unwrap()
-        );
-        assert_eq!(
-            left.table_schema("right_only").await.unwrap(),
-            table("right_only")
-        );
-        assert_eq!(
-            right.table_schema("left_only").await.unwrap(),
-            table("left_only")
-        );
-    });
-}
-
-#[test]
-fn bootstraps_an_empty_replica_with_a_checkpoint() {
-    block_on(async {
-        let left = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
-        let right = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
-        left.create_table(table("users")).await.unwrap();
-        let config = SessionConfig {
-            checkpoint_threshold: Some(0),
-            ..Default::default()
-        };
-
-        let frames = sync_with(&left, &right, &config).await;
-
         assert!(
             frames
                 .iter()
-                .any(|frame| matches!(frame, SyncMessage::Checkpoint(_)))
+                .any(|frame| matches!(frame, SyncMessage::State(_)))
         );
-        assert_eq!(right.table_schema("users").await.unwrap(), table("users"));
-    });
-}
-
-#[test]
-fn disabled_threshold_uses_envelopes_only() {
-    block_on(async {
-        let left = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
-        let right = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
-        left.create_table(table("users")).await.unwrap();
-
-        let frames = sync_with(&left, &right, &SessionConfig::default()).await;
-
-        assert!(
-            !frames
-                .iter()
-                .any(|frame| matches!(frame, SyncMessage::Checkpoint(_)))
+        assert_eq!(
+            left.sync_manifest().await.unwrap(),
+            right.sync_manifest().await.unwrap()
         );
     });
 }
 
 #[test]
-fn transfers_writes_made_during_checkpoint_bootstrap() {
+fn realtime_update_sends_one_incremental_without_snapshot() {
     block_on(async {
         let left = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
         let right = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
-        left.create_table(table("users")).await.unwrap();
-        let config = SessionConfig {
-            checkpoint_threshold: Some(0),
-            ..Default::default()
-        };
-        let (left_transport, mut right_transport) = transport_pair();
-        let mut left_transport = WriteAfterCheckpoint {
-            inner: left_transport,
-            engine: &left,
-            wrote: false,
-        };
+        left.create_table(people_table()).await.unwrap();
+        let translator = SqlTranslator;
+        left.translate_and_execute(
+            "INSERT INTO people (id, name) VALUES (CAST('018f0f8e-7b6d-7c4a-8f12-123456789abc' AS UUID), 'Ada');",
+            &translator,
+        )
+        .await
+        .unwrap();
 
+        let _ = sync(&left, &right, &SessionConfig::default()).await;
+        left.translate_and_execute(
+            "UPDATE people SET name = 'Grace' WHERE id = CAST('018f0f8e-7b6d-7c4a-8f12-123456789abc' AS UUID);",
+            &translator,
+        )
+        .await
+        .unwrap();
+
+        let (mut left_transport, mut right_transport) = transport_pair();
+        let config = SessionConfig::default();
         let (left_result, right_result) = futures::join!(
             synchronize(&left, &mut left_transport, &config, SyncRole::Initiator),
             synchronize(&right, &mut right_transport, &config, SyncRole::Responder),
         );
-
-        left_result.unwrap();
+        let left_result = left_result.unwrap();
         right_result.unwrap();
-        assert!(left_transport.wrote);
+        let frames = left_transport.sent.borrow().clone();
+        assert_eq!(left_result.sent_changes, 1);
+        assert_eq!(left_result.sent_snapshots, 0);
+        assert!(
+            frames
+                .iter()
+                .any(|frame| matches!(frame, SyncMessage::Changes(changes) if changes.len() == 1))
+        );
+        assert!(
+            frames
+                .iter()
+                .all(|frame| !matches!(frame, SyncMessage::State(_)))
+        );
         assert_eq!(
-            right
-                .table_schema("written_during_bootstrap")
-                .await
-                .unwrap(),
-            table("written_during_bootstrap")
+            left.sync_manifest().await.unwrap(),
+            right.sync_manifest().await.unwrap()
         );
     });
 }
 
 #[test]
-fn respects_checkpoint_thresholds_and_envelope_batches() {
+fn propagates_row_deletion_without_resurrecting_the_row() {
+    block_on(async {
+        let left = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
+        let right = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
+        let translator = SqlTranslator;
+        left.create_table(people_table()).await.unwrap();
+        left.translate_and_execute(
+            "INSERT INTO people (id, name) VALUES (CAST('018f0f8e-7b6d-7c4a-8f12-123456789abc' AS UUID), 'Ada');",
+            &translator,
+        )
+        .await
+        .unwrap();
+        sync(&left, &right, &SessionConfig::default()).await;
+
+        left.translate_and_execute(
+            "DELETE FROM people WHERE id = CAST('018f0f8e-7b6d-7c4a-8f12-123456789abc' AS UUID);",
+            &translator,
+        )
+        .await
+        .unwrap();
+        sync(&left, &right, &SessionConfig::default()).await;
+
+        let rows = right
+            .translate_and_execute("SELECT * FROM people;", &translator)
+            .await
+            .unwrap();
+        assert!(rows.iter().all(|result| result.rows.is_empty()));
+    });
+}
+
+#[test]
+fn synchronizes_concurrent_branches() {
+    block_on(async {
+        let left = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
+        let right = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
+        let translator = SqlTranslator;
+        left.create_table(people_table()).await.unwrap();
+        left.translate_and_execute(
+            "INSERT INTO people (id, name) VALUES (CAST('018f0f8e-7b6d-7c4a-8f12-123456789abc' AS UUID), 'Ada');",
+            &translator,
+        )
+        .await
+        .unwrap();
+        sync(&left, &right, &SessionConfig::default()).await;
+
+        left.translate_and_execute(
+            "UPDATE people SET name = 'Grace' WHERE id = CAST('018f0f8e-7b6d-7c4a-8f12-123456789abc' AS UUID);",
+            &translator,
+        )
+        .await
+        .unwrap();
+        right.translate_and_execute(
+            "UPDATE people SET name = 'Lin' WHERE id = CAST('018f0f8e-7b6d-7c4a-8f12-123456789abc' AS UUID);",
+            &translator,
+        )
+        .await
+        .unwrap();
+        sync(&left, &right, &SessionConfig::default()).await;
+
+        assert_eq!(
+            left.sync_manifest().await.unwrap(),
+            right.sync_manifest().await.unwrap()
+        );
+    });
+}
+
+#[test]
+fn duplicate_incremental_frames_are_idempotent() {
+    block_on(async {
+        let left = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
+        let right = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
+        let translator = SqlTranslator;
+        left.create_table(people_table()).await.unwrap();
+        left.translate_and_execute(
+            "INSERT INTO people (id, name) VALUES (CAST('018f0f8e-7b6d-7c4a-8f12-123456789abc' AS UUID), 'Ada');",
+            &translator,
+        )
+        .await
+        .unwrap();
+        sync(&left, &right, &SessionConfig::default()).await;
+        left.translate_and_execute(
+            "UPDATE people SET name = 'Grace' WHERE id = CAST('018f0f8e-7b6d-7c4a-8f12-123456789abc' AS UUID);",
+            &translator,
+        )
+        .await
+        .unwrap();
+
+        let (mut left_transport, mut right_transport) = transport_pair();
+        let config = SessionConfig::default();
+        let (left_result, right_result) = futures::join!(
+            synchronize(&left, &mut left_transport, &config, SyncRole::Initiator),
+            synchronize(&right, &mut right_transport, &config, SyncRole::Responder),
+        );
+        left_result.unwrap();
+        right_result.unwrap();
+        let change = left_transport
+            .sent
+            .borrow()
+            .iter()
+            .find_map(|message| match message {
+                SyncMessage::Changes(changes) => changes.first().cloned(),
+                _ => None,
+            })
+            .unwrap();
+        right
+            .apply_incremental_change(
+                change.table,
+                change.row,
+                change.key.clone(),
+                &change.payload,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            right.sync_manifest().await.unwrap(),
+            left.sync_manifest().await.unwrap()
+        );
+    });
+}
+
+#[test]
+fn batches_state_units_without_checkpoint_or_envelope_messages() {
     block_on(async {
         let left = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
         let right = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
@@ -247,119 +305,35 @@ fn respects_checkpoint_thresholds_and_envelope_batches() {
             left.create_table(table(name)).await.unwrap();
         }
 
-        let mut config = SessionConfig {
-            max_envelopes_per_frame: 2,
-            checkpoint_threshold: Some(3),
-        };
-        let frames = sync_with(&left, &right, &config).await;
-        assert!(
-            !frames
-                .iter()
-                .any(|frame| matches!(frame, SyncMessage::Checkpoint(_)))
-        );
-        assert_eq!(
-            frames
-                .iter()
-                .filter_map(|frame| match frame {
-                    SyncMessage::Envelopes(envelopes) => Some(envelopes.len()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>(),
-            vec![2, 1]
-        );
-
-        let destination = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
-        config.checkpoint_threshold = Some(2);
-        let frames = sync_with(&left, &destination, &config).await;
-        assert!(
-            frames
-                .iter()
-                .any(|frame| matches!(frame, SyncMessage::Checkpoint(_)))
-        );
-    });
-}
-
-#[test]
-fn delayed_child_applies_after_checkpoint_bootstrap() {
-    block_on(async {
-        let source = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
-        let destination = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
-        source.create_table(table("parent")).await.unwrap();
-        let checkpoint = source.export_checkpoint().await.unwrap();
-        source.create_table(table("child")).await.unwrap();
-        let child = source
-            .missing_envelopes(&Frontier::default())
-            .await
-            .unwrap()
-            .into_iter()
-            .find(|envelope| {
-                envelope
-                    .parents
-                    .iter()
-                    .any(|parent| checkpoint.headers.iter().any(|header| header.id == *parent))
-            })
-            .unwrap();
-
-        destination.import_checkpoint(checkpoint).await.unwrap();
-        assert_eq!(
-            destination.import_envelope(child).await.unwrap(),
-            engine::EnvelopeOutcome::Applied
-        );
-        assert_eq!(
-            destination.table_schema("child").await.unwrap(),
-            table("child")
-        );
-    });
-}
-
-#[test]
-fn rejects_malformed_checkpoint_frames_without_partial_imports() {
-    block_on(async {
-        let engine = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
-        engine.create_table(table("users")).await.unwrap();
-        let initial_frontier = engine.frontier().await.unwrap();
-        let source = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
-        source.create_table(table("malformed")).await.unwrap();
-        let mut checkpoint = source.export_checkpoint().await.unwrap();
-        let table = checkpoint
-            .schema
+        let frames = sync(
+            &left,
+            &right,
+            &SessionConfig {
+                max_units_per_frame: 2,
+            },
+        )
+        .await;
+        let batches = frames
             .iter()
-            .find_map(|change| match change {
-                SchemaChange::CreateTable { table, .. } => Some(table),
+            .filter_map(|frame| match frame {
+                SyncMessage::State(units) => Some(units.len()),
                 _ => None,
             })
-            .unwrap();
-        checkpoint.rows.push(CheckpointRow {
-            table: *table,
-            row: table.0,
-            state: vec![0xff],
-        });
-        let (mut transport, peer) = transport_pair();
-        let hello = SyncMessage::Hello(SyncHello {
-            protocol_version: PROTOCOL_VERSION,
-            frontier: Frontier::default(),
-        });
-        for message in [
-            hello,
-            SyncMessage::Frontier(Frontier::default()),
-            SyncMessage::Checkpoint(checkpoint.encode().unwrap()),
-        ] {
-            peer.sender
-                .unbounded_send(postcard::to_allocvec(&message).unwrap())
-                .unwrap();
-        }
+            .collect::<Vec<_>>();
 
-        let error = synchronize(
-            &engine,
-            &mut transport,
-            &SessionConfig::default(),
-            SyncRole::Initiator,
-        )
-        .await
-        .unwrap_err();
-
-        assert!(matches!(error, SyncError::Engine(_)));
-        assert_eq!(engine.frontier().await.unwrap(), initial_frontier);
-        assert!(engine.table_schema("malformed").await.is_err());
+        assert!(batches.len() > 1);
+        assert!(batches.iter().all(|size| *size <= 2));
+        assert!(frames.iter().all(|frame| {
+            matches!(
+                frame,
+                SyncMessage::Hello(_)
+                    | SyncMessage::Manifest(_)
+                    | SyncMessage::Inventory(_)
+                    | SyncMessage::State(_)
+                    | SyncMessage::Changes(_)
+                    | SyncMessage::RequestSnapshots(_)
+                    | SyncMessage::Done
+            )
+        }));
     });
 }

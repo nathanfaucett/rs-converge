@@ -16,20 +16,14 @@ use thiserror::Error;
 use query::{QueryParams, QueryResult, Statement, TranslateError, Translator};
 
 use crate::{
-    Checkpoint, ColumnGenerationId, EnvelopeId, EnvelopeOutcome, Frontier, IndexGenerationId,
-    TableGenerationId, TransactionEnvelope,
+    ColumnGenerationId, IndexGenerationId, TableGenerationId,
     codec::RowCodec,
-    envelope::{
-        checkpoint, ensure_envelope_log, envelopes_missing, frontier, import as import_envelope,
-        import_checkpoint, outcome, outcomes, quarantine,
-    },
     executor::{
-        bootstrap_internal_tables, execute_statement, resolve_row as resolve_conflicted_row,
+        execute_statement, resolve_row as resolve_conflicted_row,
         row_conflicts as conflicted_row_columns,
     },
     index::{index_generation_id, index_schema, lookup as index_lookup},
     kernel::{Kernel, KernelTransaction},
-    schema::ensure,
 };
 
 #[derive(Error, Debug)]
@@ -42,6 +36,9 @@ pub enum EngineError {
 
     #[error("Invalid query: {0}")]
     InvalidQuery(&'static str),
+
+    #[error("Sync dependency is unavailable")]
+    SyncDependencyUnavailable,
 
     #[error("A timestamp provider is required to generate a UUID")]
     MissingTimestampProvider,
@@ -231,63 +228,6 @@ where
         execute_statement(self, statements).await
     }
 
-    pub async fn frontier(&self) -> EngineResult<Frontier> {
-        let mut transaction = self.kernel.transaction().await?;
-        ensure_replication_tables(&mut transaction, self.reconciler.as_ref()).await?;
-        let result = frontier(&transaction).await?;
-        transaction.commit().await?;
-        Ok(result)
-    }
-
-    pub async fn export_checkpoint(&self) -> EngineResult<Checkpoint> {
-        let mut transaction = self.kernel.transaction().await?;
-        ensure_replication_tables(&mut transaction, self.reconciler.as_ref()).await?;
-        let result = checkpoint(&transaction, self.reconciler.as_ref()).await?;
-        transaction.commit().await?;
-        Ok(result)
-    }
-
-    pub async fn import_checkpoint(&self, checkpoint: Checkpoint) -> EngineResult<()> {
-        let mut transaction = self.kernel.transaction().await?;
-        ensure_replication_tables(&mut transaction, self.reconciler.as_ref()).await?;
-        let result =
-            import_checkpoint(&mut transaction, self.reconciler.as_ref(), checkpoint).await;
-        match result {
-            Ok(()) => transaction.commit().await,
-            Err(error) => {
-                transaction.rollback().await?;
-                Err(error)
-            }
-        }
-    }
-
-    pub async fn missing_envelopes(
-        &self,
-        frontier: &Frontier,
-    ) -> EngineResult<Vec<TransactionEnvelope>> {
-        let mut transaction = self.kernel.transaction().await?;
-        ensure_replication_tables(&mut transaction, self.reconciler.as_ref()).await?;
-        let result = envelopes_missing(&transaction, frontier).await?;
-        transaction.commit().await?;
-        Ok(result)
-    }
-
-    pub async fn envelope_outcome(&self, id: EnvelopeId) -> EngineResult<Option<EnvelopeOutcome>> {
-        let mut transaction = self.kernel.transaction().await?;
-        ensure_replication_tables(&mut transaction, self.reconciler.as_ref()).await?;
-        let result = outcome(&transaction, id).await?;
-        transaction.commit().await?;
-        Ok(result)
-    }
-
-    pub async fn envelope_outcomes(&self) -> EngineResult<Vec<(EnvelopeId, EnvelopeOutcome)>> {
-        let mut transaction = self.kernel.transaction().await?;
-        ensure_replication_tables(&mut transaction, self.reconciler.as_ref()).await?;
-        let outcomes = outcomes(&transaction).await?;
-        transaction.commit().await?;
-        Ok(outcomes)
-    }
-
     pub async fn row_conflicts(&self, table_name: &str, key: &Row) -> EngineResult<Vec<String>> {
         let transaction = self.kernel.transaction().await?;
         let result =
@@ -303,7 +243,6 @@ where
         values: Vec<(String, Value)>,
     ) -> EngineResult<()> {
         let mut transaction = self.kernel.transaction().await?;
-        ensure_replication_tables(&mut transaction, self.reconciler.as_ref()).await?;
         let result = resolve_conflicted_row(
             &mut transaction,
             self.reconciler.as_ref(),
@@ -321,45 +260,4 @@ where
             }
         }
     }
-
-    pub async fn import_envelope(
-        &self,
-        envelope: TransactionEnvelope,
-    ) -> EngineResult<EnvelopeOutcome> {
-        let mut transaction = self.kernel.transaction().await?;
-        ensure_replication_tables(&mut transaction, self.reconciler.as_ref()).await?;
-        let outcome = import_envelope(&mut transaction, self.reconciler.as_ref(), envelope).await?;
-        transaction.commit().await?;
-        Ok(outcome)
-    }
-
-    pub async fn import_envelope_bytes(&self, bytes: Vec<u8>) -> EngineResult<EnvelopeOutcome> {
-        let envelope = match TransactionEnvelope::decode(&bytes) {
-            Ok(envelope) => envelope,
-            Err(error) => return self.quarantine_envelope(bytes, error.to_string()).await,
-        };
-        self.import_envelope(envelope).await
-    }
-
-    async fn quarantine_envelope(
-        &self,
-        bytes: Vec<u8>,
-        reason: String,
-    ) -> EngineResult<EnvelopeOutcome> {
-        let mut transaction = self.kernel.transaction().await?;
-        ensure_replication_tables(&mut transaction, self.reconciler.as_ref()).await?;
-        let outcome = quarantine(&mut transaction, bytes, reason).await?;
-        transaction.commit().await?;
-        Ok(outcome)
-    }
-}
-
-async fn ensure_replication_tables<T, R>(transaction: &mut T, codec: &R) -> EngineResult<()>
-where
-    T: KernelTransaction,
-    R: RowCodec<T>,
-{
-    ensure(transaction).await?;
-    bootstrap_internal_tables(transaction, codec, &mut Vec::new()).await?;
-    ensure_envelope_log(transaction).await
 }

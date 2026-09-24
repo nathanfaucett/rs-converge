@@ -6,10 +6,7 @@ use std::{
     },
 };
 
-use engine::{
-    Checkpoint, Engine, EngineResult, EnvelopeOutcome, Frontier, Kernel, RowCodec,
-    TransactionEnvelope,
-};
+use engine::{Engine, EngineResult, Kernel, RowCodec};
 use engine_automerge::AutomergeRowCodec;
 use engine_redb::RedbKernel;
 use futures::join;
@@ -114,17 +111,17 @@ impl<K: Kernel, R: RowCodec<K::Transaction>> Cluster<K, R> {
         &self.nodes[id].engine
     }
 
-    pub async fn have_same_frontiers(&self) -> bool {
+    pub async fn have_same_manifests(&self) -> bool {
         if self.nodes.len() <= 1 {
             return true;
         }
-        let first = match self.nodes[0].engine.frontier().await {
-            Ok(f) => f,
+        let first = match self.nodes[0].engine.sync_manifest().await {
+            Ok(manifest) => manifest,
             Err(_) => return false,
         };
         for node in &self.nodes[1..] {
-            match node.engine.frontier().await {
-                Ok(f) if f == first => {}
+            match node.engine.sync_manifest().await {
+                Ok(manifest) if manifest == first => {}
                 _ => return false,
             }
         }
@@ -141,7 +138,7 @@ impl<K: Kernel, R: RowCodec<K::Transaction>> Cluster<K, R> {
         }
         for _ in 0..max_rounds {
             self.sync_all(config).await?;
-            if self.have_same_frontiers().await {
+            if self.have_same_manifests().await {
                 return Ok(());
             }
         }
@@ -216,41 +213,6 @@ impl<K: Kernel, R: RowCodec<K::Transaction>> Cluster<K, R> {
         Ok(())
     }
 
-    pub async fn export_envelopes(&self, node_id: usize) -> EngineResult<Vec<TransactionEnvelope>> {
-        self.nodes[node_id]
-            .engine
-            .missing_envelopes(&Frontier::default())
-            .await
-    }
-
-    pub async fn export_missing_envelopes(
-        &self,
-        source: usize,
-        destination: usize,
-    ) -> EngineResult<Vec<TransactionEnvelope>> {
-        let frontier = self.nodes[destination].engine.frontier().await?;
-        self.nodes[source].engine.missing_envelopes(&frontier).await
-    }
-
-    pub async fn import_envelope(
-        &self,
-        node_id: usize,
-        envelope: TransactionEnvelope,
-    ) -> EngineResult<EnvelopeOutcome> {
-        self.nodes[node_id].engine.import_envelope(envelope).await
-    }
-
-    pub async fn import_envelope_bytes(
-        &self,
-        node_id: usize,
-        bytes: Vec<u8>,
-    ) -> EngineResult<EnvelopeOutcome> {
-        self.nodes[node_id]
-            .engine
-            .import_envelope_bytes(bytes)
-            .await
-    }
-
     pub async fn row_conflicts(
         &self,
         node_id: usize,
@@ -287,18 +249,12 @@ impl<K: Kernel, R: RowCodec<K::Transaction>> Cluster<K, R> {
     }
 
     pub async fn assert_state_converged(&self) {
-        let first_checkpoint: Checkpoint = self.nodes[0].engine.export_checkpoint().await.unwrap();
-        let first_outcomes = self.nodes[0].engine.envelope_outcomes().await.unwrap();
+        let first_state = self.nodes[0].engine.export_sync_state().await.unwrap();
         for (node, current) in self.nodes.iter().enumerate().skip(1) {
             assert_eq!(
-                first_checkpoint,
-                current.engine.export_checkpoint().await.unwrap(),
-                "nodes 0 and {node} diverged in checkpoint state"
-            );
-            assert_eq!(
-                first_outcomes,
-                current.engine.envelope_outcomes().await.unwrap(),
-                "nodes 0 and {node} diverged in envelope outcomes"
+                first_state,
+                current.engine.export_sync_state().await.unwrap(),
+                "nodes 0 and {node} diverged in sync state"
             );
         }
     }

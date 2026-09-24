@@ -2,7 +2,7 @@
 
 ## Engine Transaction
 
-One transaction owns one complete read snapshot or write set for an engine operation batch. A write transaction commits all enlisted catalog, schema, index, Automerge row, tombstone, and replication-envelope changes together, or rolls them all back.
+One transaction owns one complete read snapshot or write set for an engine operation batch. A write transaction commits all enlisted catalog, schema, index, Automerge row, and tombstone changes together, or rolls them all back.
 
 ## Logical Row
 
@@ -28,13 +28,13 @@ A Conflict retains concurrent candidate values or objects that cannot all be act
 
 A Generation is the immutable identity of a Table, Column, or Index. A Logical Row uses its table generation and immutable UUID. Names are labels and may be reused by a new Generation after the former Generation is Tombstoned.
 
-## Replication Envelope
+## Sync State Unit
 
-A Replication Envelope is one immutable, causally dependent record of a committed Engine Transaction. Replicas apply its complete write set atomically, retain it for relay, and classify it as Applied, Pending, Superseded, or Quarantined.
+A Sync State Unit is the canonical transferable state for one Logical Row, Table, Column, Index, or Index Field. It contains its identity, state bytes, deletion metadata where applicable, and a digest. The Engine applies one unit atomically and maintains derived Index Records.
 
-## Checkpoint
+## Sync Manifest
 
-A Checkpoint is a mergeable compact representation of replicated state and its causal frontier. It contains the facts required to reconcile with independent offline state; it never replaces a replica's database state.
+A Sync Manifest maps each Sync State Unit identity to its digest. A Sync Session exchanges manifests, transfers mismatched units in batches, and retries by exchanging manifests again. The manifest is session state; the Engine stores no frontier, checkpoint, envelope log, or quarantine state.
 
 ## Tombstone
 

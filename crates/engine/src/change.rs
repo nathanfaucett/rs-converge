@@ -5,7 +5,6 @@ use uuid::Uuid;
 
 use crate::{
     EngineError, EngineResult, KernelTransaction, RowCodec, TableGenerationId,
-    envelope::ensure_envelope_log,
     index::{rebuild_table, update_row},
     schema::{SchemaChange, columns, materialize as materialize_schema},
 };
@@ -39,13 +38,6 @@ impl Change {
 pub enum ChangeKey {
     Schema(SchemaChange),
     Row { table: TableGenerationId, row: Uuid },
-}
-
-pub(crate) async fn ensure_change_log<T>(transaction: &mut T) -> EngineResult<()>
-where
-    T: KernelTransaction,
-{
-    ensure_envelope_log(transaction).await
 }
 
 pub(crate) async fn apply_local_change<T, R>(

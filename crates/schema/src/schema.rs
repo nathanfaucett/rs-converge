@@ -62,6 +62,11 @@ impl TableSchema {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(feature = "std"))]
+    use alloc::vec;
+    #[cfg(feature = "std")]
+    use std::vec;
+
     use super::*;
 
     fn column(value_type: ValueType, primary_key: bool) -> ColumnSchema {

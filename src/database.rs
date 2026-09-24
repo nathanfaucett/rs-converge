@@ -5,8 +5,8 @@ use alloc::{string::String, vec::Vec};
 #[cfg(feature = "in-memory")]
 use engine::InMemoryKernel;
 use engine::{
-    Checkpoint, ColumnGenerationId, Engine, EngineError, EngineResult, EnvelopeId, EnvelopeOutcome,
-    Frontier, IndexGenerationId, TableGenerationId, TransactionEnvelope,
+    ColumnGenerationId, Engine, EngineError, EngineResult, IndexGenerationId, SyncManifest,
+    SyncStateUnit, TableGenerationId,
 };
 use query::{QueryParams, QueryResult, Statement, Translator};
 use schema::{IndexSchema, TableSchema};
@@ -191,31 +191,16 @@ impl Database {
         database_call!(self, |engine| engine.execute(statements).await)
     }
 
-    pub async fn frontier(&self) -> EngineResult<Frontier> {
-        database_call!(self, |engine| engine.frontier().await)
+    pub async fn sync_manifest(&self) -> EngineResult<SyncManifest> {
+        database_call!(self, |engine| engine.sync_manifest().await)
     }
 
-    pub async fn export_checkpoint(&self) -> EngineResult<Checkpoint> {
-        database_call!(self, |engine| engine.export_checkpoint().await)
+    pub async fn export_sync_state(&self) -> EngineResult<Vec<SyncStateUnit>> {
+        database_call!(self, |engine| engine.export_sync_state().await)
     }
 
-    pub async fn import_checkpoint(&self, checkpoint: Checkpoint) -> EngineResult<()> {
-        database_call!(self, |engine| engine.import_checkpoint(checkpoint).await)
-    }
-
-    pub async fn missing_envelopes(
-        &self,
-        frontier: &Frontier,
-    ) -> EngineResult<Vec<TransactionEnvelope>> {
-        database_call!(self, |engine| engine.missing_envelopes(frontier).await)
-    }
-
-    pub async fn envelope_outcome(&self, id: EnvelopeId) -> EngineResult<Option<EnvelopeOutcome>> {
-        database_call!(self, |engine| engine.envelope_outcome(id).await)
-    }
-
-    pub async fn envelope_outcomes(&self) -> EngineResult<Vec<(EnvelopeId, EnvelopeOutcome)>> {
-        database_call!(self, |engine| engine.envelope_outcomes().await)
+    pub async fn apply_sync_state(&self, unit: SyncStateUnit) -> EngineResult<()> {
+        database_call!(self, |engine| engine.apply_row_sync_state(unit).await)
     }
 
     pub async fn row_conflicts(&self, table_name: &str, key: &Row) -> EngineResult<Vec<String>> {
@@ -231,16 +216,5 @@ impl Database {
         database_call!(self, |engine| engine
             .resolve_row(table_name, key, values)
             .await)
-    }
-
-    pub async fn import_envelope(
-        &self,
-        envelope: TransactionEnvelope,
-    ) -> EngineResult<EnvelopeOutcome> {
-        database_call!(self, |engine| engine.import_envelope(envelope).await)
-    }
-
-    pub async fn import_envelope_bytes(&self, bytes: Vec<u8>) -> EngineResult<EnvelopeOutcome> {
-        database_call!(self, |engine| engine.import_envelope_bytes(bytes).await)
     }
 }

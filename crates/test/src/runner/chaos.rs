@@ -22,7 +22,7 @@ pub struct ChaosRunner {
 impl Default for ChaosRunner {
     fn default() -> Self {
         Self {
-            // state_consistency hits a redb nested-open bug on checkpoint/frontier reads
+            // state_consistency validates full sync manifests
             policy: VerificationPolicy::new(true, true, false),
             session_config: SessionConfig::default(),
             drop_rate: 0.3,
@@ -137,7 +137,7 @@ impl TestRunner for ChaosRunner {
         let mut converged = false;
         for _ in 0..self.max_rounds {
             let _ = cluster.sync_all(&self.session_config).await;
-            if cluster.have_same_frontiers().await {
+            if cluster.have_same_manifests().await {
                 converged = true;
                 break;
             }
@@ -145,7 +145,7 @@ impl TestRunner for ChaosRunner {
 
         if !converged {
             return Err(RunnerError::Chaos(format!(
-                "cluster did not reach uniform causal frontier within {} rounds",
+                "cluster did not reach uniform sync manifest within {} rounds",
                 self.max_rounds
             )));
         }
@@ -178,56 +178,7 @@ impl TestRunner for ChaosRunner {
 
         // State consistency verification
         if self.policy.state_consistency {
-            let first_frontier = cluster
-                .engine(0)
-                .frontier()
-                .await
-                .map_err(RunnerError::Engine)?;
-            let first_checkpoint = cluster
-                .engine(0)
-                .export_checkpoint()
-                .await
-                .map_err(RunnerError::Engine)?;
-            let first_outcomes = cluster
-                .engine(0)
-                .envelope_outcomes()
-                .await
-                .map_err(RunnerError::Engine)?;
-
-            for node in 1..n {
-                let node_frontier = cluster
-                    .engine(node)
-                    .frontier()
-                    .await
-                    .map_err(RunnerError::Engine)?;
-                if node_frontier != first_frontier {
-                    return Err(RunnerError::StateConvergenceFailure(format!(
-                        "nodes 0 and {node} diverged in causal frontier"
-                    )));
-                }
-
-                let node_checkpoint = cluster
-                    .engine(node)
-                    .export_checkpoint()
-                    .await
-                    .map_err(RunnerError::Engine)?;
-                if node_checkpoint != first_checkpoint {
-                    return Err(RunnerError::StateConvergenceFailure(format!(
-                        "nodes 0 and {node} diverged in checkpoint state"
-                    )));
-                }
-
-                let node_outcomes = cluster
-                    .engine(node)
-                    .envelope_outcomes()
-                    .await
-                    .map_err(RunnerError::Engine)?;
-                if node_outcomes != first_outcomes {
-                    return Err(RunnerError::StateConvergenceFailure(format!(
-                        "nodes 0 and {node} diverged in envelope outcomes"
-                    )));
-                }
-            }
+            cluster.assert_state_converged().await;
         }
 
         // IO correctness verification

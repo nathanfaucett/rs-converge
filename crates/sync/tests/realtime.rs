@@ -1,11 +1,14 @@
 use core::{cell::Cell, fmt};
-use std::rc::Rc;
+use std::{cell::RefCell, rc::Rc};
 
 use engine::{Engine, InMemoryKernel};
 use engine_automerge::AutomergeRowCodec;
 use futures::{StreamExt, channel::mpsc, executor::block_on};
 use schema::{ColumnSchema, TableSchema};
-use sync::{SessionConfig, SyncError, SyncResult, SyncRole, SyncTransport, synchronize};
+use sql_translator::SqlTranslator;
+use sync::{
+    SessionConfig, SyncError, SyncMessage, SyncResult, SyncRole, SyncTransport, synchronize,
+};
 use value::{Value, ValueType};
 
 #[derive(Debug)]
@@ -20,6 +23,7 @@ impl fmt::Display for Closed {
 struct ChannelTransport {
     receiver: mpsc::UnboundedReceiver<Vec<u8>>,
     sender: mpsc::UnboundedSender<Vec<u8>>,
+    sent: Rc<RefCell<Vec<SyncMessage>>>,
 }
 
 impl SyncTransport for ChannelTransport {
@@ -30,6 +34,9 @@ impl SyncTransport for ChannelTransport {
     }
 
     async fn send(&mut self, frame: Vec<u8>) -> Result<(), Self::Error> {
+        self.sent
+            .borrow_mut()
+            .push(postcard::from_bytes(&frame).unwrap());
         self.sender.unbounded_send(frame).map_err(|_| Closed)
     }
 }
@@ -41,12 +48,29 @@ fn transport_pair() -> (ChannelTransport, ChannelTransport) {
         ChannelTransport {
             receiver: left_receiver,
             sender: left_sender,
+            sent: Rc::new(RefCell::new(Vec::new())),
         },
         ChannelTransport {
             receiver: right_receiver,
             sender: right_sender,
+            sent: Rc::new(RefCell::new(Vec::new())),
         },
     )
+}
+
+async fn sync(
+    left: &Engine<InMemoryKernel, AutomergeRowCodec>,
+    right: &Engine<InMemoryKernel, AutomergeRowCodec>,
+    config: &SessionConfig,
+) -> Vec<SyncMessage> {
+    let (mut left_transport, mut right_transport) = transport_pair();
+    let (left_result, right_result) = futures::join!(
+        synchronize(left, &mut left_transport, config, SyncRole::Initiator),
+        synchronize(right, &mut right_transport, config, SyncRole::Responder),
+    );
+    left_result.unwrap();
+    right_result.unwrap();
+    left_transport.sent.borrow().clone()
 }
 
 #[derive(Clone, Default)]
@@ -124,6 +148,26 @@ impl SyncTransport for RequestOnFirstSend {
     }
 }
 
+fn people_table() -> TableSchema {
+    TableSchema {
+        name: "people".into(),
+        columns: vec![
+            ColumnSchema {
+                name: "id".into(),
+                r#type: ValueType::Uuid,
+                default: Value::Null,
+                primary_key: true,
+            },
+            ColumnSchema {
+                name: "name".into(),
+                r#type: ValueType::Text,
+                default: Value::Null,
+                primary_key: false,
+            },
+        ],
+    }
+}
+
 fn table(name: &str) -> TableSchema {
     TableSchema {
         name: name.into(),
@@ -159,8 +203,8 @@ fn synchronizes_on_connect() {
         assert!(left_result.unwrap().is_some());
         assert!(right_result.unwrap().is_some());
         assert_eq!(
-            left.frontier().await.unwrap(),
-            right.frontier().await.unwrap()
+            left.sync_manifest().await.unwrap(),
+            right.sync_manifest().await.unwrap()
         );
     });
 }
@@ -187,6 +231,54 @@ fn coalesces_duplicate_requests() {
         assert!(right_result.unwrap().is_some());
         assert!(!left_connection.pending());
         assert!(!right_connection.pending());
+    });
+}
+
+#[test]
+fn dependency_failure_triggers_snapshot_recovery() {
+    block_on(async {
+        let left = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
+        let right = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
+        left.create_table(people_table()).await.unwrap();
+        let translator = SqlTranslator;
+        left.translate_and_execute(
+            "INSERT INTO people (id, name) VALUES (CAST('018f0f8e-7b6d-7c4a-8f12-123456789abc' AS UUID), 'Ada');",
+            &translator,
+        )
+        .await
+        .unwrap();
+        let _ = sync(&left, &right, &SessionConfig::default()).await;
+
+        right
+            .translate_and_execute(
+                "DELETE FROM people WHERE id = CAST('018f0f8e-7b6d-7c4a-8f12-123456789abc' AS UUID);",
+                &translator,
+            )
+            .await
+            .unwrap();
+        left.translate_and_execute(
+            "UPDATE people SET name = 'Grace' WHERE id = CAST('018f0f8e-7b6d-7c4a-8f12-123456789abc' AS UUID);",
+            &translator,
+        )
+        .await
+        .unwrap();
+
+        let frames = sync(&left, &right, &SessionConfig::default()).await;
+        assert!(
+            frames
+                .iter()
+                .any(|frame| matches!(frame, SyncMessage::Changes(_)))
+        );
+        assert!(
+            frames
+                .iter()
+                .any(|frame| matches!(frame, SyncMessage::RequestSnapshots(_)))
+        );
+        assert!(
+            frames
+                .iter()
+                .any(|frame| matches!(frame, SyncMessage::State(_)))
+        );
     });
 }
 
@@ -261,8 +353,8 @@ fn periodic_repair_after_reconnect_converges_offline_writes() {
         left_result.unwrap();
         right_result.unwrap();
         assert_eq!(
-            left.frontier().await.unwrap(),
-            right.frontier().await.unwrap()
+            left.sync_manifest().await.unwrap(),
+            right.sync_manifest().await.unwrap()
         );
         assert_eq!(
             left.table_schema("right_only").await.unwrap(),
@@ -294,7 +386,7 @@ fn transport_failure_leaves_the_engine_unchanged() {
     block_on(async {
         let engine = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
         engine.create_table(table("users")).await.unwrap();
-        let frontier = engine.frontier().await.unwrap();
+        let manifest = engine.sync_manifest().await.unwrap();
         let (transport, _) = Connection::connected(FailingTransport);
         let mut connection = transport;
 
@@ -304,6 +396,6 @@ fn transport_failure_leaves_the_engine_unchanged() {
             .unwrap_err();
 
         assert!(matches!(error, SyncError::Transport(Closed)));
-        assert_eq!(engine.frontier().await.unwrap(), frontier);
+        assert_eq!(engine.sync_manifest().await.unwrap(), manifest);
     });
 }

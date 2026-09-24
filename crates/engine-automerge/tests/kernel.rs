@@ -7,14 +7,15 @@ use std::{
 };
 
 use btree_automerge::DocumentChangeKey;
-use engine::{Engine, Kernel, KernelTransaction, RowCodec, RowTable, TableGenerationId};
+use engine::{
+    Engine, IncrementalChange, Kernel, KernelTransaction, RowCodec, RowTable, TableGenerationId,
+};
 use engine_automerge::{AutomergeRowCodec, RowMetadata};
 use engine_redb::RedbKernel;
 use futures::executor::block_on;
 use query::{
-    AlterTableOperation, DataDefinition, Query, QueryColumn, QueryDelete, QueryExpr,
-    QueryExprValue, QueryFrom, QueryInsert, QuerySelect, QueryUpdate, QueryUpdateAssignment,
-    Statement,
+    AlterTableOperation, DataDefinition, Query, QueryColumn, QueryExpr, QueryExprValue, QueryFrom,
+    QueryInsert, QuerySelect, QueryUpdate, QueryUpdateAssignment, Statement,
 };
 use schema::{ColumnSchema, IndexSchema, TableSchema};
 use uuid::Uuid;
@@ -97,9 +98,8 @@ async fn sync(
     source: &Engine<RedbKernel, AutomergeRowCodec>,
     destination: &Engine<RedbKernel, AutomergeRowCodec>,
 ) -> engine::EngineResult<()> {
-    let frontier = destination.frontier().await?;
-    for envelope in source.missing_envelopes(&frontier).await? {
-        destination.import_envelope(envelope).await?;
+    for unit in source.export_sync_state().await? {
+        destination.apply_row_sync_state(unit).await?;
     }
     Ok(())
 }
@@ -138,6 +138,137 @@ async fn add_column(engine: &Engine<RedbKernel, AutomergeRowCodec>, name: &str, 
         )])
         .await
         .unwrap();
+}
+
+#[test]
+fn malformed_incremental_batch_does_not_partially_mutate_state() {
+    let source_path = database_path();
+    let destination_path = database_path();
+    block_on(async {
+        let source = replica(&source_path);
+        let destination = replica(&destination_path);
+        source.create_table(people_schema()).await.unwrap();
+        source
+            .execute(vec![Statement::Query(Query::Insert(QueryInsert {
+                table: "people".into(),
+                row: Row::new(vec![
+                    uuid_value(1),
+                    Value::from("Ada"),
+                    Value::from("London"),
+                ]),
+                returning: None,
+            }))])
+            .await
+            .unwrap();
+        sync(&source, &destination).await.unwrap();
+
+        update(&source, "city", Value::from("Paris")).await;
+        update(&source, "name", Value::from("Grace")).await;
+        let table = source.table_generation_id("people").await.unwrap();
+        let row = Uuid::from_u128(1);
+        let keys = source.sync_change_inventory(table, row).await.unwrap();
+        assert_eq!(keys.len(), 2);
+        let first_payload = source
+            .export_incremental_change(table, &keys[0])
+            .await
+            .unwrap()
+            .unwrap();
+        let before = destination.sync_manifest().await.unwrap();
+
+        let result = destination
+            .apply_incremental_changes(&[
+                IncrementalChange {
+                    table,
+                    row,
+                    key: keys[0].clone(),
+                    payload: first_payload,
+                },
+                IncrementalChange {
+                    table,
+                    row,
+                    key: keys[1].clone(),
+                    payload: vec![1, 2, 3],
+                },
+            ])
+            .await;
+        assert!(result.is_err());
+        assert_eq!(destination.sync_manifest().await.unwrap(), before);
+    });
+    std::fs::remove_file(source_path).unwrap();
+    std::fs::remove_file(destination_path).unwrap();
+}
+
+#[test]
+fn realtime_row_updates_export_one_incremental_change_after_bootstrap() {
+    let source_path = database_path();
+    let destination_path = database_path();
+    block_on(async {
+        let source = replica(&source_path);
+        let destination = replica(&destination_path);
+        source.create_table(people_schema()).await.unwrap();
+        source
+            .execute(vec![Statement::Query(Query::Insert(QueryInsert {
+                table: "people".into(),
+                row: Row::new(vec![
+                    uuid_value(1),
+                    Value::from("Ada"),
+                    Value::from("London"),
+                ]),
+                returning: None,
+            }))])
+            .await
+            .unwrap();
+
+        sync(&source, &destination).await.unwrap();
+        let table = source.table_generation_id("people").await.unwrap();
+        let row = Uuid::from_u128(1);
+        assert!(
+            source
+                .sync_change_inventory(table, row)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        update(&source, "city", Value::from("Paris")).await;
+        let inventory = source.sync_change_inventory(table, row).await.unwrap();
+        assert_eq!(inventory.len(), 1);
+        let key = inventory[0].clone();
+        let payload = source
+            .export_incremental_change(table, &key)
+            .await
+            .unwrap()
+            .unwrap();
+        let full_state = source
+            .export_sync_state()
+            .await
+            .unwrap()
+            .into_iter()
+            .find_map(|unit| match unit.key {
+                engine::SyncKey::Row {
+                    table: unit_table,
+                    row: unit_row,
+                } if unit_table == table && unit_row == row => Some(unit.state),
+                _ => None,
+            })
+            .unwrap();
+        assert_ne!(payload, full_state);
+
+        destination
+            .apply_incremental_change(table, row, key.clone(), &payload)
+            .await
+            .unwrap();
+        destination
+            .apply_incremental_change(table, row, key, &payload)
+            .await
+            .unwrap();
+        assert_eq!(
+            source.sync_manifest().await.unwrap(),
+            destination.sync_manifest().await.unwrap()
+        );
+    });
+    std::fs::remove_file(source_path).unwrap();
+    std::fs::remove_file(destination_path).unwrap();
 }
 
 #[test]
@@ -481,43 +612,6 @@ fn bootstrap_destination_exclusively_from_source_canonical_changes() {
 }
 
 #[test]
-fn checkpoint_bootstraps_complete_automerge_documents() {
-    let source_path = database_path();
-    let destination_path = database_path();
-    block_on(async {
-        let source = replica(&source_path);
-        let destination = replica(&destination_path);
-        source.create_table(people_schema()).await.unwrap();
-        source
-            .execute(vec![Statement::Query(Query::Insert(QueryInsert {
-                table: "people".into(),
-                row: Row::new(vec![
-                    uuid_value(1),
-                    Value::from("Ada"),
-                    Value::from("London"),
-                ]),
-                returning: None,
-            }))])
-            .await
-            .unwrap();
-        destination
-            .import_checkpoint(source.export_checkpoint().await.unwrap())
-            .await
-            .unwrap();
-        assert_eq!(
-            people_rows(&destination, &["id", "name", "city"]).await,
-            vec![Row::new(vec![
-                uuid_value(1),
-                Value::from("Ada"),
-                Value::from("London"),
-            ])]
-        );
-    });
-    std::fs::remove_file(source_path).unwrap();
-    std::fs::remove_file(destination_path).unwrap();
-}
-
-#[test]
 fn copied_files_reopen_with_distinct_actors_and_converge() {
     let source_path = database_path();
     let destination_path = database_path();
@@ -765,62 +859,6 @@ fn resolving_an_indexed_conflict_promotes_the_next_unique_contender() {
             people_rows(&source, &["id", "name", "city"]).await,
             people_rows(&destination, &["id", "name", "city"]).await
         );
-        assert_eq!(
-            source.frontier().await.unwrap(),
-            destination.frontier().await.unwrap()
-        );
-    });
-    std::fs::remove_file(source_path).unwrap();
-    std::fs::remove_file(destination_path).unwrap();
-}
-
-#[test]
-fn tombstoned_incoming_updates_are_superseded() {
-    let source_path = database_path();
-    let destination_path = database_path();
-    block_on(async {
-        let source = replica(&source_path);
-        let destination = replica(&destination_path);
-        source.create_table(people_schema()).await.unwrap();
-        source
-            .execute(vec![Statement::Query(Query::Insert(QueryInsert {
-                table: "people".into(),
-                row: Row::new(vec![uuid_value(1), Value::from("Ada"), Value::Null]),
-                returning: None,
-            }))])
-            .await
-            .unwrap();
-        sync(&source, &destination).await.unwrap();
-
-        update(&source, "name", Value::from("Grace")).await;
-        let envelope = source
-            .missing_envelopes(&destination.frontier().await.unwrap())
-            .await
-            .unwrap()
-            .pop()
-            .unwrap();
-        destination
-            .execute(vec![Statement::Query(Query::Delete(QueryDelete {
-                from: QueryFrom {
-                    table: "people".into(),
-                    joins: vec![],
-                },
-                predicate: id(1),
-                returning: None,
-            }))])
-            .await
-            .unwrap();
-        assert_eq!(
-            destination.import_envelope(envelope.clone()).await.unwrap(),
-            engine::EnvelopeOutcome::Superseded
-        );
-        assert_eq!(
-            destination.envelope_outcome(envelope.id).await.unwrap(),
-            Some(engine::EnvelopeOutcome::Superseded)
-        );
-        sync(&destination, &source).await.unwrap();
-        assert!(people_rows(&destination, &["id"]).await.is_empty());
-        assert!(people_rows(&source, &["id"]).await.is_empty());
     });
     std::fs::remove_file(source_path).unwrap();
     std::fs::remove_file(destination_path).unwrap();
@@ -895,109 +933,6 @@ fn concurrent_add_column_converges_with_defaults_and_later_updates() {
             people_rows(&destination, &["role", "team"]).await,
             people_rows(&source, &["role", "team"]).await
         );
-    });
-    std::fs::remove_file(source_path).unwrap();
-    std::fs::remove_file(destination_path).unwrap();
-}
-
-#[test]
-fn reversed_delivery_retries_dependencies_and_relays_to_a_third_replica() {
-    let source_path = database_path();
-    let middle_path = database_path();
-    let destination_path = database_path();
-    block_on(async {
-        let source = replica(&source_path);
-        let middle = replica(&middle_path);
-        let destination = replica(&destination_path);
-        source.create_table(people_schema()).await.unwrap();
-        source
-            .execute(vec![Statement::Query(Query::Insert(QueryInsert {
-                table: "people".into(),
-                row: Row::new(vec![uuid_value(1), Value::from("Ada"), Value::Null]),
-                returning: None,
-            }))])
-            .await
-            .unwrap();
-
-        let mut envelopes = source
-            .missing_envelopes(&middle.frontier().await.unwrap())
-            .await
-            .unwrap();
-        envelopes.reverse();
-        for envelope in envelopes.clone() {
-            middle.import_envelope(envelope).await.unwrap();
-        }
-        for envelope in envelopes {
-            middle.import_envelope(envelope).await.unwrap();
-        }
-        sync(&middle, &destination).await.unwrap();
-
-        let expected = vec![Row::new(vec![
-            uuid_value(1),
-            Value::from("Ada"),
-            Value::Null,
-        ])];
-        assert_eq!(
-            people_rows(&middle, &["id", "name", "city"]).await,
-            expected
-        );
-        assert_eq!(
-            people_rows(&destination, &["id", "name", "city"]).await,
-            people_rows(&middle, &["id", "name", "city"]).await
-        );
-        assert_eq!(
-            source.frontier().await.unwrap(),
-            middle.frontier().await.unwrap()
-        );
-        assert_eq!(
-            middle.frontier().await.unwrap(),
-            destination.frontier().await.unwrap()
-        );
-    });
-    std::fs::remove_file(source_path).unwrap();
-    std::fs::remove_file(middle_path).unwrap();
-    std::fs::remove_file(destination_path).unwrap();
-}
-
-#[test]
-fn table_tombstone_supersedes_a_late_row_update() {
-    let source_path = database_path();
-    let destination_path = database_path();
-    block_on(async {
-        let source = replica(&source_path);
-        let destination = replica(&destination_path);
-        source.create_table(people_schema()).await.unwrap();
-        source
-            .execute(vec![Statement::Query(Query::Insert(QueryInsert {
-                table: "people".into(),
-                row: Row::new(vec![uuid_value(1), Value::from("Ada"), Value::Null]),
-                returning: None,
-            }))])
-            .await
-            .unwrap();
-        sync(&source, &destination).await.unwrap();
-
-        update(&destination, "name", Value::from("Grace")).await;
-        let update = destination
-            .missing_envelopes(&source.frontier().await.unwrap())
-            .await
-            .unwrap()
-            .into_iter()
-            .find(|envelope| envelope.changes.iter().any(|change| change.value.is_some()))
-            .unwrap();
-        source.drop_table("people").await.unwrap();
-
-        assert_eq!(
-            source.import_envelope(update.clone()).await.unwrap(),
-            engine::EnvelopeOutcome::Superseded
-        );
-        assert_eq!(
-            source.envelope_outcome(update.id).await.unwrap(),
-            Some(engine::EnvelopeOutcome::Superseded)
-        );
-        sync(&source, &destination).await.unwrap();
-        assert!(destination.table_schema("people").await.is_err());
-        assert!(source.table_schema("people").await.is_err());
     });
     std::fs::remove_file(source_path).unwrap();
     std::fs::remove_file(destination_path).unwrap();

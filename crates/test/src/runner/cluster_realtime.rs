@@ -7,7 +7,7 @@ use crate::{
 };
 
 /// Orchestrates multi-node cluster integration tests in realtime mesh replication mode:
-/// replication envelopes are broadcast across nodes immediately after each mutation.
+/// sync state is broadcast across nodes immediately after each mutation.
 #[derive(Clone, Debug)]
 pub struct ClusterRealtimeRunner {
     pub policy: VerificationPolicy,
@@ -137,56 +137,7 @@ impl TestRunner for ClusterRealtimeRunner {
 
         // State consistency verification
         if self.policy.state_consistency {
-            let first_frontier = cluster
-                .engine(0)
-                .frontier()
-                .await
-                .map_err(RunnerError::Engine)?;
-            let first_checkpoint = cluster
-                .engine(0)
-                .export_checkpoint()
-                .await
-                .map_err(RunnerError::Engine)?;
-            let first_outcomes = cluster
-                .engine(0)
-                .envelope_outcomes()
-                .await
-                .map_err(RunnerError::Engine)?;
-
-            for node in 1..n {
-                let node_frontier = cluster
-                    .engine(node)
-                    .frontier()
-                    .await
-                    .map_err(RunnerError::Engine)?;
-                if node_frontier != first_frontier {
-                    return Err(RunnerError::StateConvergenceFailure(format!(
-                        "nodes 0 and {node} diverged in causal frontier"
-                    )));
-                }
-
-                let node_checkpoint = cluster
-                    .engine(node)
-                    .export_checkpoint()
-                    .await
-                    .map_err(RunnerError::Engine)?;
-                if node_checkpoint != first_checkpoint {
-                    return Err(RunnerError::StateConvergenceFailure(format!(
-                        "nodes 0 and {node} diverged in checkpoint state"
-                    )));
-                }
-
-                let node_outcomes = cluster
-                    .engine(node)
-                    .envelope_outcomes()
-                    .await
-                    .map_err(RunnerError::Engine)?;
-                if node_outcomes != first_outcomes {
-                    return Err(RunnerError::StateConvergenceFailure(format!(
-                        "nodes 0 and {node} diverged in envelope outcomes"
-                    )));
-                }
-            }
+            cluster.assert_state_converged().await;
         }
 
         // IO correctness verification

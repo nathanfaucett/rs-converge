@@ -1,12 +1,19 @@
 use alloc::{
+    collections::BTreeMap,
+    format,
     string::{String, ToString},
     vec::Vec,
 };
 
-use engine::{Checkpoint, Engine, EngineError, Kernel, RowCodec};
+use engine::{
+    Engine, EngineError, IncrementalChange, Kernel, RowCodec, SyncKey, SyncManifest, SyncStateUnit,
+};
 use thiserror::Error;
 
-use crate::{PROTOCOL_VERSION, SyncHello, SyncMessage, SyncTransport};
+use crate::{
+    PROTOCOL_VERSION, SyncHello, SyncIncrementalChange, SyncMessage, SyncRowInventory,
+    SyncSnapshotRequest, SyncTransport,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SyncRole {
@@ -16,23 +23,25 @@ pub enum SyncRole {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionConfig {
-    pub max_envelopes_per_frame: usize,
-    pub checkpoint_threshold: Option<usize>,
+    pub max_units_per_frame: usize,
 }
 
 impl Default for SessionConfig {
     fn default() -> Self {
         Self {
-            max_envelopes_per_frame: 64,
-            checkpoint_threshold: None,
+            max_units_per_frame: 64,
         }
     }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SyncResult {
-    pub received_envelopes: usize,
-    pub sent_envelopes: usize,
+    pub received_units: usize,
+    pub sent_units: usize,
+    pub received_changes: usize,
+    pub sent_changes: usize,
+    pub received_snapshots: usize,
+    pub sent_snapshots: usize,
 }
 
 #[derive(Debug, Error)]
@@ -54,6 +63,9 @@ pub enum SyncError<E> {
 
     #[error("unexpected sync message")]
     UnexpectedMessage,
+
+    #[error("remote sync aborted: {0}")]
+    RemoteAbort(String),
 }
 
 pub async fn synchronize<K, R, T>(
@@ -68,37 +80,440 @@ where
     T: SyncTransport,
     T::Error: core::fmt::Display,
 {
-    if config.max_envelopes_per_frame == 0 {
+    if config.max_units_per_frame == 0 {
         return Err(SyncError::InvalidConfiguration);
     }
 
-    match role {
+    exchange_hello(engine, transport, role).await?;
+    let remote_manifest = exchange_manifest(engine, transport, role).await?;
+    let local_units = engine.export_sync_state().await?;
+    let local_inventories = inventories_for(engine, &local_units).await?;
+    let remote_inventories =
+        exchange_inventories(transport, role, local_inventories.clone()).await?;
+    let remote_inventories = remote_inventories
+        .into_iter()
+        .map(|inventory| (inventory.key(), inventory))
+        .collect::<BTreeMap<_, _>>();
+    let outbound = build_outbound(engine, local_units, remote_manifest, remote_inventories).await?;
+
+    let (sent, mut received) = match role {
         SyncRole::Initiator => {
-            send_hello(engine, transport).await?;
-            receive_hello(transport).await?;
+            let sent = send_outbound(transport, &outbound, config.max_units_per_frame).await?;
+            let received = receive_outbound(engine, transport).await?;
+            (sent, received)
         }
         SyncRole::Responder => {
-            receive_hello(transport).await?;
-            send_hello(engine, transport).await?;
+            let received = receive_outbound(engine, transport).await?;
+            let sent = send_outbound(transport, &outbound, config.max_units_per_frame).await?;
+            (sent, received)
+        }
+    };
+
+    let remote_requests = exchange_snapshot_requests(transport, role, received.requests).await?;
+    let recovery = recovery_snapshots(engine, remote_requests).await?;
+    let (sent_recovery, (received_recovery, retried_changes)) = match role {
+        SyncRole::Initiator => {
+            let sent = send_snapshots(transport, &recovery, config.max_units_per_frame).await?;
+            let received = receive_recovery(engine, transport, &mut received.pending).await?;
+            (sent, received)
+        }
+        SyncRole::Responder => {
+            let received = receive_recovery(engine, transport, &mut received.pending).await?;
+            let sent = send_snapshots(transport, &recovery, config.max_units_per_frame).await?;
+            (sent, received)
+        }
+    };
+
+    Ok(SyncResult {
+        sent_units: sent.snapshots + sent_recovery,
+        received_units: received.snapshots + received_recovery,
+        sent_changes: sent.changes,
+        received_changes: received.changes + retried_changes,
+        sent_snapshots: sent.snapshots + sent_recovery,
+        received_snapshots: received.snapshots + received_recovery,
+    })
+}
+
+#[derive(Default)]
+struct Outbound {
+    snapshots: Vec<SyncStateUnit>,
+    changes: Vec<SyncIncrementalChange>,
+}
+
+#[derive(Default)]
+struct TransferCount {
+    snapshots: usize,
+    changes: usize,
+}
+
+struct Received {
+    snapshots: usize,
+    changes: usize,
+    requests: Vec<SyncSnapshotRequest>,
+    pending: Vec<SyncIncrementalChange>,
+}
+
+fn validate_state_batch(batch: &[SyncStateUnit]) -> Result<(), EngineError> {
+    if batch.iter().all(SyncStateUnit::verify_digest) {
+        Ok(())
+    } else {
+        Err(EngineError::custom("Invalid sync state digest"))
+    }
+}
+
+fn validate_change_batch(batch: &[SyncIncrementalChange]) -> Result<(), EngineError> {
+    for change in batch {
+        if change.key.document_id != change.row.as_bytes()
+            || change.payload.is_empty()
+            || change.key.change_hash == [0; 32]
+        {
+            return Err(EngineError::custom("Invalid incremental change frame"));
         }
     }
+    Ok(())
+}
 
-    let mut result = SyncResult::default();
-    let mut first_round = true;
-    loop {
-        let (sent, received) = sync_round(engine, transport, config, role, first_round).await?;
-        first_round = false;
-        result.sent_envelopes += sent;
-        result.received_envelopes += received;
-        if sent == 0 && received == 0 {
-            return Ok(result);
+async fn inventories_for<K, R>(
+    engine: &Engine<K, R>,
+    units: &[SyncStateUnit],
+) -> Result<Vec<SyncRowInventory>, EngineError>
+where
+    K: Kernel,
+    R: RowCodec<K::Transaction>,
+{
+    let mut result = Vec::new();
+    for unit in units {
+        let SyncKey::Row { table, row } = unit.key else {
+            continue;
+        };
+        result.push(SyncRowInventory {
+            table,
+            row,
+            changes: engine.sync_change_inventory(table, row).await?,
+        });
+    }
+    result.sort_by_key(SyncRowInventory::key);
+    result.dedup_by(|left, right| left.key() == right.key());
+    Ok(result)
+}
+
+async fn exchange_inventories<T>(
+    transport: &mut T,
+    role: SyncRole,
+    local: Vec<SyncRowInventory>,
+) -> Result<Vec<SyncRowInventory>, SyncError<T::Error>>
+where
+    T: SyncTransport,
+    T::Error: core::fmt::Display,
+{
+    let message = SyncMessage::Inventory(local);
+    match role {
+        SyncRole::Initiator => {
+            send_message(transport, &message).await?;
+            receive_inventory(transport).await
+        }
+        SyncRole::Responder => {
+            let remote = receive_inventory(transport).await?;
+            send_message(transport, &message).await?;
+            Ok(remote)
         }
     }
 }
 
-async fn send_hello<K, R, T>(
+async fn receive_inventory<T>(
+    transport: &mut T,
+) -> Result<Vec<SyncRowInventory>, SyncError<T::Error>>
+where
+    T: SyncTransport,
+    T::Error: core::fmt::Display,
+{
+    match receive_message(transport).await? {
+        SyncMessage::Inventory(inventory) => Ok(inventory),
+        _ => Err(SyncError::UnexpectedMessage),
+    }
+}
+
+async fn build_outbound<K, R>(
+    engine: &Engine<K, R>,
+    units: Vec<SyncStateUnit>,
+    remote_manifest: SyncManifest,
+    remote_inventories: BTreeMap<SyncKey, SyncRowInventory>,
+) -> Result<Outbound, EngineError>
+where
+    K: Kernel,
+    R: RowCodec<K::Transaction>,
+{
+    let mut outbound = Outbound::default();
+    for unit in units {
+        let SyncKey::Row { table, row } = unit.key.clone() else {
+            if !remote_manifest.contains(&unit.key, unit.digest) {
+                outbound.snapshots.push(unit);
+            }
+            continue;
+        };
+        if remote_manifest.contains(&unit.key, unit.digest) {
+            continue;
+        }
+        let Some(remote) = remote_inventories.get(&unit.key) else {
+            outbound.snapshots.push(unit);
+            continue;
+        };
+        let local = engine.sync_change_inventory(table, row).await?;
+        let mut exported = 0;
+        for key in local {
+            if remote.changes.iter().any(|candidate| candidate == &key) {
+                continue;
+            }
+            if let Some(payload) = engine.export_incremental_change(table, &key).await? {
+                outbound.changes.push(SyncIncrementalChange {
+                    table,
+                    row,
+                    key,
+                    payload,
+                });
+                exported += 1;
+            }
+        }
+        if exported == 0 {
+            outbound.snapshots.push(unit);
+        }
+    }
+    outbound
+        .snapshots
+        .sort_unstable_by(|left, right| left.key.cmp(&right.key));
+    outbound
+        .changes
+        .sort_unstable_by_key(|left| left.key.change_hash);
+    Ok(outbound)
+}
+
+async fn send_outbound<T>(
+    transport: &mut T,
+    outbound: &Outbound,
+    batch_size: usize,
+) -> Result<TransferCount, SyncError<T::Error>>
+where
+    T: SyncTransport,
+    T::Error: core::fmt::Display,
+{
+    for batch in outbound.snapshots.chunks(batch_size) {
+        send_message(transport, &SyncMessage::State(batch.to_vec())).await?;
+    }
+    for batch in outbound.changes.chunks(batch_size) {
+        send_message(transport, &SyncMessage::Changes(batch.to_vec())).await?;
+    }
+    send_message(transport, &SyncMessage::Done).await?;
+    Ok(TransferCount {
+        snapshots: outbound.snapshots.len(),
+        changes: outbound.changes.len(),
+    })
+}
+
+async fn exchange_snapshot_requests<T>(
+    transport: &mut T,
+    role: SyncRole,
+    local: Vec<SyncSnapshotRequest>,
+) -> Result<Vec<SyncSnapshotRequest>, SyncError<T::Error>>
+where
+    T: SyncTransport,
+    T::Error: core::fmt::Display,
+{
+    let message = SyncMessage::RequestSnapshots(local);
+    match role {
+        SyncRole::Initiator => {
+            send_message(transport, &message).await?;
+            receive_snapshot_requests(transport).await
+        }
+        SyncRole::Responder => {
+            let remote = receive_snapshot_requests(transport).await?;
+            send_message(transport, &message).await?;
+            Ok(remote)
+        }
+    }
+}
+
+async fn receive_snapshot_requests<T>(
+    transport: &mut T,
+) -> Result<Vec<SyncSnapshotRequest>, SyncError<T::Error>>
+where
+    T: SyncTransport,
+    T::Error: core::fmt::Display,
+{
+    match receive_message(transport).await? {
+        SyncMessage::RequestSnapshots(requests) => Ok(requests),
+        _ => Err(SyncError::UnexpectedMessage),
+    }
+}
+
+async fn recovery_snapshots<K, R>(
+    engine: &Engine<K, R>,
+    requests: Vec<SyncSnapshotRequest>,
+) -> Result<Vec<SyncStateUnit>, EngineError>
+where
+    K: Kernel,
+    R: RowCodec<K::Transaction>,
+{
+    let mut snapshots = Vec::new();
+    for request in requests {
+        if let Some(snapshot) = engine
+            .export_row_sync_state(request.table, request.row)
+            .await?
+        {
+            snapshots.push(snapshot);
+        }
+    }
+    Ok(snapshots)
+}
+
+async fn send_snapshots<T>(
+    transport: &mut T,
+    snapshots: &[SyncStateUnit],
+    batch_size: usize,
+) -> Result<usize, SyncError<T::Error>>
+where
+    T: SyncTransport,
+    T::Error: core::fmt::Display,
+{
+    for batch in snapshots.chunks(batch_size) {
+        send_message(transport, &SyncMessage::State(batch.to_vec())).await?;
+    }
+    send_message(transport, &SyncMessage::Done).await?;
+    Ok(snapshots.len())
+}
+
+async fn receive_recovery<K, R, T>(
     engine: &Engine<K, R>,
     transport: &mut T,
+    pending: &mut Vec<SyncIncrementalChange>,
+) -> Result<(usize, usize), SyncError<T::Error>>
+where
+    K: Kernel,
+    R: RowCodec<K::Transaction>,
+    T: SyncTransport,
+    T::Error: core::fmt::Display,
+{
+    let mut snapshots = 0;
+    loop {
+        match receive_message(transport).await? {
+            SyncMessage::State(batch) => {
+                if let Err(error) = validate_state_batch(&batch) {
+                    let reason = format!("{} (recovery snapshot batch)", error);
+                    let _ = send_message(transport, &SyncMessage::Abort(reason)).await;
+                    return Err(error.into());
+                }
+                for unit in batch {
+                    if let Err(error) = engine.apply_row_sync_state(unit.clone()).await {
+                        let reason = format!("{} (recovery snapshot {:?})", error, unit.key);
+                        let _ = send_message(transport, &SyncMessage::Abort(reason)).await;
+                        return Err(error.into());
+                    }
+                    snapshots += 1;
+                }
+            }
+            SyncMessage::Done => break,
+            SyncMessage::Abort(reason) => return Err(SyncError::RemoteAbort(reason)),
+            _ => return Err(SyncError::UnexpectedMessage),
+        }
+    }
+
+    // A recovery snapshot is the sender's complete current row state. It includes
+    // the history needed by the pending changes and supersedes their payloads.
+    pending.clear();
+    Ok((snapshots, 0))
+}
+
+async fn receive_outbound<K, R, T>(
+    engine: &Engine<K, R>,
+    transport: &mut T,
+) -> Result<Received, SyncError<T::Error>>
+where
+    K: Kernel,
+    R: RowCodec<K::Transaction>,
+    T: SyncTransport,
+    T::Error: core::fmt::Display,
+{
+    let mut count = Received {
+        snapshots: 0,
+        changes: 0,
+        requests: Vec::new(),
+        pending: Vec::new(),
+    };
+    loop {
+        match receive_message(transport).await? {
+            SyncMessage::State(batch) => {
+                if let Err(error) = validate_state_batch(&batch) {
+                    return abort(transport, error, String::from("snapshot batch")).await;
+                }
+                for unit in batch {
+                    if let Err(error) = engine.apply_row_sync_state(unit.clone()).await {
+                        return abort(transport, error, format!("snapshot {:?}", unit.key)).await;
+                    }
+                    count.snapshots += 1;
+                }
+            }
+            SyncMessage::Changes(batch) => {
+                if let Err(error) = validate_change_batch(&batch) {
+                    return abort(transport, error, String::from("incremental batch")).await;
+                }
+                let changes = batch
+                    .iter()
+                    .map(|change| IncrementalChange {
+                        table: change.table,
+                        row: change.row,
+                        key: change.key.clone(),
+                        payload: change.payload.clone(),
+                    })
+                    .collect::<Vec<_>>();
+                if let Err(error) = engine.apply_incremental_changes(&changes).await {
+                    if matches!(error, EngineError::SyncDependencyUnavailable) {
+                        for change in batch {
+                            count.requests.push(SyncSnapshotRequest {
+                                table: change.table,
+                                row: change.row,
+                            });
+                            count.pending.push(change);
+                        }
+                    } else {
+                        return abort(transport, error, String::from("incremental batch")).await;
+                    }
+                } else {
+                    count.changes += changes.len();
+                }
+            }
+            SyncMessage::Done => {
+                count.requests.sort_unstable();
+                count.requests.dedup();
+                return Ok(count);
+            }
+            SyncMessage::Abort(reason) => return Err(SyncError::RemoteAbort(reason)),
+            SyncMessage::Hello(_)
+            | SyncMessage::Manifest(_)
+            | SyncMessage::Inventory(_)
+            | SyncMessage::RequestSnapshots(_) => {
+                return Err(SyncError::UnexpectedMessage);
+            }
+        }
+    }
+}
+
+async fn abort<T>(
+    transport: &mut T,
+    error: EngineError,
+    context: String,
+) -> Result<Received, SyncError<T::Error>>
+where
+    T: SyncTransport,
+    T::Error: core::fmt::Display,
+{
+    let reason = format!("{} ({})", error, context);
+    let _ = send_message(transport, &SyncMessage::Abort(reason)).await;
+    Err(error.into())
+}
+
+async fn exchange_hello<K, R, T>(
+    engine: &Engine<K, R>,
+    transport: &mut T,
+    role: SyncRole,
 ) -> Result<(), SyncError<T::Error>>
 where
     K: Kernel,
@@ -106,19 +521,24 @@ where
     T: SyncTransport,
     T::Error: core::fmt::Display,
 {
-    let hello = SyncHello {
+    let hello = SyncMessage::Hello(SyncHello {
         protocol_version: PROTOCOL_VERSION,
-        frontier: engine.frontier().await?,
-    };
-    send_message(transport, &SyncMessage::Hello(hello)).await
+        manifest: engine.sync_manifest().await?,
+    });
+    match role {
+        SyncRole::Initiator => {
+            send_message(transport, &hello).await?;
+            validate_hello(receive_message(transport).await?)
+        }
+        SyncRole::Responder => {
+            validate_hello(receive_message(transport).await?)?;
+            send_message(transport, &hello).await
+        }
+    }
 }
 
-async fn receive_hello<T>(transport: &mut T) -> Result<(), SyncError<T::Error>>
-where
-    T: SyncTransport,
-    T::Error: core::fmt::Display,
-{
-    let SyncMessage::Hello(hello) = receive_message(transport).await? else {
+fn validate_hello<E>(message: SyncMessage) -> Result<(), SyncError<E>> {
+    let SyncMessage::Hello(hello) = message else {
         return Err(SyncError::UnexpectedMessage);
     };
     if hello.protocol_version != PROTOCOL_VERSION {
@@ -127,138 +547,39 @@ where
     Ok(())
 }
 
-async fn sync_round<K, R, T>(
+async fn exchange_manifest<K, R, T>(
     engine: &Engine<K, R>,
     transport: &mut T,
-    config: &SessionConfig,
     role: SyncRole,
-    first_round: bool,
-) -> Result<(usize, usize), SyncError<T::Error>>
+) -> Result<SyncManifest, SyncError<T::Error>>
 where
     K: Kernel,
     R: RowCodec<K::Transaction>,
     T: SyncTransport,
     T::Error: core::fmt::Display,
 {
-    let remote_frontier = match role {
-        SyncRole::Initiator => {
-            send_message(transport, &SyncMessage::Frontier(engine.frontier().await?)).await?;
-            receive_frontier(transport).await?
-        }
-        SyncRole::Responder => {
-            let remote_frontier = receive_frontier(transport).await?;
-            send_message(transport, &SyncMessage::Frontier(engine.frontier().await?)).await?;
-            remote_frontier
-        }
-    };
-    let envelopes = engine.missing_envelopes(&remote_frontier).await?;
-    let send_checkpoint = first_round
-        && remote_frontier.heads.is_empty()
-        && config
-            .checkpoint_threshold
-            .is_some_and(|threshold| envelopes.len() > threshold);
-
+    let message = SyncMessage::Manifest(engine.sync_manifest().await?);
     match role {
         SyncRole::Initiator => {
-            let sent = send_transfer(
-                engine,
-                transport,
-                envelopes,
-                config.max_envelopes_per_frame,
-                send_checkpoint,
-            )
-            .await?;
-            let received = receive_envelopes(engine, transport, first_round).await?;
-            Ok((sent, received))
+            send_message(transport, &message).await?;
+            receive_manifest(transport).await
         }
         SyncRole::Responder => {
-            let received = receive_envelopes(engine, transport, first_round).await?;
-            let sent = send_transfer(
-                engine,
-                transport,
-                envelopes,
-                config.max_envelopes_per_frame,
-                send_checkpoint,
-            )
-            .await?;
-            Ok((sent, received))
+            let remote = receive_manifest(transport).await?;
+            send_message(transport, &message).await?;
+            Ok(remote)
         }
     }
 }
 
-async fn receive_frontier<T>(transport: &mut T) -> Result<engine::Frontier, SyncError<T::Error>>
+async fn receive_manifest<T>(transport: &mut T) -> Result<SyncManifest, SyncError<T::Error>>
 where
     T: SyncTransport,
     T::Error: core::fmt::Display,
 {
-    let SyncMessage::Frontier(frontier) = receive_message(transport).await? else {
-        return Err(SyncError::UnexpectedMessage);
-    };
-    Ok(frontier)
-}
-
-async fn send_transfer<K, R, T>(
-    engine: &Engine<K, R>,
-    transport: &mut T,
-    envelopes: Vec<engine::TransactionEnvelope>,
-    batch_size: usize,
-    send_checkpoint: bool,
-) -> Result<usize, SyncError<T::Error>>
-where
-    K: Kernel,
-    R: RowCodec<K::Transaction>,
-    T: SyncTransport,
-    T::Error: core::fmt::Display,
-{
-    let count = envelopes.len();
-    if send_checkpoint {
-        let checkpoint = engine.export_checkpoint().await?.encode()?;
-        send_message(transport, &SyncMessage::Checkpoint(checkpoint)).await?;
-    }
-    for batch in envelopes.chunks(batch_size) {
-        let bytes = batch
-            .iter()
-            .map(engine::TransactionEnvelope::encode)
-            .collect::<Result<Vec<_>, _>>()?;
-        send_message(transport, &SyncMessage::Envelopes(bytes)).await?;
-    }
-    send_message(transport, &SyncMessage::Done).await?;
-    Ok(count)
-}
-
-async fn receive_envelopes<K, R, T>(
-    engine: &Engine<K, R>,
-    transport: &mut T,
-    allow_checkpoint: bool,
-) -> Result<usize, SyncError<T::Error>>
-where
-    K: Kernel,
-    R: RowCodec<K::Transaction>,
-    T: SyncTransport,
-    T::Error: core::fmt::Display,
-{
-    let mut count = 0;
-    let mut checkpoint_allowed = allow_checkpoint;
-    loop {
-        match receive_message(transport).await? {
-            SyncMessage::Checkpoint(bytes) if checkpoint_allowed => {
-                checkpoint_allowed = false;
-                let checkpoint = Checkpoint::decode(&bytes)
-                    .map_err(|error| SyncError::Protocol(error.to_string()))?;
-                engine.import_checkpoint(checkpoint).await?;
-            }
-            SyncMessage::Envelopes(envelopes) => {
-                checkpoint_allowed = false;
-                count += envelopes.len();
-                for envelope in envelopes {
-                    let _ = engine.import_envelope_bytes(envelope).await?;
-                }
-            }
-            SyncMessage::Done => return Ok(count),
-            SyncMessage::Hello(_) | SyncMessage::Frontier(_) | SyncMessage::Checkpoint(_) => {
-                return Err(SyncError::UnexpectedMessage);
-            }
-        }
+    match receive_message(transport).await? {
+        SyncMessage::Manifest(manifest) => Ok(manifest),
+        _ => Err(SyncError::UnexpectedMessage),
     }
 }
 

@@ -8,7 +8,10 @@ use value::{Row, Value, ValueType};
 use crate::{
     ColumnGenerationId, EngineError, EngineResult, IndexGenerationId, KernelTransaction, RowTable,
     TableGenerationId,
-    catalog::{ENGINE_TABLE_FIELDS_STORAGE, ENGINE_TABLES_STORAGE, INTERNAL_INDICES},
+    catalog::{
+        ENGINE_INDEX_FIELDS_STORAGE, ENGINE_INDICES_STORAGE, ENGINE_TABLE_FIELDS_STORAGE,
+        ENGINE_TABLES_STORAGE,
+    },
 };
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -42,13 +45,15 @@ pub(crate) async fn ensure<T>(transaction: &mut T) -> EngineResult<()>
 where
     T: KernelTransaction,
 {
-    for table in [ENGINE_TABLES_STORAGE, ENGINE_TABLE_FIELDS_STORAGE] {
+    for table in [
+        ENGINE_TABLES_STORAGE,
+        ENGINE_TABLE_FIELDS_STORAGE,
+        ENGINE_INDICES_STORAGE,
+        ENGINE_INDEX_FIELDS_STORAGE,
+    ] {
         transaction.ensure_table(table).await?;
     }
-    let index_storage = crate::catalog::internal_table_storage_uuid(INTERNAL_INDICES).ok_or(
-        EngineError::custom("Internal index table is not configured"),
-    )?;
-    transaction.ensure_table(index_storage).await
+    Ok(())
 }
 
 fn key(id: uuid::Uuid) -> Row {
@@ -90,17 +95,35 @@ where
     deleted(&value, 6)
 }
 
+pub(crate) async fn index_field_deleted<T>(
+    transaction: &T,
+    index: uuid::Uuid,
+    position: i64,
+) -> EngineResult<bool>
+where
+    T: KernelTransaction,
+{
+    let key = Row::new(vec![Value::Uuid(index), Value::Integer(position)]);
+    let Some(value) = transaction
+        .get_entry(ENGINE_INDEX_FIELDS_STORAGE, &key)
+        .await?
+    else {
+        return Ok(false);
+    };
+    deleted(&value, 1)
+}
+
 pub(crate) async fn index_deleted<T>(transaction: &T, id: uuid::Uuid) -> EngineResult<bool>
 where
     T: KernelTransaction,
 {
-    let storage = crate::catalog::internal_table_storage_uuid(INTERNAL_INDICES).ok_or(
-        EngineError::custom("Internal index table is not configured"),
-    )?;
-    let Some(value) = transaction.get_entry(storage, &key(id)).await? else {
+    let Some(value) = transaction
+        .get_entry(ENGINE_INDICES_STORAGE, &key(id))
+        .await?
+    else {
         return Ok(false);
     };
-    deleted(&value, value.values.len().saturating_sub(1))
+    deleted(&value, 3)
 }
 
 pub(crate) async fn materialize<T>(transaction: &mut T, change: &SchemaChange) -> EngineResult<bool>
@@ -178,18 +201,13 @@ where
             columns,
         } => {
             let key = key(index.0);
-            let mut value = vec![
+            let value = Row::new(vec![
                 Value::from(label.as_str()),
                 Value::Uuid(table.0),
                 Value::Bool(*unique),
-            ];
-            value.extend(columns.iter().map(|column| Value::Uuid(column.0)));
-            value.push(Value::Bool(false));
-            let value = Row::new(value);
-            let storage = crate::catalog::internal_table_storage_uuid(INTERNAL_INDICES).ok_or(
-                EngineError::custom("Internal index table is not configured"),
-            )?;
-            match transaction.get_entry(storage, &key).await? {
+                Value::Bool(false),
+            ]);
+            match transaction.get_entry(ENGINE_INDICES_STORAGE, &key).await? {
                 Some(existing) if existing != value => {
                     Err(EngineError::custom("Conflicting index generation fact"))
                 }
@@ -197,9 +215,23 @@ where
                 None => {
                     transaction.ensure_table(index.0).await?;
                     transaction
-                        .put_entry(storage, key, value)
-                        .await
-                        .map(|_| false)
+                        .put_entry(ENGINE_INDICES_STORAGE, key, value)
+                        .await?;
+                    for (position, column) in columns.iter().enumerate() {
+                        transaction
+                            .put_entry(
+                                ENGINE_INDEX_FIELDS_STORAGE,
+                                Row::new(vec![
+                                    Value::Uuid(index.0),
+                                    Value::Integer(i64::try_from(position).map_err(|_| {
+                                        EngineError::custom("Index column position overflow")
+                                    })?),
+                                ]),
+                                Row::new(vec![Value::Uuid(column.0), Value::Bool(false)]),
+                            )
+                            .await?;
+                    }
+                    Ok(false)
                 }
             }
         }
@@ -210,22 +242,33 @@ where
             update_deleted(transaction, ENGINE_TABLE_FIELDS_STORAGE, column.0, 6).await
         }
         SchemaChange::TombstoneIndex(index) => {
-            let storage = crate::catalog::internal_table_storage_uuid(INTERNAL_INDICES).ok_or(
-                EngineError::custom("Internal index table is not configured"),
-            )?;
-            let value = transaction
-                .get_entry(storage, &key(index.0))
-                .await?
-                .ok_or(EngineError::InvalidQuery("Index not found"))?;
-            update_deleted(
-                transaction,
-                storage,
-                index.0,
-                value.values.len().saturating_sub(1),
-            )
-            .await?;
-            let index_storage = index.0;
-            transaction.drop_table(index_storage).await?;
+            update_deleted(transaction, ENGINE_INDICES_STORAGE, index.0, 3).await?;
+            let keys = {
+                let fields = transaction.scan_entries_owned(ENGINE_INDEX_FIELDS_STORAGE);
+                pin_mut!(fields);
+                let mut keys = Vec::new();
+                while let Some(entry) = fields.next().await {
+                    let (key, _) = entry?;
+                    if key.values.first().and_then(Value::as_uuid) == Some(&index.0) {
+                        keys.push(key);
+                    }
+                }
+                keys
+            };
+            for key in keys {
+                let mut value = transaction
+                    .get_entry(ENGINE_INDEX_FIELDS_STORAGE, &key)
+                    .await?
+                    .ok_or(EngineError::InvalidQuery("Index field not found"))?;
+                if value.values.len() <= 1 {
+                    value.values.resize(2, Value::Bool(false));
+                }
+                value.values[1] = Value::Bool(true);
+                transaction
+                    .put_entry(ENGINE_INDEX_FIELDS_STORAGE, key, value)
+                    .await?;
+            }
+            transaction.drop_table(index.0).await?;
             Ok(false)
         }
     }
@@ -419,169 +462,6 @@ where
         .into_iter()
         .find_map(|(id, column)| (column.name == label).then_some(id))
         .ok_or(EngineError::InvalidQuery("Column not found"))
-}
-
-pub(crate) async fn checkpoint_changes<T>(transaction: &T) -> EngineResult<Vec<SchemaChange>>
-where
-    T: KernelTransaction,
-{
-    let mut changes = checkpoint_tables(transaction).await?;
-    changes.extend(checkpoint_columns(transaction).await?);
-    changes.extend(checkpoint_indexes(transaction).await?);
-    Ok(changes)
-}
-
-async fn checkpoint_tables<T>(transaction: &T) -> EngineResult<Vec<SchemaChange>>
-where
-    T: KernelTransaction,
-{
-    let entries = transaction.scan_entries(ENGINE_TABLES_STORAGE);
-    pin_mut!(entries);
-    let mut changes = Vec::new();
-    while let Some(entry) = entries.next().await {
-        let entry = entry?;
-        let deleted = deleted(&entry.1, 1)?;
-        let table = table_change(entry)?;
-        changes.push(table.clone());
-        if deleted && let SchemaChange::CreateTable { table, .. } = table {
-            changes.push(SchemaChange::TombstoneTable(table));
-        }
-    }
-    Ok(changes)
-}
-
-fn table_change((key, value): (Row, Row)) -> EngineResult<SchemaChange> {
-    let id = key
-        .values
-        .first()
-        .and_then(Value::as_uuid)
-        .copied()
-        .ok_or(EngineError::custom("Invalid table generation"))?;
-    let label = value
-        .values
-        .first()
-        .and_then(Value::to_text)
-        .ok_or(EngineError::custom("Invalid table label"))?;
-    Ok(SchemaChange::CreateTable {
-        table: TableGenerationId(id),
-        label,
-    })
-}
-
-async fn checkpoint_columns<T>(transaction: &T) -> EngineResult<Vec<SchemaChange>>
-where
-    T: KernelTransaction,
-{
-    let entries = transaction.scan_entries(ENGINE_TABLE_FIELDS_STORAGE);
-    pin_mut!(entries);
-    let mut changes = Vec::new();
-    while let Some(entry) = entries.next().await {
-        let entry = entry?;
-        let deleted = deleted(&entry.1, 6)?;
-        let column = column_change(entry)?;
-        changes.push(column.clone());
-        if deleted && let SchemaChange::AddColumn { column, .. } = column {
-            changes.push(SchemaChange::TombstoneColumn(column));
-        }
-    }
-    Ok(changes)
-}
-
-fn column_change((key, value): (Row, Row)) -> EngineResult<SchemaChange> {
-    let column = key
-        .values
-        .first()
-        .and_then(Value::as_uuid)
-        .copied()
-        .ok_or(EngineError::custom("Invalid column generation"))?;
-    let (
-        Some(table),
-        Some(label),
-        Some(value_type),
-        Some(default),
-        Some(position),
-        Some(primary_key),
-    ) = (
-        value.values.first().and_then(Value::as_uuid).copied(),
-        value.values.get(1).and_then(Value::to_text),
-        value.values.get(2).and_then(Value::to_type),
-        value.values.get(3).cloned(),
-        value.values.get(4).and_then(Value::to_integer),
-        value.values.get(5).and_then(Value::to_bool),
-    )
-    else {
-        return Err(EngineError::custom("Invalid column generation fact"));
-    };
-    Ok(SchemaChange::AddColumn {
-        table: TableGenerationId(table),
-        column: ColumnGenerationId(column),
-        label,
-        value_type,
-        default,
-        position: u32::try_from(position)
-            .map_err(|_| EngineError::custom("Invalid column position"))?,
-        primary_key,
-    })
-}
-
-async fn checkpoint_indexes<T>(transaction: &T) -> EngineResult<Vec<SchemaChange>>
-where
-    T: KernelTransaction,
-{
-    let storage = crate::catalog::internal_table_storage_uuid(INTERNAL_INDICES).ok_or(
-        EngineError::custom("Internal index table is not configured"),
-    )?;
-    let entries = transaction.scan_entries_owned(storage);
-    pin_mut!(entries);
-    let mut changes = Vec::new();
-    while let Some(entry) = entries.next().await {
-        let entry = entry?;
-        let deleted = deleted(&entry.1, entry.1.values.len().saturating_sub(1))?;
-        let index = index_change(entry)?;
-        changes.push(index.clone());
-        if deleted && let SchemaChange::CreateIndex { index, .. } = index {
-            changes.push(SchemaChange::TombstoneIndex(index));
-        }
-    }
-    Ok(changes)
-}
-
-fn index_change((key, value): (Row, Row)) -> EngineResult<SchemaChange> {
-    let index = key
-        .values
-        .first()
-        .and_then(Value::as_uuid)
-        .copied()
-        .ok_or(EngineError::custom("Invalid index generation"))?;
-    let (Some(label), Some(table), Some(unique)) = (
-        value.values.first().and_then(Value::to_text),
-        value.values.get(1).and_then(Value::as_uuid).copied(),
-        value.values.get(2).and_then(Value::to_bool),
-    ) else {
-        return Err(EngineError::custom("Invalid index generation fact"));
-    };
-    let end = if value.values.last().and_then(Value::to_bool).is_some() {
-        value.values.len() - 1
-    } else {
-        value.values.len()
-    };
-    let columns = value.values[3..end]
-        .iter()
-        .map(|value| {
-            value
-                .as_uuid()
-                .copied()
-                .map(ColumnGenerationId)
-                .ok_or(EngineError::custom("Invalid index column generation"))
-        })
-        .collect::<EngineResult<Vec<_>>>()?;
-    Ok(SchemaChange::CreateIndex {
-        index: IndexGenerationId(index),
-        label,
-        table: TableGenerationId(table),
-        unique,
-        columns,
-    })
 }
 
 pub(crate) async fn active_table_ids<T>(transaction: &T) -> EngineResult<Vec<TableGenerationId>>

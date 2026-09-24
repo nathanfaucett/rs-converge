@@ -1,4 +1,4 @@
-use ofdb::{EnvelopeOutcome, SessionConfig};
+use ofdb::SessionConfig;
 use ofdb_test::{
     ChaosScenario, ChaosStep, TransportDirection, automerge_in_memory_cluster,
     automerge_redb_cluster, run, run_chaos,
@@ -14,12 +14,9 @@ const INSERT_LIN: &str =
 #[test]
 fn bootstrap_and_noop_repair_converge() {
     run(async {
-        for checkpoint_threshold in [None, Some(0)] {
+        {
             let cluster = automerge_in_memory_cluster(2);
-            let config = SessionConfig {
-                checkpoint_threshold,
-                ..Default::default()
-            };
+            let config = SessionConfig::default();
             cluster.exec(0, CREATE_USERS).await;
             cluster.exec(0, INSERT_ADA).await;
             cluster.sync(0, 1, &config).await.unwrap();
@@ -77,48 +74,11 @@ fn relay_survives_an_unavailable_source() {
 }
 
 #[test]
-fn reversed_duplicate_and_malformed_envelopes_are_safe() {
-    run(async {
-        let cluster = automerge_in_memory_cluster(2);
-        cluster.exec(0, CREATE_USERS).await;
-        cluster.exec(0, INSERT_ADA).await;
-        let mut envelopes = cluster.export_envelopes(0).await.unwrap();
-        let child_index = envelopes
-            .iter()
-            .position(|envelope| {
-                envelopes
-                    .iter()
-                    .any(|candidate| envelope.parents.contains(&candidate.id))
-            })
-            .unwrap();
-        let child = envelopes.remove(child_index);
-        let parent = envelopes.remove(0);
-        assert_eq!(
-            cluster.import_envelope(1, child.clone()).await.unwrap(),
-            EnvelopeOutcome::Pending
-        );
-        assert_eq!(
-            cluster.import_envelope(1, parent).await.unwrap(),
-            EnvelopeOutcome::Applied
-        );
-        assert_eq!(
-            cluster.import_envelope(1, child).await.unwrap(),
-            EnvelopeOutcome::Applied
-        );
-        cluster.assert_state_converged().await;
-        assert!(matches!(
-            cluster.import_envelope_bytes(1, vec![0]).await.unwrap(),
-            EnvelopeOutcome::Quarantined { .. }
-        ));
-    });
-}
-
-#[test]
 fn every_directional_frame_failure_retries() {
     run(async {
         for (direction, frames) in [
-            (TransportDirection::LeftToRight, 0..6),
-            (TransportDirection::RightToLeft, 0..5),
+            (TransportDirection::LeftToRight, 0..4),
+            (TransportDirection::RightToLeft, 0..3),
         ] {
             for frame in frames {
                 let cluster = automerge_in_memory_cluster(2);
@@ -181,27 +141,5 @@ fn seeded_partition_history_reproduces_from_its_seed() {
             &SessionConfig::default(),
         )
         .await;
-    });
-}
-
-#[test]
-fn checkpoint_merges_destination_offline_writes() {
-    run(async {
-        let cluster = automerge_in_memory_cluster(2);
-        let config = SessionConfig {
-            checkpoint_threshold: Some(0),
-            ..Default::default()
-        };
-        cluster.exec(0, CREATE_USERS).await;
-        cluster.exec(0, INSERT_ADA).await;
-        cluster
-            .exec(1, "CREATE TABLE notes (id UUID PRIMARY KEY, text TEXT)")
-            .await;
-        cluster.exec(1, "INSERT INTO notes VALUES (CAST('018f0f8e-7b6d-7c4a-8f12-123456789abe' AS UUID), 'offline')").await;
-        cluster.sync(0, 1, &config).await.unwrap();
-        cluster.sync(1, 0, &config).await.unwrap();
-        cluster.assert_state_converged().await;
-        cluster.assert_converged(SELECT_USERS).await;
-        cluster.assert_converged("SELECT * FROM notes").await;
     });
 }
