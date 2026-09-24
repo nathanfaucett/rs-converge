@@ -16,7 +16,8 @@ path = "src/lib.rs"
 # internal dependencies
 btree = { path = "../btree", default-features = false, features = [] }
 btree-automerge = { path = "../btree-automerge", default-features = false, features = [] }
-engine = { path = "../engine", default-features = false, features = ["std"] }
+engine = { path = "../engine", default-features = false, features = ["std", "in-memory"] }
+sync = { path = "../sync", default-features = false, features = [] }
 value = { path = "../value", default-features = false, features = ["std"] }
 
 # external dependencies
@@ -32,7 +33,8 @@ uuid = { version = "1.23", default-features = false, features = ["v7"] }
 engine-redb = { path = "../engine-redb", default-features = false, features = [] }
 query = { path = "../query", default-features = false, features = [] }
 schema = { path = "../schema", default-features = false, features = [] }
+sql-translator = { path = "../sql-translator", default-features = false, features = [] }
 
 # external dependencies
-futures = { version = "0.3", default-features = false, features = ["executor"] }
+futures = { version = "0.3", default-features = false, features = ["async-await", "executor"] }
 redb = { version = "4.3", default-features = false, features = ["uuid"] }

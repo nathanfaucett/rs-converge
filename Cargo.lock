@@ -499,6 +499,8 @@ dependencies = [
  "redb",
  "schema",
  "serde",
+ "sql-translator",
+ "sync",
  "uuid",
  "value",
 ]
@@ -1378,11 +1380,11 @@ name = "sync"
 version = "0.1.0"
 dependencies = [
  "engine",
- "engine-automerge",
  "futures",
  "postcard",
  "schema",
  "serde",
+ "sha2 0.10.9",
  "sql-translator",
  "thiserror 2.0.18",
  "uuid",

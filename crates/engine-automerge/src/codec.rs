@@ -11,11 +11,11 @@ use btree_automerge::{
 use serde::{Deserialize, Serialize};
 
 use engine::{
-    BytesTable, BytesTableTransaction, DocumentChangeKey as SyncDocumentChangeKey,
-    ENGINE_TABLE_FIELDS_FIELD_COLUMN_ID, ENGINE_TABLE_FIELDS_STORAGE, EngineError, EngineResult,
-    KernelTransaction, RowCodec, RowTable,
+    BytesTable, BytesTableTransaction, ENGINE_TABLE_FIELDS_FIELD_COLUMN_ID,
+    ENGINE_TABLE_FIELDS_STORAGE, EngineError, EngineResult, KernelTransaction, RowCodec, RowTable,
 };
 use futures::{Stream, StreamExt, pin_mut};
+use sync::{SyncChangeId, SyncRowCodec};
 use value::{Row, Value};
 
 const COLUMN_COUNT_BYTES: usize = size_of::<u32>();
@@ -503,149 +503,6 @@ where
         Ok(Some(row))
     }
 
-    async fn export_row_state(
-        &self,
-        transaction: &T,
-        table: uuid::Uuid,
-        row: &uuid::Uuid,
-    ) -> EngineResult<Option<Vec<u8>>> {
-        let id = Self::document_id(row);
-        Self::document(transaction, table, &id)
-            .await?
-            .map(|mut document| Ok(document.save()))
-            .transpose()
-    }
-
-    async fn sync_change_inventory(
-        &self,
-        transaction: &T,
-        table: uuid::Uuid,
-        row: &uuid::Uuid,
-    ) -> EngineResult<Vec<SyncDocumentChangeKey>> {
-        let id = Self::document_id(row);
-        let changes = AutomergeChangeStore::new(BytesTable::new(transaction, table));
-        let entries = changes.range(DocumentChangeKey::range_for(&id));
-        pin_mut!(entries);
-        let mut inventory = BTreeMap::new();
-        while let Some(entry) = entries.next().await {
-            let (key, _) = entry.map_err(EngineError::custom)?;
-            if key.r#type().is_incremental() {
-                inventory.insert(
-                    *key.change_hash(),
-                    SyncDocumentChangeKey {
-                        document_id: key.id().clone(),
-                        change_hash: *key.change_hash(),
-                    },
-                );
-            }
-        }
-        let Some(mut document) = Self::document(transaction, table, &id).await? else {
-            return Ok(inventory.into_values().collect());
-        };
-        let ordered = document
-            .get_changes(&[])
-            .into_iter()
-            .filter_map(|change| inventory.remove(&change.hash().0))
-            .collect();
-        Ok(ordered)
-    }
-
-    async fn export_incremental_change(
-        &self,
-        transaction: &T,
-        table: uuid::Uuid,
-        key: &SyncDocumentChangeKey,
-    ) -> EngineResult<Option<Vec<u8>>> {
-        let key = DocumentChangeKey::new_incremental(key.document_id.clone(), key.change_hash);
-        let changes = AutomergeChangeStore::new(BytesTable::new(transaction, table));
-        changes.get(&key).await.map_err(EngineError::custom)
-    }
-
-    async fn apply_incremental_change(
-        &self,
-        transaction: &mut T,
-        table: uuid::Uuid,
-        row: uuid::Uuid,
-        key: &SyncDocumentChangeKey,
-        payload: &[u8],
-    ) -> EngineResult<Option<Row>> {
-        if key.document_id != Self::document_id(&row) {
-            return Err(EngineError::custom("Incremental change has the wrong row"));
-        }
-        let automerge_key =
-            DocumentChangeKey::new_incremental(key.document_id.clone(), key.change_hash);
-        let already_applied = {
-            let changes = AutomergeChangeStore::new(BytesTable::new(&*transaction, table));
-            changes
-                .get(&automerge_key)
-                .await
-                .map_err(EngineError::custom)?
-                .is_some()
-        };
-        if already_applied {
-            return self.get_row(transaction, table, &row).await;
-        }
-        let incremental = payload;
-        let Some(mut document) = Self::document(transaction, table, &key.document_id).await? else {
-            return Err(EngineError::SyncDependencyUnavailable);
-        };
-        let previous_heads = document.get_heads();
-        document
-            .load_incremental(incremental)
-            .map_err(EngineError::custom)?;
-        if !document
-            .get_changes(&previous_heads)
-            .iter()
-            .any(|change| change.hash().0 == key.change_hash)
-        {
-            return Err(EngineError::custom(
-                "Incremental change hash does not match key",
-            ));
-        }
-        let columns = Self::columns(transaction, table, document.keys(ROOT).count()).await?;
-        let value = Self::decode_row(&document, &columns)?;
-        let mut raw_changes =
-            AutomergeChangeStore::new(BytesTableTransaction::new(transaction, table));
-        raw_changes
-            .insert(automerge_key, incremental.to_vec())
-            .await
-            .map_err(EngineError::custom)?;
-        Ok(Some(value))
-    }
-
-    async fn merge_row_state(
-        &self,
-        transaction: &mut T,
-        table: uuid::Uuid,
-        row: uuid::Uuid,
-        state: &[u8],
-    ) -> EngineResult<Option<Row>> {
-        if Self::metadata_deleted(transaction, table, &row).await? {
-            return Ok(None);
-        }
-        let mut incoming = AutoCommit::load(state).map_err(EngineError::custom)?;
-        let id = Self::document_id(&row);
-        let existing = Self::document(transaction, table, &id).await?;
-        let mut document = existing.clone().unwrap_or_else(AutoCommit::new);
-        if existing.is_some() {
-            document.merge(&mut incoming).map_err(EngineError::custom)?;
-        } else {
-            document = incoming;
-        }
-        let table_name = table;
-        let columns = Self::document_columns(transaction, table_name, &document).await?;
-        let row_value = Self::decode_row(&document, &columns)?;
-        let mut changes = Self::changes(transaction, table);
-        if existing.is_some() {
-            changes.remove(&id).await.map_err(EngineError::custom)?;
-        }
-        changes
-            .insert(id, document)
-            .await
-            .map_err(EngineError::custom)?;
-        Ok(Some(row_value))
-    }
-
     async fn delete_row(
         &self,
         transaction: &mut T,
@@ -677,35 +534,6 @@ where
         Self::metadata_deleted(transaction, table, row).await
     }
 
-    fn export_row_metadata(
-        &self,
-        transaction: &T,
-        table: uuid::Uuid,
-    ) -> impl Stream<Item = EngineResult<(uuid::Uuid, Vec<u8>)>> {
-        stream! {
-            let entries = transaction.scan_bytes(table);
-            pin_mut!(entries);
-            while let Some(entry) = entries.next().await {
-                let (key, value) = entry?;
-                let key = DocumentChangeKey::decode_ordered(&key).map_err(EngineError::custom)?;
-                if key.r#type().is_metadata() {
-                    yield Ok((Self::row_id(key.id())?, value));
-                }
-            }
-        }
-    }
-
-    async fn merge_row_metadata(
-        &self,
-        transaction: &mut T,
-        table: uuid::Uuid,
-        row: uuid::Uuid,
-        metadata: &[u8],
-    ) -> EngineResult<()> {
-        let key = DocumentChangeKey::new_metadata(Self::document_id(&row)).encode_ordered();
-        transaction.put_bytes(table, key, metadata.to_vec()).await
-    }
-
     async fn put_row(
         &self,
         transaction: &mut T,
@@ -730,5 +558,207 @@ where
         row: &uuid::Uuid,
     ) -> EngineResult<Option<Row>> {
         self.delete_row(transaction, table, row).await
+    }
+}
+
+impl<T> SyncRowCodec<T> for AutomergeRowCodec
+where
+    T: KernelTransaction + Send,
+{
+    async fn row_ids(&self, transaction: &T, table: uuid::Uuid) -> EngineResult<Vec<uuid::Uuid>> {
+        let mut ids = BTreeMap::new();
+        let rows = self.scan_rows(transaction, table);
+        pin_mut!(rows);
+        while let Some(row) = rows.next().await {
+            ids.insert(row?.0, ());
+        }
+        let metadata = self.export_metadata_rows(transaction, table);
+        pin_mut!(metadata);
+        while let Some(row) = metadata.next().await {
+            ids.insert(row?.0, ());
+        }
+        Ok(ids.into_keys().collect())
+    }
+
+    async fn export_state(
+        &self,
+        transaction: &T,
+        table: uuid::Uuid,
+        row: uuid::Uuid,
+    ) -> EngineResult<Option<Vec<u8>>> {
+        let id = Self::document_id(&row);
+        Self::document(transaction, table, &id)
+            .await?
+            .map(|mut document| Ok(document.save()))
+            .transpose()
+    }
+
+    async fn merge_state(
+        &self,
+        transaction: &mut T,
+        table: uuid::Uuid,
+        row: uuid::Uuid,
+        state: &[u8],
+    ) -> EngineResult<Option<Row>> {
+        if Self::metadata_deleted(transaction, table, &row).await? {
+            return Ok(None);
+        }
+        let mut incoming = AutoCommit::load(state).map_err(EngineError::custom)?;
+        let id = Self::document_id(&row);
+        let existing = Self::document(transaction, table, &id).await?;
+        let mut document = existing.clone().unwrap_or_else(AutoCommit::new);
+        if existing.is_some() {
+            document.merge(&mut incoming).map_err(EngineError::custom)?;
+        } else {
+            document = incoming;
+        }
+        let columns = Self::document_columns(transaction, table, &document).await?;
+        let value = Self::decode_row(&document, &columns)?;
+        let mut changes = Self::changes(transaction, table);
+        if existing.is_some() {
+            changes.remove(&id).await.map_err(EngineError::custom)?;
+        }
+        changes
+            .insert(id, document)
+            .await
+            .map_err(EngineError::custom)?;
+        Ok(Some(value))
+    }
+
+    async fn export_metadata(
+        &self,
+        transaction: &T,
+        table: uuid::Uuid,
+        row: uuid::Uuid,
+    ) -> EngineResult<Vec<u8>> {
+        let key = DocumentChangeKey::new_metadata(Self::document_id(&row)).encode_ordered();
+        Ok(transaction
+            .get_bytes(table, &key)
+            .await?
+            .unwrap_or_default())
+    }
+
+    async fn merge_metadata(
+        &self,
+        transaction: &mut T,
+        table: uuid::Uuid,
+        row: uuid::Uuid,
+        metadata: &[u8],
+    ) -> EngineResult<()> {
+        let key = DocumentChangeKey::new_metadata(Self::document_id(&row)).encode_ordered();
+        transaction.put_bytes(table, key, metadata.to_vec()).await
+    }
+
+    async fn change_inventory(
+        &self,
+        transaction: &T,
+        table: uuid::Uuid,
+        row: uuid::Uuid,
+    ) -> EngineResult<Vec<SyncChangeId>> {
+        let id = Self::document_id(&row);
+        let changes = AutomergeChangeStore::new(BytesTable::new(transaction, table));
+        let entries = changes.range(DocumentChangeKey::range_for(&id));
+        pin_mut!(entries);
+        let mut inventory = BTreeMap::new();
+        while let Some(entry) = entries.next().await {
+            let (key, _) = entry.map_err(EngineError::custom)?;
+            if key.r#type().is_incremental() {
+                inventory.insert(*key.change_hash(), SyncChangeId(key.change_hash().to_vec()));
+            }
+        }
+        let Some(mut document) = Self::document(transaction, table, &id).await? else {
+            return Ok(inventory.into_values().collect());
+        };
+        Ok(document
+            .get_changes(&[])
+            .into_iter()
+            .filter_map(|change| inventory.remove(&change.hash().0))
+            .collect())
+    }
+
+    async fn export_change(
+        &self,
+        transaction: &T,
+        table: uuid::Uuid,
+        row: uuid::Uuid,
+        id: &SyncChangeId,
+    ) -> EngineResult<Option<Vec<u8>>> {
+        let hash: [u8; 32] =
+            id.0.as_slice()
+                .try_into()
+                .map_err(|_| EngineError::custom("Invalid sync change ID"))?;
+        let key = DocumentChangeKey::new_incremental(Self::document_id(&row), hash);
+        AutomergeChangeStore::new(BytesTable::new(transaction, table))
+            .get(&key)
+            .await
+            .map_err(EngineError::custom)
+    }
+
+    async fn apply_change(
+        &self,
+        transaction: &mut T,
+        table: uuid::Uuid,
+        row: uuid::Uuid,
+        id: &SyncChangeId,
+        payload: &[u8],
+    ) -> EngineResult<Option<Row>> {
+        let hash: [u8; 32] =
+            id.0.as_slice()
+                .try_into()
+                .map_err(|_| EngineError::custom("Invalid sync change ID"))?;
+        let document_id = Self::document_id(&row);
+        let automerge_key = DocumentChangeKey::new_incremental(document_id.clone(), hash);
+        let already_applied = AutomergeChangeStore::new(BytesTable::new(&*transaction, table))
+            .get(&automerge_key)
+            .await
+            .map_err(EngineError::custom)?
+            .is_some();
+        if already_applied {
+            return self.get_row(transaction, table, &row).await;
+        }
+        let Some(mut document) = Self::document(transaction, table, &document_id).await? else {
+            return Err(EngineError::SyncDependencyUnavailable);
+        };
+        let previous_heads = document.get_heads();
+        document
+            .load_incremental(payload)
+            .map_err(EngineError::custom)?;
+        if !document
+            .get_changes(&previous_heads)
+            .iter()
+            .any(|change| change.hash().0 == hash)
+        {
+            return Err(EngineError::custom(
+                "Incremental change hash does not match key",
+            ));
+        }
+        let columns = Self::columns(transaction, table, document.keys(ROOT).count()).await?;
+        let value = Self::decode_row(&document, &columns)?;
+        AutomergeChangeStore::new(BytesTableTransaction::new(transaction, table))
+            .insert(automerge_key, payload.to_vec())
+            .await
+            .map_err(EngineError::custom)?;
+        Ok(Some(value))
+    }
+}
+
+impl AutomergeRowCodec {
+    fn export_metadata_rows<T>(
+        &self,
+        transaction: &T,
+        table: uuid::Uuid,
+    ) -> impl Stream<Item = EngineResult<(uuid::Uuid, Vec<u8>)>> + Send
+    where
+        T: KernelTransaction,
+    {
+        stream! {
+            let entries = transaction.scan_bytes(table);
+            pin_mut!(entries);
+            while let Some(entry) = entries.next().await {
+                let (key, value) = entry?;
+                let key = DocumentChangeKey::decode_ordered(&key).map_err(EngineError::custom)?;
+                if key.r#type().is_metadata() { yield Ok((Self::row_id(key.id())?, value)); }
+            }
+        }
     }
 }

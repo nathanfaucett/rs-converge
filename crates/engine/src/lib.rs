@@ -14,9 +14,10 @@ mod id;
 mod in_memory;
 mod index;
 mod kernel;
-mod row_sync;
+
 mod row_table;
 mod schema;
+mod state_transfer;
 
 pub use bytes_table::{BytesTable, BytesTableTransaction};
 pub use catalog::{
@@ -31,8 +32,7 @@ pub use id::{ColumnGenerationId, IndexGenerationId, TableGenerationId};
 #[cfg(feature = "in-memory")]
 pub use in_memory::{InMemoryKernel, InMemoryKernelTransaction};
 pub use kernel::{Kernel, KernelTransaction};
-pub use row_sync::{
-    DocumentChangeKey, IncrementalChange, StateDigest, SyncKey, SyncManifest, SyncStateUnit,
-};
+
 pub use row_table::RowTable;
 pub use schema::SchemaChange;
+pub use state_transfer::{CatalogEntry, CatalogEntryKind, RowMutation};

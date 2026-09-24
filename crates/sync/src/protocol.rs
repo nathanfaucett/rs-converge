@@ -1,6 +1,8 @@
 use alloc::{string::String, vec::Vec};
 
-use engine::{DocumentChangeKey, SyncKey, SyncManifest, SyncStateUnit, TableGenerationId};
+use engine::TableGenerationId;
+
+use crate::{SyncChangeId, SyncKey, SyncManifest, SyncStateUnit};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -16,14 +18,14 @@ pub struct SyncHello {
 pub struct SyncRowInventory {
     pub table: TableGenerationId,
     pub row: Uuid,
-    pub changes: Vec<DocumentChangeKey>,
+    pub changes: Vec<SyncChangeId>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SyncIncrementalChange {
     pub table: TableGenerationId,
     pub row: Uuid,
-    pub key: DocumentChangeKey,
+    pub id: SyncChangeId,
     pub payload: Vec<u8>,
 }
 

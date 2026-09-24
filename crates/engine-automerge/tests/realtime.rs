@@ -30,7 +30,8 @@ impl SyncTransport for ChannelTransport {
     type Error = Closed;
 
     async fn receive(&mut self) -> Result<Vec<u8>, Self::Error> {
-        self.receiver.next().await.ok_or(Closed)
+        let frame = self.receiver.next().await.ok_or(Closed)?;
+        Ok(frame)
     }
 
     async fn send(&mut self, frame: Vec<u8>) -> Result<(), Self::Error> {
@@ -112,13 +113,14 @@ impl<T> Connection<T> {
     ) -> Result<Option<SyncResult>, SyncError<T::Error>>
     where
         K: engine::Kernel,
-        R: engine::RowCodec<K::Transaction>,
+        R: sync::SyncRowCodec<K::Transaction>,
         T: SyncTransport,
         T::Error: fmt::Display,
     {
         if !self.request.0.replace(false) {
             return Ok(None);
         }
+
         synchronize(engine, &mut self.transport, config, role)
             .await
             .map(Some)
@@ -203,8 +205,8 @@ fn synchronizes_on_connect() {
         assert!(left_result.unwrap().is_some());
         assert!(right_result.unwrap().is_some());
         assert_eq!(
-            left.sync_manifest().await.unwrap(),
-            right.sync_manifest().await.unwrap()
+            sync::sync_manifest_for(&left).await.unwrap(),
+            sync::sync_manifest_for(&right).await.unwrap()
         );
     });
 }
@@ -353,8 +355,8 @@ fn periodic_repair_after_reconnect_converges_offline_writes() {
         left_result.unwrap();
         right_result.unwrap();
         assert_eq!(
-            left.sync_manifest().await.unwrap(),
-            right.sync_manifest().await.unwrap()
+            sync::sync_manifest_for(&left).await.unwrap(),
+            sync::sync_manifest_for(&right).await.unwrap()
         );
         assert_eq!(
             left.table_schema("right_only").await.unwrap(),
@@ -386,7 +388,7 @@ fn transport_failure_leaves_the_engine_unchanged() {
     block_on(async {
         let engine = Engine::new(InMemoryKernel::new(), AutomergeRowCodec::new());
         engine.create_table(table("users")).await.unwrap();
-        let manifest = engine.sync_manifest().await.unwrap();
+        let manifest = sync::sync_manifest_for(&engine).await.unwrap();
         let (transport, _) = Connection::connected(FailingTransport);
         let mut connection = transport;
 
@@ -396,6 +398,6 @@ fn transport_failure_leaves_the_engine_unchanged() {
             .unwrap_err();
 
         assert!(matches!(error, SyncError::Transport(Closed)));
-        assert_eq!(engine.sync_manifest().await.unwrap(), manifest);
+        assert_eq!(sync::sync_manifest_for(&engine).await.unwrap(), manifest);
     });
 }

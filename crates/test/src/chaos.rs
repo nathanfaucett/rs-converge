@@ -1,9 +1,10 @@
 use std::collections::HashSet;
 
-use engine::{Kernel, RowCodec};
+use engine::Kernel;
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 use sync::SessionConfig;
+use sync::SyncRowCodec;
 
 use crate::cluster::Cluster;
 
@@ -79,7 +80,7 @@ pub enum ChaosStep {
     },
 }
 
-pub async fn run_chaos<K: Kernel, R: RowCodec<K::Transaction>>(
+pub async fn run_chaos<K: Kernel, R: SyncRowCodec<K::Transaction>>(
     cluster: Cluster<K, R>,
     scenario: ChaosScenario,
     config: &SessionConfig,
@@ -134,7 +135,7 @@ pub async fn run_chaos<K: Kernel, R: RowCodec<K::Transaction>>(
     }
 }
 
-async fn sync_available_pairs<K: Kernel, R: RowCodec<K::Transaction>>(
+async fn sync_available_pairs<K: Kernel, R: SyncRowCodec<K::Transaction>>(
     cluster: &Cluster<K, R>,
     network: &mut ChaosNetwork,
     config: &SessionConfig,

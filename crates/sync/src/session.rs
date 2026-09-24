@@ -1,18 +1,18 @@
 use alloc::{
+    boxed::Box,
     collections::BTreeMap,
     format,
     string::{String, ToString},
+    vec,
     vec::Vec,
 };
 
-use engine::{
-    Engine, EngineError, IncrementalChange, Kernel, RowCodec, SyncKey, SyncManifest, SyncStateUnit,
-};
+use engine::{CatalogEntry, CatalogEntryKind, Engine, EngineError, Kernel};
 use thiserror::Error;
 
 use crate::{
-    PROTOCOL_VERSION, SyncHello, SyncIncrementalChange, SyncMessage, SyncRowInventory,
-    SyncSnapshotRequest, SyncTransport,
+    PROTOCOL_VERSION, SyncHello, SyncIncrementalChange, SyncKey, SyncManifest, SyncMessage,
+    SyncRowCodec, SyncRowInventory, SyncSnapshotRequest, SyncStateUnit, SyncTransport,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -76,7 +76,7 @@ pub async fn synchronize<K, R, T>(
 ) -> Result<SyncResult, SyncError<T::Error>>
 where
     K: Kernel,
-    R: RowCodec<K::Transaction>,
+    R: SyncRowCodec<K::Transaction>,
     T: SyncTransport,
     T::Error: core::fmt::Display,
 {
@@ -85,11 +85,15 @@ where
     }
 
     exchange_hello(engine, transport, role).await?;
+
     let remote_manifest = exchange_manifest(engine, transport, role).await?;
-    let local_units = engine.export_sync_state().await?;
+    let local_units = export_sync_state_for(engine).await?;
+
     let local_inventories = inventories_for(engine, &local_units).await?;
+
     let remote_inventories =
         exchange_inventories(transport, role, local_inventories.clone()).await?;
+
     let remote_inventories = remote_inventories
         .into_iter()
         .map(|inventory| (inventory.key(), inventory))
@@ -153,6 +157,174 @@ struct Received {
     pending: Vec<SyncIncrementalChange>,
 }
 
+pub async fn sync_manifest_for<K, R>(engine: &Engine<K, R>) -> Result<SyncManifest, EngineError>
+where
+    K: Kernel,
+    R: SyncRowCodec<K::Transaction>,
+{
+    Ok(SyncManifest::new(
+        export_sync_state_for(engine)
+            .await?
+            .into_iter()
+            .map(|unit| (unit.key, unit.digest))
+            .collect(),
+    ))
+}
+
+pub async fn export_sync_state_for<K, R>(
+    engine: &Engine<K, R>,
+) -> Result<Vec<SyncStateUnit>, EngineError>
+where
+    K: Kernel,
+    R: SyncRowCodec<K::Transaction>,
+{
+    let mut units = Vec::new();
+    for entry in engine.export_catalog_entries().await? {
+        let key = match entry.kind {
+            CatalogEntryKind::Table => SyncKey::Table {
+                id: *entry
+                    .key
+                    .values
+                    .first()
+                    .and_then(value::Value::as_uuid)
+                    .ok_or(EngineError::custom("Invalid catalog key"))?,
+            },
+            CatalogEntryKind::TableField => SyncKey::TableField {
+                id: *entry
+                    .key
+                    .values
+                    .first()
+                    .and_then(value::Value::as_uuid)
+                    .ok_or(EngineError::custom("Invalid catalog key"))?,
+            },
+            CatalogEntryKind::Index => SyncKey::Index {
+                id: *entry
+                    .key
+                    .values
+                    .first()
+                    .and_then(value::Value::as_uuid)
+                    .ok_or(EngineError::custom("Invalid catalog key"))?,
+            },
+            CatalogEntryKind::IndexField => SyncKey::IndexField {
+                index: *entry
+                    .key
+                    .values
+                    .first()
+                    .and_then(value::Value::as_uuid)
+                    .ok_or(EngineError::custom("Invalid catalog key"))?,
+                position: u32::try_from(
+                    entry
+                        .key
+                        .values
+                        .get(1)
+                        .and_then(value::Value::to_integer)
+                        .ok_or(EngineError::custom("Invalid catalog key"))?,
+                )
+                .map_err(|_| EngineError::custom("Invalid catalog key"))?,
+            },
+        };
+        let state = postcard::to_allocvec(&entry.value).map_err(EngineError::custom)?;
+        units.push(SyncStateUnit::new(key, state, Vec::new()));
+    }
+    for table in engine.table_generations().await? {
+        let rows = engine
+            .read_transaction(|codec, transaction| Box::pin(codec.row_ids(transaction, table.0)))
+            .await?;
+        for row in rows {
+            let (state, metadata) = engine
+                .read_transaction(|codec, transaction| {
+                    Box::pin(async move {
+                        Ok((
+                            codec
+                                .export_state(transaction, table.0, row)
+                                .await?
+                                .unwrap_or_default(),
+                            codec.export_metadata(transaction, table.0, row).await?,
+                        ))
+                    })
+                })
+                .await?;
+            if !state.is_empty() || !metadata.is_empty() {
+                units.push(SyncStateUnit::new(
+                    SyncKey::Row { table, row },
+                    state,
+                    metadata,
+                ));
+            }
+        }
+    }
+    units.sort_unstable_by(|left, right| left.key.cmp(&right.key));
+    Ok(units)
+}
+
+pub async fn apply_sync_state_for<K, R>(
+    engine: &Engine<K, R>,
+    unit: SyncStateUnit,
+) -> Result<(), EngineError>
+where
+    K: Kernel,
+    R: SyncRowCodec<K::Transaction>,
+{
+    if !unit.verify_digest() {
+        return Err(EngineError::custom("Invalid sync state digest"));
+    }
+    match unit.key {
+        SyncKey::Row { table, row } => {
+            engine
+                .mutate_transaction(table, row, |codec, transaction, _| {
+                    Box::pin(async move {
+                        if !unit.metadata.is_empty() {
+                            codec
+                                .merge_metadata(transaction, table.0, row, &unit.metadata)
+                                .await?;
+                        }
+                        let value = if unit.state.is_empty() {
+                            None
+                        } else {
+                            codec
+                                .merge_state(transaction, table.0, row, &unit.state)
+                                .await?
+                        };
+                        Ok(((), value))
+                    })
+                })
+                .await
+        }
+        key => {
+            let (kind, entry_key) = match key {
+                SyncKey::Table { id } => (
+                    CatalogEntryKind::Table,
+                    value::Row::new(vec![value::Value::Uuid(id)]),
+                ),
+                SyncKey::TableField { id } => (
+                    CatalogEntryKind::TableField,
+                    value::Row::new(vec![value::Value::Uuid(id)]),
+                ),
+                SyncKey::Index { id } => (
+                    CatalogEntryKind::Index,
+                    value::Row::new(vec![value::Value::Uuid(id)]),
+                ),
+                SyncKey::IndexField { index, position } => (
+                    CatalogEntryKind::IndexField,
+                    value::Row::new(vec![
+                        value::Value::Uuid(index),
+                        value::Value::Integer(i64::from(position)),
+                    ]),
+                ),
+                SyncKey::Row { .. } => unreachable!(),
+            };
+            let value = postcard::from_bytes(&unit.state).map_err(EngineError::custom)?;
+            engine
+                .apply_catalog_entry(CatalogEntry {
+                    kind,
+                    key: entry_key,
+                    value,
+                })
+                .await
+        }
+    }
+}
+
 fn validate_state_batch(batch: &[SyncStateUnit]) -> Result<(), EngineError> {
     if batch.iter().all(SyncStateUnit::verify_digest) {
         Ok(())
@@ -161,12 +333,53 @@ fn validate_state_batch(batch: &[SyncStateUnit]) -> Result<(), EngineError> {
     }
 }
 
+pub async fn apply_incremental_changes_for<K, R>(
+    engine: &Engine<K, R>,
+    batch: &[SyncIncrementalChange],
+) -> Result<(), EngineError>
+where
+    K: Kernel,
+    R: SyncRowCodec<K::Transaction>,
+{
+    validate_change_batch(batch)?;
+    let rows = batch
+        .iter()
+        .map(|change| (change.table, change.row))
+        .collect::<Vec<_>>();
+    let changes = batch.to_vec();
+    engine
+        .mutate_rows(&rows, |codec, transaction| {
+            Box::pin(async move {
+                let mut mutations = Vec::with_capacity(changes.len());
+                for change in &changes {
+                    let old = codec
+                        .get_row(transaction, change.table.0, &change.row)
+                        .await?;
+                    let new = codec
+                        .apply_change(
+                            transaction,
+                            change.table.0,
+                            change.row,
+                            &change.id,
+                            &change.payload,
+                        )
+                        .await?;
+                    mutations.push(engine::RowMutation {
+                        table: change.table,
+                        row: change.row,
+                        old,
+                        new,
+                    });
+                }
+                Ok(((), mutations))
+            })
+        })
+        .await
+}
+
 fn validate_change_batch(batch: &[SyncIncrementalChange]) -> Result<(), EngineError> {
     for change in batch {
-        if change.key.document_id != change.row.as_bytes()
-            || change.payload.is_empty()
-            || change.key.change_hash == [0; 32]
-        {
+        if change.id.0.is_empty() || change.payload.is_empty() {
             return Err(EngineError::custom("Invalid incremental change frame"));
         }
     }
@@ -179,7 +392,7 @@ async fn inventories_for<K, R>(
 ) -> Result<Vec<SyncRowInventory>, EngineError>
 where
     K: Kernel,
-    R: RowCodec<K::Transaction>,
+    R: SyncRowCodec<K::Transaction>,
 {
     let mut result = Vec::new();
     for unit in units {
@@ -189,7 +402,11 @@ where
         result.push(SyncRowInventory {
             table,
             row,
-            changes: engine.sync_change_inventory(table, row).await?,
+            changes: engine
+                .read_transaction(|codec, transaction| {
+                    Box::pin(codec.change_inventory(transaction, table.0, row))
+                })
+                .await?,
         });
     }
     result.sort_by_key(SyncRowInventory::key);
@@ -241,7 +458,7 @@ async fn build_outbound<K, R>(
 ) -> Result<Outbound, EngineError>
 where
     K: Kernel,
-    R: RowCodec<K::Transaction>,
+    R: SyncRowCodec<K::Transaction>,
 {
     let mut outbound = Outbound::default();
     for unit in units {
@@ -258,17 +475,31 @@ where
             outbound.snapshots.push(unit);
             continue;
         };
-        let local = engine.sync_change_inventory(table, row).await?;
+        let local = engine
+            .read_transaction(|codec, transaction| {
+                Box::pin(codec.change_inventory(transaction, table.0, row))
+            })
+            .await?;
         let mut exported = 0;
         for key in local {
             if remote.changes.iter().any(|candidate| candidate == &key) {
                 continue;
             }
-            if let Some(payload) = engine.export_incremental_change(table, &key).await? {
+            let export_id = key.clone();
+            if let Some(payload) = engine
+                .read_transaction(move |codec, transaction| {
+                    Box::pin(async move {
+                        codec
+                            .export_change(transaction, table.0, row, &export_id)
+                            .await
+                    })
+                })
+                .await?
+            {
                 outbound.changes.push(SyncIncrementalChange {
                     table,
                     row,
-                    key,
+                    id: key,
                     payload,
                 });
                 exported += 1;
@@ -283,7 +514,7 @@ where
         .sort_unstable_by(|left, right| left.key.cmp(&right.key));
     outbound
         .changes
-        .sort_unstable_by_key(|left| left.key.change_hash);
+        .sort_unstable_by_key(|left| left.id.clone());
     Ok(outbound)
 }
 
@@ -351,14 +582,36 @@ async fn recovery_snapshots<K, R>(
 ) -> Result<Vec<SyncStateUnit>, EngineError>
 where
     K: Kernel,
-    R: RowCodec<K::Transaction>,
+    R: SyncRowCodec<K::Transaction>,
 {
     let mut snapshots = Vec::new();
     for request in requests {
-        if let Some(snapshot) = engine
-            .export_row_sync_state(request.table, request.row)
-            .await?
-        {
+        let snapshot = engine
+            .read_transaction(|codec, transaction| {
+                Box::pin(async move {
+                    let state = codec
+                        .export_state(transaction, request.table.0, request.row)
+                        .await?
+                        .unwrap_or_default();
+                    let metadata = codec
+                        .export_metadata(transaction, request.table.0, request.row)
+                        .await?;
+                    Ok(if state.is_empty() && metadata.is_empty() {
+                        None
+                    } else {
+                        Some(SyncStateUnit::new(
+                            SyncKey::Row {
+                                table: request.table,
+                                row: request.row,
+                            },
+                            state,
+                            metadata,
+                        ))
+                    })
+                })
+            })
+            .await?;
+        if let Some(snapshot) = snapshot {
             snapshots.push(snapshot);
         }
     }
@@ -388,7 +641,7 @@ async fn receive_recovery<K, R, T>(
 ) -> Result<(usize, usize), SyncError<T::Error>>
 where
     K: Kernel,
-    R: RowCodec<K::Transaction>,
+    R: SyncRowCodec<K::Transaction>,
     T: SyncTransport,
     T::Error: core::fmt::Display,
 {
@@ -402,8 +655,9 @@ where
                     return Err(error.into());
                 }
                 for unit in batch {
-                    if let Err(error) = engine.apply_row_sync_state(unit.clone()).await {
-                        let reason = format!("{} (recovery snapshot {:?})", error, unit.key);
+                    let unit_key = unit.key.clone();
+                    if let Err(error) = apply_sync_state_for(engine, unit).await {
+                        let reason = format!("{} (recovery snapshot {:?})", error, unit_key);
                         let _ = send_message(transport, &SyncMessage::Abort(reason)).await;
                         return Err(error.into());
                     }
@@ -428,7 +682,7 @@ async fn receive_outbound<K, R, T>(
 ) -> Result<Received, SyncError<T::Error>>
 where
     K: Kernel,
-    R: RowCodec<K::Transaction>,
+    R: SyncRowCodec<K::Transaction>,
     T: SyncTransport,
     T::Error: core::fmt::Display,
 {
@@ -445,8 +699,9 @@ where
                     return abort(transport, error, String::from("snapshot batch")).await;
                 }
                 for unit in batch {
-                    if let Err(error) = engine.apply_row_sync_state(unit.clone()).await {
-                        return abort(transport, error, format!("snapshot {:?}", unit.key)).await;
+                    let unit_key = unit.key.clone();
+                    if let Err(error) = apply_sync_state_for(engine, unit).await {
+                        return abort(transport, error, format!("snapshot {:?}", unit_key)).await;
                     }
                     count.snapshots += 1;
                 }
@@ -455,16 +710,9 @@ where
                 if let Err(error) = validate_change_batch(&batch) {
                     return abort(transport, error, String::from("incremental batch")).await;
                 }
-                let changes = batch
-                    .iter()
-                    .map(|change| IncrementalChange {
-                        table: change.table,
-                        row: change.row,
-                        key: change.key.clone(),
-                        payload: change.payload.clone(),
-                    })
-                    .collect::<Vec<_>>();
-                if let Err(error) = engine.apply_incremental_changes(&changes).await {
+                let change_count = batch.len();
+                let result = apply_incremental_changes_for(engine, &batch).await;
+                if let Err(error) = result {
                     if matches!(error, EngineError::SyncDependencyUnavailable) {
                         for change in batch {
                             count.requests.push(SyncSnapshotRequest {
@@ -477,7 +725,7 @@ where
                         return abort(transport, error, String::from("incremental batch")).await;
                     }
                 } else {
-                    count.changes += changes.len();
+                    count.changes += change_count;
                 }
             }
             SyncMessage::Done => {
@@ -517,13 +765,13 @@ async fn exchange_hello<K, R, T>(
 ) -> Result<(), SyncError<T::Error>>
 where
     K: Kernel,
-    R: RowCodec<K::Transaction>,
+    R: SyncRowCodec<K::Transaction>,
     T: SyncTransport,
     T::Error: core::fmt::Display,
 {
     let hello = SyncMessage::Hello(SyncHello {
         protocol_version: PROTOCOL_VERSION,
-        manifest: engine.sync_manifest().await?,
+        manifest: sync_manifest_for(engine).await?,
     });
     match role {
         SyncRole::Initiator => {
@@ -554,11 +802,11 @@ async fn exchange_manifest<K, R, T>(
 ) -> Result<SyncManifest, SyncError<T::Error>>
 where
     K: Kernel,
-    R: RowCodec<K::Transaction>,
+    R: SyncRowCodec<K::Transaction>,
     T: SyncTransport,
     T::Error: core::fmt::Display,
 {
-    let message = SyncMessage::Manifest(engine.sync_manifest().await?);
+    let message = SyncMessage::Manifest(sync_manifest_for(engine).await?);
     match role {
         SyncRole::Initiator => {
             send_message(transport, &message).await?;

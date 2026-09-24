@@ -7,17 +7,20 @@ use std::{
 };
 
 use btree_automerge::DocumentChangeKey;
-use engine::{
-    Engine, IncrementalChange, Kernel, KernelTransaction, RowCodec, RowTable, TableGenerationId,
-};
+use engine::{Engine, Kernel, KernelTransaction, RowCodec, RowTable, TableGenerationId};
 use engine_automerge::{AutomergeRowCodec, RowMetadata};
 use engine_redb::RedbKernel;
+
 use futures::executor::block_on;
 use query::{
     AlterTableOperation, DataDefinition, Query, QueryColumn, QueryExpr, QueryExprValue, QueryFrom,
     QueryInsert, QuerySelect, QueryUpdate, QueryUpdateAssignment, Statement,
 };
 use schema::{ColumnSchema, IndexSchema, TableSchema};
+use sync::{
+    SyncIncrementalChange, SyncRowCodec, apply_incremental_changes_for, apply_sync_state_for,
+    export_sync_state_for, sync_manifest_for,
+};
 use uuid::Uuid;
 use value::{Row, Value, ValueType};
 
@@ -98,8 +101,8 @@ async fn sync(
     source: &Engine<RedbKernel, AutomergeRowCodec>,
     destination: &Engine<RedbKernel, AutomergeRowCodec>,
 ) -> engine::EngineResult<()> {
-    for unit in source.export_sync_state().await? {
-        destination.apply_row_sync_state(unit).await?;
+    for unit in export_sync_state_for(source).await? {
+        apply_sync_state_for(destination, unit).await?;
     }
     Ok(())
 }
@@ -166,33 +169,43 @@ fn malformed_incremental_batch_does_not_partially_mutate_state() {
         update(&source, "name", Value::from("Grace")).await;
         let table = source.table_generation_id("people").await.unwrap();
         let row = Uuid::from_u128(1);
-        let keys = source.sync_change_inventory(table, row).await.unwrap();
+        let keys = source
+            .read_transaction(|codec, transaction| {
+                Box::pin(codec.change_inventory(transaction, table.0, row))
+            })
+            .await
+            .unwrap();
         assert_eq!(keys.len(), 2);
+        let key = keys[0].clone();
         let first_payload = source
-            .export_incremental_change(table, &keys[0])
+            .read_transaction(move |codec, transaction| {
+                Box::pin(async move { codec.export_change(transaction, table.0, row, &key).await })
+            })
             .await
             .unwrap()
             .unwrap();
-        let before = destination.sync_manifest().await.unwrap();
+        let before = sync_manifest_for(&destination).await.unwrap();
 
-        let result = destination
-            .apply_incremental_changes(&[
-                IncrementalChange {
+        let result = apply_incremental_changes_for(
+            &destination,
+            &[
+                SyncIncrementalChange {
                     table,
                     row,
-                    key: keys[0].clone(),
+                    id: keys[0].clone(),
                     payload: first_payload,
                 },
-                IncrementalChange {
+                SyncIncrementalChange {
                     table,
                     row,
-                    key: keys[1].clone(),
+                    id: keys[1].clone(),
                     payload: vec![1, 2, 3],
                 },
-            ])
-            .await;
+            ],
+        )
+        .await;
         assert!(result.is_err());
-        assert_eq!(destination.sync_manifest().await.unwrap(), before);
+        assert_eq!(sync_manifest_for(&destination).await.unwrap(), before);
     });
     std::fs::remove_file(source_path).unwrap();
     std::fs::remove_file(destination_path).unwrap();
@@ -224,28 +237,41 @@ fn realtime_row_updates_export_one_incremental_change_after_bootstrap() {
         let row = Uuid::from_u128(1);
         assert!(
             source
-                .sync_change_inventory(table, row)
+                .read_transaction(|codec, transaction| {
+                    Box::pin(codec.change_inventory(transaction, table.0, row))
+                })
                 .await
                 .unwrap()
                 .is_empty()
         );
 
         update(&source, "city", Value::from("Paris")).await;
-        let inventory = source.sync_change_inventory(table, row).await.unwrap();
+        let inventory = source
+            .read_transaction(|codec, transaction| {
+                Box::pin(codec.change_inventory(transaction, table.0, row))
+            })
+            .await
+            .unwrap();
         assert_eq!(inventory.len(), 1);
         let key = inventory[0].clone();
+        let export_key = key.clone();
         let payload = source
-            .export_incremental_change(table, &key)
+            .read_transaction(move |codec, transaction| {
+                Box::pin(async move {
+                    codec
+                        .export_change(transaction, table.0, row, &export_key)
+                        .await
+                })
+            })
             .await
             .unwrap()
             .unwrap();
-        let full_state = source
-            .export_sync_state()
+        let full_state = export_sync_state_for(&source)
             .await
             .unwrap()
             .into_iter()
             .find_map(|unit| match unit.key {
-                engine::SyncKey::Row {
+                sync::SyncKey::Row {
                     table: unit_table,
                     row: unit_row,
                 } if unit_table == table && unit_row == row => Some(unit.state),
@@ -254,17 +280,21 @@ fn realtime_row_updates_export_one_incremental_change_after_bootstrap() {
             .unwrap();
         assert_ne!(payload, full_state);
 
-        destination
-            .apply_incremental_change(table, row, key.clone(), &payload)
+        let change = SyncIncrementalChange {
+            table,
+            row,
+            id: key,
+            payload,
+        };
+        apply_incremental_changes_for(&destination, core::slice::from_ref(&change))
             .await
             .unwrap();
-        destination
-            .apply_incremental_change(table, row, key, &payload)
+        apply_incremental_changes_for(&destination, core::slice::from_ref(&change))
             .await
             .unwrap();
         assert_eq!(
-            source.sync_manifest().await.unwrap(),
-            destination.sync_manifest().await.unwrap()
+            sync_manifest_for(&source).await.unwrap(),
+            sync_manifest_for(&destination).await.unwrap()
         );
     });
     std::fs::remove_file(source_path).unwrap();

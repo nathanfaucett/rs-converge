@@ -5,11 +5,14 @@ use alloc::{string::String, vec::Vec};
 #[cfg(feature = "in-memory")]
 use engine::InMemoryKernel;
 use engine::{
-    ColumnGenerationId, Engine, EngineError, EngineResult, IndexGenerationId, SyncManifest,
-    SyncStateUnit, TableGenerationId,
+    ColumnGenerationId, Engine, EngineError, EngineResult, IndexGenerationId, TableGenerationId,
 };
 use query::{QueryParams, QueryResult, Statement, Translator};
 use schema::{IndexSchema, TableSchema};
+#[cfg(feature = "sync")]
+use sync::{
+    SyncManifest, SyncStateUnit, apply_sync_state_for, export_sync_state_for, sync_manifest_for,
+};
 use value::{FromRow, Row, Value};
 
 #[cfg(feature = "automerge")]
@@ -191,16 +194,19 @@ impl Database {
         database_call!(self, |engine| engine.execute(statements).await)
     }
 
+    #[cfg(feature = "sync")]
     pub async fn sync_manifest(&self) -> EngineResult<SyncManifest> {
-        database_call!(self, |engine| engine.sync_manifest().await)
+        database_call!(self, |engine| sync_manifest_for(engine).await)
     }
 
+    #[cfg(feature = "sync")]
     pub async fn export_sync_state(&self) -> EngineResult<Vec<SyncStateUnit>> {
-        database_call!(self, |engine| engine.export_sync_state().await)
+        database_call!(self, |engine| export_sync_state_for(engine).await)
     }
 
+    #[cfg(feature = "sync")]
     pub async fn apply_sync_state(&self, unit: SyncStateUnit) -> EngineResult<()> {
-        database_call!(self, |engine| engine.apply_row_sync_state(unit).await)
+        database_call!(self, |engine| apply_sync_state_for(engine, unit).await)
     }
 
     pub async fn row_conflicts(&self, table_name: &str, key: &Row) -> EngineResult<Vec<String>> {

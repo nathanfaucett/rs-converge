@@ -30,11 +30,11 @@ A Generation is the immutable identity of a Table, Column, or Index. A Logical R
 
 ## Sync State Unit
 
-A Sync State Unit is the canonical transferable state for one Logical Row, Table, Column, Index, or Index Field. It contains its identity, state bytes, deletion metadata where applicable, and a digest. The Engine applies one unit atomically and maintains derived Index Records.
+A Sync State Unit is sync-owned canonical transferable state for one Logical Row, Table, Column, Index, or Index Field. It contains its identity, state bytes, deletion metadata where applicable, and a digest. Sync asks the Engine to apply it atomically while the Engine maintains derived Index Records.
 
 ## Sync Manifest
 
-A Sync Manifest maps each Sync State Unit identity to its digest. A Sync Session exchanges manifests, transfers mismatched units in batches, and retries by exchanging manifests again. The manifest is session state; the Engine stores no frontier, checkpoint, envelope log, or quarantine state.
+A Sync Manifest maps each sync-owned state-unit identity to its digest. A Sync Session exchanges manifests, transfers mismatched units in batches, and retries by exchanging manifests again. Normal realtime updates transfer only missing incremental payloads identified by opaque sync change IDs; full state units are for bootstrap and dependency recovery. Automerge implements `sync::SyncRowCodec`, while the Engine stores no protocol state, frontier, checkpoint, envelope log, or quarantine state.
 
 ## Tombstone
 

@@ -19,13 +19,15 @@ engine = { path = "../engine", default-features = false, features = [] }
 # external dependencies
 postcard = { version = "1.1", default-features = false, features = ["alloc"] }
 serde = { version = "1.0", default-features = false, features = ["alloc", "derive"] }
+sha2 = { version = "0.10", default-features = false, features = [] }
 uuid = { version = "1.23", default-features = false, features = ["serde"] }
 thiserror = { version = "2.0", default-features = false, features = [] }
+value = { path = "../value", default-features = false, features = [] }
 
 [dev-dependencies]
 # internal dependencies
 engine = { path = "../engine", default-features = false, features = ["in-memory", "std"] }
-engine-automerge = { path = "../engine-automerge", default-features = false, features = [] }
+
 schema = { path = "../schema", default-features = false, features = [] }
 sql-translator = { path = "../sql-translator", default-features = false, features = [] }
 value = { path = "../value", default-features = false, features = [] }

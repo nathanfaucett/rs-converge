@@ -1,313 +1,384 @@
-# Server/Client Protocol Plan
+# gRPC Client/Server Protocol Plan
 
 ## Goal
 
-Expose the existing `query::Statement` batch API through a small, transport-neutral
-protocol. Ship gRPC with Tonic first, then adapt the same protocol for HTTP,
-gRPC-Web, WebSockets, and Unix-domain sockets without changing query semantics.
+Run one `Engine` in a server process and operate it from another process through
+gRPC, using the existing `query::Statement` batch API as the only operation.
 
-Integrate the client into `Database::open_uri` so local and remote databases use
-one application-facing entry point:
+Done means all of the following:
 
-```text
-:in_memory:                  local in-memory database
-ofdb://./local.db            local file database
-ofdb+grpc://db.example:50051 remote database over gRPC/TCP
-ofdb+unix:///run/ofdb.sock   remote database over gRPC/Unix socket
+- `ofdb+grpc://host:port` and `ofdb+unix:///path.sock` URIs open a
+  `Database::Remote` that executes statement batches against the server.
+- A server crate can serve any `Engine<K, R>` over TCP and Unix sockets with
+  graceful shutdown.
+- The protobuf schema represents every public `query`, `schema`, and `value`
+  type losslessly; malformed or lossy requests are rejected before execution.
+- One RPC maps to exactly one `Engine::execute` call, preserving the Engine
+  transaction boundary (the batch commits together or the request fails).
+- Local URI behavior is unchanged, and unsupported remote operations fail with
+  explicit errors.
+
+## Deliverables
+
+| Crate             | Status     | Purpose                                                                 | Depends on                            | std |
+| ----------------- | ---------- | ----------------------------------------------------------------------- | ------------------------------------- | --- |
+| `crates/proto`    | fix + fill | `db.proto` and generated Prost/Tonic bindings. Generated code only.     | prost, tonic                          | yes |
+| `crates/protocol` | new        | Proto ↔ domain conversions, `QueryExecutor` trait, `QueryServiceError`. | proto, query, schema, value           | yes |
+| `crates/server`   | new        | Tonic service implementation, `Engine` adapter, TCP/Unix listeners.     | proto, protocol, engine, tonic, tokio | yes |
+| `crates/client`   | new        | Typed client wrapper with lazy TCP/Unix connect.                        | proto, protocol, engine, tonic, tokio | yes |
+| `ofdb` (root)     | extend     | `Database::Remote` variant, remote URI parsing, `remote` feature.       | client (optional)                     | —   |
+
+Per-crate public API contracts:
+
+```rust
+// crates/protocol — no transport types, no engine types
+pub enum QueryServiceError { Invalid(String), Rejected(String), Unsupported(&'static str), Internal(String) }
+pub trait QueryExecutor: Send + Sync {
+    fn execute(&self, statements: Vec<Statement>)
+        -> impl Future<Output = Result<Vec<QueryResult>, QueryServiceError>> + Send;
+}
+
+// crates/server
+pub struct QueryService<E> { /* Arc<E>, Clone */ }
+impl<E: QueryExecutor> proto::query_service_server::QueryService for QueryService<E> { /* ... */ }
+impl<K, R> QueryExecutor for Engine<K, R> where K: Kernel + 'static, R: RowCodec<K::Transaction> + Send + Sync + 'static { /* ... */ }
+impl Server {
+    pub fn tcp(addr: SocketAddr, executor: impl QueryExecutor + 'static) -> ServerBuilder;
+    #[cfg(unix)]
+    pub fn unix(path: PathBuf, executor: impl QueryExecutor + 'static) -> ServerBuilder;
+}
+// ServerBuilder: max_decoding_message_size(...), serve(shutdown: impl Future<Output = ()>)
+
+// crates/client — no generated types leak past this boundary
+impl Client {
+    pub fn lazy_tcp(host: &str, port: u16) -> Result<Self, EngineError>;
+    #[cfg(unix)]
+    pub fn lazy_unix(path: &str) -> Result<Self, EngineError>;
+    pub async fn execute(&self, statements: Vec<Statement>) -> EngineResult<Vec<QueryResult>>;
+}
 ```
 
-`Database::open_uri` remains a synchronous constructor. Remote construction must
-create a lazy Tonic channel; the first database operation establishes the
-connection and returns connection errors through the existing async result.
+## Architecture
 
-## Scope
-
-The first version has one operation:
-
-```text
-Execute(Statement batch) -> QueryResult batch
+```mermaid
+graph TD
+    ROOT["ofdb: Database::Remote, open_uri, uri.rs"] --> C["client: typed Client, lazy connect"]
+    S["server: QueryService<E>, TCP/Unix listeners"] --> P["protocol: conversions, QueryExecutor, QueryServiceError"]
+    C --> P
+    S --> EN["engine: Engine[K, R]"]
+    P --> PR["proto: db.proto, generated prost/tonic"]
+    P --> Q["query / schema / value"]
+    EN --> Q
+    PR --> Q
 ```
 
-One request maps to one `Engine::execute` call. Therefore all statements in a
-request share the Engine transaction boundary: the batch commits together or the
-request fails. The protocol does not expose begin, commit, or rollback.
+Layering rules:
 
-The remote `Database` initially supports `execute` and the two translation
-methods by sending their resulting `query::Statement` batches. SQL translation
-therefore remains client-side, using the caller-provided `Translator`.
+- `protocol` never references tonic, tokio, or engine types. It is the only
+  place wire↔domain conversion exists.
+- `server` and `client` contain transport only: convert, delegate, map
+  errors/status. No business logic.
+- `proto` stays generated-code-only; its `lib.rs` remains two lines.
+- Each future transport (HTTP, gRPC-Web, WebSocket) is a new adapter over
+  `QueryExecutor`; it never touches conversions or the Engine.
 
-Until corresponding RPCs exist, metadata, replication, conflict-resolution, and
-checkpoint methods on `Database::Remote` return a clear unsupported-operation
-error. Do not silently execute those methods against a local database or invent
-client-side metadata.
+## Design Decisions
 
-Out of scope for v1:
-
-- authentication, authorization, and tenant routing;
-- server-side SQL text translation and query parameters;
-- replication, checkpoints, conflict resolution, and subscriptions;
-- pagination streams and cursors; and
-- a WebSocket-specific RPC framing protocol.
-
-## Transport Decision
-
-The protocol is the protobuf messages and their request/response semantics.
-gRPC is its first transport, not the protocol itself.
-
-| Need                     | v1 approach                                            | Notes                                                                                                        |
-| ------------------------ | ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
-| Native TCP client/server | Tonic gRPC over HTTP/2                                 | Primary supported path. `ofdb+grpc://host:port` selects it.                                                  |
-| Unix socket              | Tonic server/client with a Unix listener and connector | gRPC remains HTTP/2; only the byte transport changes. `ofdb+unix:///path.sock` selects it.                   |
-| Browser HTTP             | Add gRPC-Web adapter later                             | Standard browsers cannot use native Tonic gRPC directly.                                                     |
-| Plain HTTP               | Add a JSON/protobuf HTTP adapter later                 | It calls the same transport-neutral service.                                                                 |
-| WebSockets               | Add an explicit WebSocket adapter later                | Tonic does not turn a gRPC service into WebSocket RPC. Define framing only when a WebSocket consumer exists. |
-
-Do not put HTTP, WebSocket, or Unix-socket logic in the query conversion layer.
-Each adapter must invoke the same application service.
-
-### Database URI rules
-
-Extend the existing URI parser without changing the meaning of `:in_memory:` or
-`ofdb://<path>`:
-
-| URI                      | Parsed target                                                            | Required feature          |
-| ------------------------ | ------------------------------------------------------------------------ | ------------------------- |
-| `:in_memory:`            | `Database::InMemory`                                                     | `in-memory` + `automerge` |
-| `ofdb://<path>`          | `Database::File`                                                         | `redb` + `automerge`      |
-| `ofdb+grpc://host:port`  | `Database::Remote` with TCP endpoint                                     | `remote`                  |
-| `ofdb+grpcs://host:port` | Reserved for TLS; reject in v1 with an explicit unsupported-scheme error | future `tls`              |
-| `ofdb+unix:///path.sock` | `Database::Remote` with Unix endpoint                                    | `remote` + `unix`         |
-
-The remote URI identifies the server endpoint, not a second database name. A
-server process owns the selected database instance. Reject credentials, query
-parameters, fragments, missing hosts, invalid ports, and non-empty Unix URI
-hosts until they are explicitly specified.
+1. **std-only for proto/protocol/server/client in v1.** Tonic codegen and
+   tokio require std. Domain crates (`query`, `schema`, `value`) stay no_std;
+   `protocol` touches only alloc types on the domain side, so a later
+   no_std split (messages-only proto crate) stays mechanical. Browser and
+   wasm clients arrive later via gRPC-Web/HTTP adapters, not this stack.
+2. **`QueryExecutor` uses `impl Future` return style**, matching `Kernel` and
+   `Translator` in this repo. No `async-trait`. The server is generic over
+   `E: QueryExecutor`; the trait is not dyn-compatible and does not need to be.
+3. **The `Engine` adapter lives in `crates/server`**, the only crate that runs
+   an engine. `protocol` stays engine-free.
+4. **Error mapping is deterministic per `EngineError` variant**, no string
+   matching: `TranslateError` → `INVALID_ARGUMENT`, `Unsupported` →
+   `UNIMPLEMENTED`, `InvalidQuery` → `FAILED_PRECONDITION`,
+   `Custom`/`SyncDependencyUnavailable`/`MissingTimestampProvider` →
+   `INTERNAL`. Structured error details wait until `EngineError` carries
+   structured variants.
+5. **Remote `Database` supports exactly the methods that reduce to an Execute
+   batch** (see dispatch table). Everything else returns an explicit
+   unsupported-operation error. Translation stays client-side.
+6. **`database_call!` gains a remote arm** `|client| body` so every `Database`
+   method dispatches all variants; unsupported remote methods pass a constant
+   error expression.
+7. **No retries, no request ids in v1.** Writes are not safe to retry without
+   an idempotency contract.
+8. **The protobuf sketch is rewritten freely** — it was never published (the
+   crate is not even in the workspace). From the first release, reserve field
+   numbers and names before any schema change.
+9. **Lazy connect.** `Database::open_uri` stays synchronous; it builds a lazy
+   Tonic channel (`connect_lazy` / `connect_with_connector_lazy`). The first
+   operation surfaces connection errors through the existing async result.
 
 ## Wire Contract
 
-Keep `package db;` for the initial version. Add the service and request envelope
-to `crates/proto/proto/db.proto`:
+`package db;` in `crates/proto/proto/db.proto`. One RPC:
 
 ```proto
 service QueryService {
   rpc Execute(ExecuteRequest) returns (ExecuteResponse);
 }
-
-message ExecuteRequest {
-  repeated Statement statements = 1;
-}
-
-message ExecuteResponse {
-  repeated QueryResult results = 1;
-}
+message ExecuteRequest  { repeated Statement statements = 1; }
+message ExecuteResponse { repeated QueryResult results   = 1; }
 ```
 
-The response has one result for each submitted statement, in statement order.
-An empty batch is invalid. The server must reject a request that has no selected
-`oneof` variant or that cannot be converted losslessly to `query` types.
+The response has one result per submitted statement, in order. An empty batch
+is `INVALID_ARGUMENT`. An absent or unknown `oneof` variant is an error, never
+a default domain value. Prost's decode recursion limit (default 100) bounds
+`QueryExpr` nesting; deeper input fails decode and maps to `INVALID_ARGUMENT`.
 
-### Required protobuf alignment
+### Message inventory
 
-`db.proto` is currently a sketch. Before adding the service, make every message
-losslessly represent its equivalent in `crates/query/src/query.rs` and its
-`schema`/`value` dependencies.
+Every message below must exist with exactly these fields. `google.protobuf.Empty`
+represents unit-like variants (`Value::Null`, `QueryCountTarget::AllRows`,
+`QueryInsertValue::Default`, `JsonValue::Null`).
 
-| Rust API                                         | Required protobuf rule                                                                                                                                                        |
-| ------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `value::Value`                                   | Model every variant: `Null`, `Type`, `Uuid`, `Bool`, `Integer`, `Float`, `Text`, `Json`, and `Blob`. `Value` must use a `oneof`; protobuf message presence represents `Null`. |
-| `schema::ColumnSchema`                           | Include `name`, `ValueType`, `default`, and `primary_key`.                                                                                                                    |
-| `schema::IndexSchema`                            | Include `name`, `table_name`, ordered `column_indices`, and `unique`.                                                                                                         |
-| `schema::TableSchema`                            | Include `name` and ordered columns.                                                                                                                                           |
-| `QueryInsert.returning`                          | Preserve `Option<Vec<String>>`; an absent field differs from a present empty list. Wrap the list in a message, rather than using `repeated string` directly.                  |
-| `QueryUpdate.returning`, `QueryDelete.returning` | Preserve `Option<Vec<QueryColumn>>` with the same wrapper pattern.                                                                                                            |
-| `QuerySelect.limit` and `offset`                 | Keep optional scalar presence, which matches `Option<usize>` after checked `u64` conversion.                                                                                  |
-| `QueryExpr` and statement enums                  | Reject an absent or unknown `oneof`; never map it to a default query shape.                                                                                                   |
-| `QueryResult`                                    | Preserve ordered rows and complete result-column metadata.                                                                                                                    |
+| Rust type                                    | Proto definition rule                                                                                                                                                                               |
+| -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `value::ValueType`                           | `enum ValueType`, `VALUE_TYPE_UNSPECIFIED = 0`, then the 9 Rust variants in declaration order.                                                                                                      |
+| `value::Value`                               | `oneof kind`: `null` (Empty), `type` (ValueType), `uuid` (bytes, exactly 16), `bool_value`, `integer` (int64), `float` (double), `text`, `json` (JsonValue), `blob` (bytes).                        |
+| `value::JsonNumber`                          | `oneof kind`: `i64` (int64), `u64` (uint64), `f64` (double).                                                                                                                                        |
+| `value::JsonValue`                           | Recursive: `oneof kind`: `null` (Empty), `bool_value`, `number` (JsonNumber), `string`, `array` (JsonArray), `object` (JsonObject).                                                                 |
+| `value::JsonValue` object                    | `JsonObject { repeated JsonObjectEntry entries }`, `JsonObjectEntry { key, value }`. Repeated entries, not a map field: keeps `protocol` on `BTreeMap` and makes duplicate keys a conversion error. |
+| `value::Row`                                 | `repeated Value values`.                                                                                                                                                                            |
+| `schema::ColumnSchema`                       | `name`, `type` (ValueType), `default` (Value), `primary_key`.                                                                                                                                       |
+| `schema::IndexSchema`                        | `name`, `table_name`, `repeated uint32 column_indices`, `unique`.                                                                                                                                   |
+| `schema::TableSchema`                        | `name`, `repeated ColumnSchema columns`.                                                                                                                                                            |
+| `query::QueryColumn`                         | `table`, `column`.                                                                                                                                                                                  |
+| `query::QueryJoinKind` / `QueryJoin`         | Enum with `UNSPECIFIED = 0` + 4 kinds; message: `kind`, `table`, `on` (QueryExpr).                                                                                                                  |
+| `query::QuerySortDirection` / `QueryOrderBy` | Enum with `UNSPECIFIED = 0` + 2 kinds; message: `by`, `direction`.                                                                                                                                  |
+| `query::QueryExprValue`                      | `oneof`: `column`, `value`.                                                                                                                                                                         |
+| `query::QueryExpr`                           | `oneof` with all 16 variants; `BinaryExpr { left, right }`, `InListExpr { expr, list, negated }`, `InSubqueryExpr { expr, subquery }`, `LikeExpr { expr, pattern }`.                                |
+| `query::QueryCountTarget`                    | `oneof`: `all_rows` (Empty), `single` (string), `distinct` (string), `distinct_multi` (wrapper message; oneof fields cannot be repeated).                                                           |
+| `query::QueryAggregate`                      | `oneof`: `count`, `sum`, `avg`, `min`, `max`.                                                                                                                                                       |
+| `query::QueryFrom`                           | `table`, `repeated QueryJoin joins`.                                                                                                                                                                |
+| `query::QueryUpdateAssignment`               | `column`, `value` (QueryExprValue).                                                                                                                                                                 |
+| `query::QueryResultColumn`                   | `name`, `optional source_table`, `optional source_column`.                                                                                                                                          |
+| `query::QueryResult`                         | `repeated Row rows`, `repeated QueryResultColumn columns`.                                                                                                                                          |
+| `query::QuerySelect`                         | `from`, `projection`, `optional predicate`, `aggregates`, `group_by`, `order_by`, `optional uint64 limit`, `optional uint64 offset`, `optional having`.                                             |
+| `query::QueryInsert`                         | `table`, `row`, `returning` (`ReturningStrings` wrapper).                                                                                                                                           |
+| `query::QueryInsertValue`                    | `oneof`: `value`, `default` (Empty).                                                                                                                                                                |
+| `query::QueryInsertValues`                   | `table`, `columns`, `values`, `returning` (`ReturningStrings` wrapper).                                                                                                                             |
+| `query::QueryUpdate`                         | `from`, `assignments`, `optional predicate`, `returning` (`ReturningColumns` wrapper).                                                                                                              |
+| `query::QueryDelete`                         | `from`, `optional predicate`, `returning` (`ReturningColumns` wrapper).                                                                                                                             |
+| `query::Query`                               | `oneof`: `select`, `insert`, `insert_values`, `update`, `delete`.                                                                                                                                   |
+| `query::AlterTableOperation`                 | `oneof`: `add_column`, `drop_column`, `rename_column`, `rename_table`, `add_index`, `rename_index`, `drop_index`; with `RenameColumn`, `RenameTable`, `RenameIndex` messages.                       |
+| `query::AlterIndexOperation`                 | `oneof`: `rename` (`RenameIndexOp { new_name }`).                                                                                                                                                   |
+| `query::DataDefinition`                      | `oneof` with all 8 variants and their payload messages (`CreateTable`, `CreateTableWithIndexes`, `AlterTable`, `DropTable`, `CreateIndex`, `CreateIndexUnresolved`, `AlterIndex`, `DropIndex`).     |
+| `query::Statement`                           | `oneof`: `query`, `data_definition`.                                                                                                                                                                |
 
-Use `optional` only where scalar presence is meaningful. Use wrapper messages
-for optional repeated fields because protobuf repeated fields have no presence.
-Do not retain placeholder comments or unused enums such as
-`QueryInsertValueKind` after the replacement schema is complete.
+Presence rules:
 
-### Errors
+- `ReturningStrings { repeated string columns = 1 }` and
+  `ReturningColumns { repeated QueryColumn columns = 1 }` wrap optional
+  repeated fields; protobuf repeated fields have no presence, wrapper messages
+  do. Absent wrapper ≠ present empty list.
+- `optional` scalars only where Rust has `Option`: `limit`, `offset`,
+  `predicate`, `having`, `source_table`, `source_column`.
+- `usize` ↔ `u64` for `limit`/`offset` uses checked conversion; overflow is a
+  conversion error.
+- Delete the placeholder `Value`, the incomplete schema messages, and the
+  unused `QueryInsertValueKind` enum during the rewrite.
 
-Use gRPC status codes at the transport boundary:
+### Error mapping
 
-| Condition                                                  | Status                                                                       |
-| ---------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| Malformed protobuf shape, invalid conversions, empty batch | `INVALID_ARGUMENT`                                                           |
-| Unsupported executor feature/query shape                   | `UNIMPLEMENTED`                                                              |
-| Missing table/index or invalid database request            | `FAILED_PRECONDITION` or `NOT_FOUND`, according to the concrete engine error |
-| Unexpected engine/storage failure                          | `INTERNAL`                                                                   |
-| Request deadline expires                                   | `DEADLINE_EXCEEDED`                                                          |
+| Condition                                          | gRPC status           |
+| -------------------------------------------------- | --------------------- |
+| Malformed protobuf, failed conversion, empty batch | `INVALID_ARGUMENT`    |
+| `EngineError::Unsupported`                         | `UNIMPLEMENTED`       |
+| `EngineError::InvalidQuery`                        | `FAILED_PRECONDITION` |
+| `EngineError::TranslateError`                      | `INVALID_ARGUMENT`    |
+| Other `EngineError` variants, storage faults       | `INTERNAL`            |
+| Deadline expires                                   | `DEADLINE_EXCEEDED`   |
 
-Initially return concise status messages only. Introduce typed protobuf error
-details only when a client needs stable machine-readable error codes.
+Status messages stay concise. Do not expose backend implementation strings as
+a stable client contract. Typed protobuf error details wait for structured
+`EngineError` variants.
 
-## Crate Boundaries
+## Remote Database Integration
 
-```text
-crates/proto/       Canonical .proto files and generated Prost/Tonic bindings
-crates/protocol/    Proto <-> query/schema/value conversions and transport-neutral service trait
-crates/server/      Tonic QueryService implementation and listener bootstrap
-crates/client/      Tonic client wrapper and URI endpoint constructors
-src/database.rs     Local/remote Database enum and open_uri dispatch
-src/uri.rs          Local and remote URI parsing
-```
+### URI grammar
 
-`crates/protocol` depends on `proto`, `query`, `schema`, and `value`; it does not
-depend on Tonic server transport types. It owns all checked conversions and
-conversion tests.
+Extend `src/uri.rs` without changing local behavior:
 
-`crates/client` owns Tonic client transport details and exposes a small typed
-client with `execute`, `connect_tcp_lazy`, and `connect_unix_lazy` operations.
-It must not expose generated protobuf types from the `Database` API.
+| URI                      | Parsed result                        | Required feature          |
+| ------------------------ | ------------------------------------ | ------------------------- |
+| `:in_memory:`            | `UriScheme::InMemory`                | `in-memory` + `automerge` |
+| `ofdb://<path>`          | `UriScheme::File` + path             | `redb` + `automerge`      |
+| `ofdb+grpc://host:port`  | `UriScheme::Grpc` + `Endpoint::Tcp`  | `remote`                  |
+| `ofdb+grpcs://host:port` | rejected, `UriError::TlsUnsupported` | future `tls`              |
+| `ofdb+unix:///<path>`    | `UriScheme::Unix` + `Endpoint::Unix` | `remote` (cfg(unix))      |
 
-Add a `Remote` variant to `Database` in `src/database.rs`, containing the typed
-client. Extend `database_call!` or replace it with a dispatch helper so local
-Engine variants and the remote client share the supported async methods without
-duplicating URI or conversion logic. Keep the existing local variants and URI
-behavior unchanged.
+- `UriScheme` gains `Grpc`, `Grpcs`, `Unix`. `Uri` gains
+  `endpoint: Option<Endpoint>` where `Endpoint` is
+  `Tcp { host, port } | Unix { path }`. `UriError` gains `InvalidEndpoint` and
+  `TlsUnsupported`.
+- Hosts may be DNS names, IPv4, or bracketed IPv6. Reject: userinfo (`@`),
+  query (`?`), fragment (`#`), missing/empty host, non-numeric or out-of-range
+  port, and non-empty authority in Unix URIs.
+- The remote URI identifies the server endpoint only. A server process owns
+  the database instance; there is no database name component.
 
-Define a small async application boundary in `crates/protocol`, conceptually:
+### `Database` dispatch
 
-```rust
-trait QueryExecutor {
-    async fn execute(&self, statements: Vec<query::Statement>)
-        -> Result<Vec<query::QueryResult>, QueryServiceError>;
-}
-```
+`Database::Remote(Client)` is added behind the `remote` feature. `open_uri`
+maps parsed endpoints to `Client::lazy_tcp` / `Client::lazy_unix`; when
+`remote` is disabled, remote schemes return a feature-disabled error naming
+the feature.
 
-Implement it for the selected `Engine<K, R>` configuration in the server crate
-or in a dedicated engine adapter module. The Tonic handler only:
-
-1. validates and converts `ExecuteRequest`;
-2. calls `QueryExecutor::execute`; and
-3. converts results or errors to the wire response/status.
-
-Keep `crates/proto` generated-code-only. Its `lib.rs` remains thin.
+| `Database` method                                                                                                    | Remote behavior                                    |
+| -------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
+| `execute`                                                                                                            | `Client::execute(statements)`                      |
+| `translate_and_execute`, `translate_and_execute_with_params`                                                         | translate locally, then `Client::execute`          |
+| `translate_and_select`                                                                                               | translate + execute remotely, then `rows_as`       |
+| `create_table`, `drop_table`                                                                                         | build the `DataDefinition` statement, then execute |
+| `index_schema`, `index_lookup`, `table_schema`, `table_generation_id`, `column_generation_id`, `index_generation_id` | unsupported-operation error                        |
+| `sync_manifest`, `export_sync_state`, `apply_sync_state` (`sync` feature)                                            | unsupported-operation error                        |
+| `row_conflicts`, `resolve_row`                                                                                       | unsupported-operation error                        |
 
 ## Implementation Checklist
 
-### 1. Establish the workspace and feature model
+### Phase 0 — Repair the workspace foundation
 
-- [ ] Add `crates/proto` to the root workspace; it currently has Tonic-related
-      dependencies but is not a workspace member.
-- [ ] Define root `[workspace.dependencies]` or replace the existing `workspace`
-      dependency references in `crates/proto/Cargo.toml`; choose one consistent
-      workspace convention.
-- [ ] Create `crates/protocol`, `crates/server`, and `crates/client` as separate
-      workspace crates.
-- [ ] Add the client crates/features to the root `ofdb` package. Keep `remote`
-      disabled by default unless the project decides that network support belongs in
-      the default feature set.
-- [ ] Keep protocol/query conversion `no_std + alloc` where possible. Gate
-      Tonic, Tokio, network listeners, and Unix sockets behind `std` features.
-- [ ] Add `grpc`, `tcp`, and `unix` server/client features. Make Unix unavailable
-      on unsupported targets at compile time; do not simulate it with TCP.
+`crates/proto` is currently unbuildable: it is not a workspace member and its
+`workspace = true` dependencies do not exist. Nothing else can proceed until
+`cargo check -p proto` passes.
 
-### 2. Replace the protobuf sketch with the canonical query schema
+- [ ] Add `[workspace.dependencies]` to the root `Cargo.toml`: `prost`,
+      `prost-types`, `tonic`, `tonic-prost`, `tonic-prost-build`, `tokio`.
+      Major.minor versions, `default-features = false`, full table form,
+      grouped under a `# gRPC` comment header, alphabetized.
+- [ ] Add `crates/proto` to `[workspace] members`; switch its dependency table
+      to the workspace entries; enable only required tonic features
+      (`codegen`, `prost`).
+- [ ] Verify: `cargo check -p proto`.
 
-- [ ] Rewrite `crates/proto/proto/db.proto` to include every query, schema, and
-      value field listed above.
-- [ ] Add `QueryService`, `ExecuteRequest`, and `ExecuteResponse`.
-- [ ] Reserve removed field numbers and message/enum names before future schema
-      revisions. Never reuse a released field number.
-- [ ] Regenerate bindings with the existing `tonic-prost-build` build script.
-- [ ] Add protobuf round-trip tests for representative nested expressions,
-      every `Value` variant, optional `returning`, DDL, and results.
+### Phase 1 — Canonical protobuf schema
 
-### 3. Implement lossless conversions
+- [ ] Rewrite `crates/proto/proto/db.proto` to the message inventory above;
+      add `QueryService`, `ExecuteRequest`, `ExecuteResponse`.
+- [ ] Regenerate bindings via the existing `tonic-prost-build` build script.
+- [ ] Verify: `cargo check -p proto` and `cargo test -p proto` after adding a
+      golden-fixture test that encodes fixed v1 byte sequences for `Value`,
+      `QueryExpr`, and `Statement` and decodes them with the bindings.
 
-- [ ] Add dedicated modules in `crates/protocol` for `value`, `schema`, `query`,
-      `result`, and `error` conversion.
-- [ ] Implement `TryFrom<proto::...>` for wire-to-domain conversion and `From`
-      for domain-to-wire conversion where conversion cannot fail.
-- [ ] Check `u64` to `usize` conversions for `limit` and `offset` and return a
-      conversion error on overflow.
-- [ ] Validate row/value shapes at the protocol boundary where they can be
-      validated without duplicating Engine semantic checks.
-- [ ] Ensure an absent `oneof` and unsupported generated enum value produce an
-      error, never a default domain value.
+### Phase 2 — `crates/protocol`
 
-### 4. Add the transport-neutral service
+- [ ] Create the crate: deps `proto`, `query`, `schema`, `value` (all
+      `default-features = false`); thin `lib.rs` declaring flat modules.
+- [ ] Add `error.rs`: `QueryServiceError` with `Invalid`, `Rejected`,
+      `Unsupported`, `Internal`.
+- [ ] Add `executor.rs`: the `QueryExecutor` trait.
+- [ ] Add conversion modules `value.rs`, `schema.rs`, `query.rs`, `result.rs`:
+      `From<domain> for proto` where infallible, `TryFrom<proto> for domain`
+      with `QueryServiceError::Invalid` as the error type.
+- [ ] Enforce losslessness: absent `oneof` and unknown enum values error;
+      UUID bytes must be exactly 16; duplicate `JsonObjectEntry` keys error;
+      `limit`/`offset` use checked `u64 → usize`.
+- [ ] Unit-test every conversion module: all 9 `Value` variants, all
+      `JsonValue` shapes, every absent-`oneof` case, `returning` presence
+      distinction (absent vs empty), overflow, duplicate JSON keys, and
+      round-trips in both directions for representative nested expressions,
+      DDL, and results.
+- [ ] Verify: `cargo test -p protocol`.
 
-- [ ] Define `QueryExecutor` and `QueryServiceError` in `crates/protocol`.
-- [ ] Make the executor adapter call `Engine::execute` exactly once per request.
-- [ ] Map known `EngineError` variants to protocol errors without exposing
-      backend implementation strings as a stable client contract.
-- [ ] Test that a multi-statement request invokes one batch execution and
-      preserves result ordering.
+### Phase 3 — `crates/server`
 
-### 5. Ship the Tonic server and client
+- [ ] Create the crate: deps `proto`, `protocol`, `engine`, `tonic`
+      (transport/server features), `tokio` (`net`); dev-deps `tokio`
+      (`rt-multi-thread`, `macros`), `engine-automerge`, `futures`.
+- [ ] Add `executor.rs`: `impl QueryExecutor for Engine<K, R>` mapping
+      `EngineError` variants per the error table.
+- [ ] Add `service.rs`: `QueryService<E>` implementing the generated server
+      trait — validate and convert the request, call the executor once,
+      convert the response or map `QueryServiceError` to `Status`.
+- [ ] Add `server.rs`: `Server::tcp` / `Server::unix` builders with
+      `max_decoding_message_size` (default: tonic's 4 MiB) and
+      `serve(shutdown)`. Unix bind fails if the socket file exists; the caller
+      owns socket-file lifecycle. Also expose `QueryService` for mounting into
+      a caller-owned `tonic::Server`.
+- [ ] Integration tests over loopback TCP with an in-memory engine: ordered
+      batch results equal to direct `Engine::execute`, empty batch →
+      `INVALID_ARGUMENT`, unsupported shape → `UNIMPLEMENTED`, invalid query →
+      `FAILED_PRECONDITION`, atomic failure of a write batch, deadline
+      handling. Unix test behind `cfg(unix)`.
+- [ ] Verify: `cargo test -p server`.
 
-- [ ] Implement generated `proto::query_service_server::QueryService` in
-      `crates/server`.
-- [ ] Convert request, delegate, and map the response/error using
-      `tonic::{Request, Response, Status}`.
-- [ ] Provide TCP serving with explicit bind address, graceful shutdown input,
-      request-size limits, and deadline propagation.
-- [ ] Provide Unix-domain-socket serving with `tokio::net::UnixListener` and
-      Tonic's incoming-stream server API. Define socket-file cleanup and ownership
-      rules in the server configuration API.
-- [ ] Add `crates/client` as a thin typed wrapper over generated Tonic client
-      bindings, including `connect_tcp_lazy` and a Unix connector constructor behind
-      the `unix` feature.
-- [ ] Make the client wrapper implement the remote `execute` operation and map
-      Tonic status failures to `EngineError::Custom` or a dedicated public remote
-      error variant.
-- [ ] Add `UriScheme::Grpc` and `UriScheme::Unix` in `src/uri.rs`, preserving the
-      existing local variants and rejecting invalid endpoint components.
-- [ ] Add `Database::Remote(Client)` in `src/database.rs` and dispatch
-      `Database::open_uri` to lazy TCP/Unix client constructors when the `remote`
-      feature is enabled. Return a feature-disabled error otherwise.
-- [ ] Route `Database::execute`, `translate_and_execute`, and
-      `translate_and_execute_with_params` through the remote client. Keep translation
-      local, then send the resulting statement batch.
-- [ ] Return a deliberate unsupported-operation error for remote metadata,
-      replication, checkpoint, conflict, and resolution methods until their RPCs
-      are added; add tests for this behavior.
-- [ ] Do not add retries by default: writes are not safe to retry without a
-      request idempotency contract.
+### Phase 4 — `crates/client`
 
-### 6. Test and document the contract
+- [ ] Create the crate: deps `proto`, `protocol`, `engine`, `tonic`
+      (transport/channel features); optional `tokio` (`net`) behind `unix`.
+- [ ] Add `client.rs`: `Client::lazy_tcp`, `Client::lazy_unix` (Unix connector
+      via `Endpoint::connect_with_connector_lazy` + `tower::service_fn` over
+      `tokio::net::UnixStream`, dummy `http://` endpoint URI), and
+      `execute` converting statements/results through `protocol`.
+- [ ] Map tonic `Status` failures to `EngineError::custom` with the status
+      code and message included; unit-test the mapping.
+- [ ] Verify: `cargo test -p client`.
 
-- [ ] Unit-test each conversion module, including all absent `oneof` cases and
-      every optional-field distinction.
-- [ ] Unit-test URI parsing for local, TCP, Unix, missing host, invalid port,
-      invalid Unix authority, reserved TLS, credentials, query, and fragment cases.
-- [ ] Test `Database::open_uri` constructs local variants as before, constructs a
-      lazy `Database::Remote` for valid TCP/Unix URIs, and returns a feature error
-      when remote support is disabled.
-- [ ] Add server integration tests over loopback TCP for successful execution,
-      invalid request mapping, unsupported query mapping, ordered batch results,
-      and atomic failure of a write batch.
-- [ ] Add Unix integration tests behind `cfg(unix)` using the same
-      `Database::open_uri("ofdb+unix:///...")` path.
-- [ ] Add a generated-client integration test against the Tonic server.
-- [ ] Add a compatibility test that encodes fixed v1 protobuf fixtures and
-      decodes them with the current bindings.
-- [ ] Run `just fmt-check`, `just clippy`, `just test`, and `just crap`.
+### Phase 5 — Root integration
+
+- [ ] `src/uri.rs`: add the remote schemes, `Endpoint`, validation rules, and
+      unit tests for every accept/reject case in the URI grammar table.
+- [ ] `src/database.rs`: add `Database::Remote(Client)` behind `remote`;
+      extend `database_call!` with the remote arm; wire the supported-method
+      table; return the unsupported-operation error for the rest.
+- [ ] `src/database.rs`: dispatch `open_uri` to lazy client constructors;
+      keep local variants and error messages unchanged.
+- [ ] Root `Cargo.toml`: optional `client` dependency and `remote` feature
+      (`dep:client` + `client/unix`); add a `[[test]] remote` entry with
+      `required-features = ["remote", "sql", "automerge", "in-memory"]`.
+- [ ] Add `tests/remote.rs`: local URIs unchanged, valid remote URIs construct
+      a lazy `Database::Remote`, remote schemes error when `remote` is
+      disabled, unsupported remote methods error, and an end-to-end execute
+      against a spawned in-memory server (TCP; Unix variant behind
+      `cfg(unix)`).
+- [ ] Verify: `cargo test --test remote --features remote,sql,automerge,in-memory`.
+
+### Phase 6 — Full validation
+
+- [ ] `just fmt-check`
+- [ ] `just clippy`
+- [ ] `just test` (feature-powerset across the workspace)
+- [ ] `just crap`
+- [ ] Document the URI schemes, the `remote` feature, and the server/client
+      crate usage in `README.md`.
 
 ## Acceptance Criteria
 
-- `Database::open_uri("ofdb+grpc://host:port")` returns a remote database that
-  lazily connects and executes through the generated Tonic client.
-- `Database::open_uri("ofdb+unix:///path.sock")` returns a remote database that
-  uses the Unix-domain-socket connector with the same RPC behavior.
-- Existing local URI behavior is unchanged, and remote schemes fail clearly
-  when the required feature is disabled.
-- A generated Tonic client can submit a valid `ExecuteRequest` over TCP and
-  receive ordered `QueryResult` values identical to direct `Engine::execute`.
-- A malformed or lossy wire request is rejected before execution.
-- One request executes exactly one Engine statement batch, preserving its
-  transaction boundary.
-- Remote `Database::execute` and local translation methods behave the same for
-  supported operations; unsupported remote methods return explicit errors.
-- Unix-domain-socket clients use the same generated RPC and get the same
-  behavior as TCP clients.
-- The protocol schema represents all currently public `query`, `schema`, and
-  `value` data without placeholders or silent semantic loss.
-- Adding HTTP, gRPC-Web, or WebSocket support requires only a new adapter over
-  `QueryExecutor`; it does not change protobuf/domain conversions or Engine
-  execution behavior.
+- `Database::open_uri("ofdb+grpc://host:port")` and
+  `Database::open_uri("ofdb+unix:///path.sock")` return a lazy
+  `Database::Remote`; the first operation connects and surfaces connection
+  errors through the existing async result.
+- A Tonic client submitting a valid `ExecuteRequest` over TCP or Unix receives
+  ordered `QueryResult` values identical to direct `Engine::execute`, and one
+  request executes exactly one Engine statement batch.
+- Malformed, lossy, or empty requests are rejected before execution with the
+  mapped status codes.
+- Remote `execute` and the translation methods behave like local ones;
+  `create_table`/`drop_table` work remotely; all other remote methods return
+  explicit unsupported-operation errors.
+- Local URI behavior is unchanged; remote schemes fail clearly when `remote`
+  is disabled or the platform lacks Unix sockets.
+- The protobuf schema represents all public `query`, `schema`, and `value`
+  data with no placeholders and no silent semantic loss, including
+  `Option<Vec<_>>` presence distinctions.
+- Adding an HTTP, gRPC-Web, or WebSocket adapter requires only a new adapter
+  over `QueryExecutor`; conversions and Engine behavior are untouched.
+- `just test` passes across the feature powerset.
+
+## Out of Scope (v1)
+
+- Authentication, authorization, tenant routing, TLS (`ofdb+grpcs` is
+  reserved and rejected).
+- Server-side SQL translation and query parameters.
+- Metadata, replication, sync, checkpoint, and conflict-resolution RPCs.
+- Streaming/cursor RPCs; the wire contract is unary request/response.
+- gRPC-Web, plain-HTTP, and WebSocket adapters; define their framing only when
+  a concrete consumer exists.
+- Retries and idempotency contracts.

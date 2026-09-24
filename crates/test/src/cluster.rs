@@ -6,12 +6,15 @@ use std::{
     },
 };
 
-use engine::{Engine, EngineResult, Kernel, RowCodec};
+use engine::{Engine, EngineResult, Kernel};
 use engine_automerge::AutomergeRowCodec;
 use engine_redb::RedbKernel;
 use futures::join;
 use sql_translator::SqlTranslator;
-use sync::{SessionConfig, SyncError, SyncRole, synchronize};
+use sync::{
+    SessionConfig, SyncError, SyncRole, SyncRowCodec, export_sync_state_for, sync_manifest_for,
+    synchronize,
+};
 use value::Row;
 
 static DATABASE_ID: AtomicU64 = AtomicU64::new(0);
@@ -21,12 +24,12 @@ use crate::transport::{
     in_memory_transport_pair_failing,
 };
 
-pub struct Node<K: Kernel, R: RowCodec<K::Transaction>> {
+pub struct Node<K: Kernel, R: SyncRowCodec<K::Transaction>> {
     pub id: usize,
     pub engine: Engine<K, R>,
 }
 
-pub struct Cluster<K: Kernel, R: RowCodec<K::Transaction>> {
+pub struct Cluster<K: Kernel, R: SyncRowCodec<K::Transaction>> {
     nodes: Vec<Node<K, R>>,
 }
 
@@ -53,7 +56,7 @@ fn redb_cluster<R>(
     new_row_codec: fn() -> R,
 ) -> (RedbClusterCleanup, Cluster<RedbKernel, R>)
 where
-    R: RowCodec<engine_redb::RedbKernelTransaction>,
+    R: SyncRowCodec<engine_redb::RedbKernelTransaction>,
 {
     let directory = database_directory();
     let nodes = (0..n)
@@ -80,7 +83,7 @@ fn database_directory() -> PathBuf {
     }
 }
 
-impl<K: Kernel, R: RowCodec<K::Transaction>> Cluster<K, R> {
+impl<K: Kernel, R: SyncRowCodec<K::Transaction>> Cluster<K, R> {
     pub fn new(n: usize, new_kernel: fn() -> K, new_row_codec: fn() -> R) -> Self {
         let nodes = (0..n)
             .map(|id| Node {
@@ -115,12 +118,12 @@ impl<K: Kernel, R: RowCodec<K::Transaction>> Cluster<K, R> {
         if self.nodes.len() <= 1 {
             return true;
         }
-        let first = match self.nodes[0].engine.sync_manifest().await {
+        let first = match sync_manifest_for(&self.nodes[0].engine).await {
             Ok(manifest) => manifest,
             Err(_) => return false,
         };
         for node in &self.nodes[1..] {
-            match node.engine.sync_manifest().await {
+            match sync_manifest_for(&node.engine).await {
                 Ok(manifest) if manifest == first => {}
                 _ => return false,
             }
@@ -249,11 +252,11 @@ impl<K: Kernel, R: RowCodec<K::Transaction>> Cluster<K, R> {
     }
 
     pub async fn assert_state_converged(&self) {
-        let first_state = self.nodes[0].engine.export_sync_state().await.unwrap();
+        let first_state = export_sync_state_for(&self.nodes[0].engine).await.unwrap();
         for (node, current) in self.nodes.iter().enumerate().skip(1) {
             assert_eq!(
                 first_state,
-                current.engine.export_sync_state().await.unwrap(),
+                export_sync_state_for(&current.engine).await.unwrap(),
                 "nodes 0 and {node} diverged in sync state"
             );
         }

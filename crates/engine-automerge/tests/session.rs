@@ -6,7 +6,7 @@ use engine_automerge::AutomergeRowCodec;
 use futures::{StreamExt, channel::mpsc, executor::block_on};
 use schema::{ColumnSchema, TableSchema};
 use sql_translator::SqlTranslator;
-use sync::{SessionConfig, SyncMessage, SyncRole, SyncTransport, synchronize};
+use sync::{SessionConfig, SyncMessage, SyncRole, SyncRowCodec, SyncTransport, synchronize};
 use value::{Value, ValueType};
 
 #[derive(Debug)]
@@ -119,8 +119,8 @@ fn synchronizes_catalog_state_and_converges() {
                 .any(|frame| matches!(frame, SyncMessage::State(_)))
         );
         assert_eq!(
-            left.sync_manifest().await.unwrap(),
-            right.sync_manifest().await.unwrap()
+            sync::sync_manifest_for(&left).await.unwrap(),
+            sync::sync_manifest_for(&right).await.unwrap()
         );
     });
 }
@@ -169,8 +169,8 @@ fn realtime_update_sends_one_incremental_without_snapshot() {
                 .all(|frame| !matches!(frame, SyncMessage::State(_)))
         );
         assert_eq!(
-            left.sync_manifest().await.unwrap(),
-            right.sync_manifest().await.unwrap()
+            sync::sync_manifest_for(&left).await.unwrap(),
+            sync::sync_manifest_for(&right).await.unwrap()
         );
     });
 }
@@ -236,8 +236,8 @@ fn synchronizes_concurrent_branches() {
         sync(&left, &right, &SessionConfig::default()).await;
 
         assert_eq!(
-            left.sync_manifest().await.unwrap(),
-            right.sync_manifest().await.unwrap()
+            sync::sync_manifest_for(&left).await.unwrap(),
+            sync::sync_manifest_for(&right).await.unwrap()
         );
     });
 }
@@ -280,18 +280,24 @@ fn duplicate_incremental_frames_are_idempotent() {
                 _ => None,
             })
             .unwrap();
+        let table = change.table;
+        let row = change.row;
+        let id = change.id;
+        let payload = change.payload;
         right
-            .apply_incremental_change(
-                change.table,
-                change.row,
-                change.key.clone(),
-                &change.payload,
-            )
+            .mutate_transaction(table, row, move |codec, transaction, _| {
+                Box::pin(async move {
+                    let value = codec
+                        .apply_change(transaction, table.0, row, &id, &payload)
+                        .await?;
+                    Ok(((), value))
+                })
+            })
             .await
             .unwrap();
         assert_eq!(
-            right.sync_manifest().await.unwrap(),
-            left.sync_manifest().await.unwrap()
+            sync::sync_manifest_for(&right).await.unwrap(),
+            sync::sync_manifest_for(&left).await.unwrap()
         );
     });
 }
