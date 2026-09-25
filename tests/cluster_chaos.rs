@@ -1,24 +1,18 @@
 mod common;
 
 use common::{case_concurrent_user_inserts, standard_suite};
-use ofdb_test::{ChaosRunner, TestRunner, run};
+use ofdb_test::{ChaosRunner, test_case, test_suite};
 
-#[test]
-#[ignore = "chaos testing is intended for chaos CI workflow"]
-fn test_cluster_chaos_suite() {
-    run(async {
-        let runner = ChaosRunner::default();
-        let suite = standard_suite();
-        runner.run_suite(&suite).await.unwrap();
-    });
-}
+test_suite!(
+    #[ignore = "chaos testing is intended for chaos CI workflow"]
+    standard_chaos,
+    standard_suite(),
+    ChaosRunner::default()
+);
 
-#[test]
-#[ignore = "chaos testing is intended for chaos CI workflow"]
-fn test_cluster_chaos_concurrent_inserts_case() {
-    run(async {
-        let runner = ChaosRunner::default();
-        let case = case_concurrent_user_inserts();
-        runner.run_case(&case).await.unwrap();
-    });
-}
+test_case!(
+    #[ignore = "chaos testing is intended for chaos CI workflow"]
+    concurrent_inserts_chaos,
+    case_concurrent_user_inserts(),
+    ChaosRunner::default()
+);

@@ -3,23 +3,22 @@ mod common;
 mod sql;
 
 use common::{case_concurrent_user_inserts, standard_suite};
-use ofdb_test::{SingleNodeRunner, TestRunner, run};
-use sql::sql_suite;
+use ofdb_test::{SingleNodeRunner, test_case, test_suite};
+use sql::{sql_limits_suite, sql_suite};
 
-#[test]
-fn test_local_sql_suite() {
-    run(async {
-        let runner = SingleNodeRunner::default();
-        runner.run_suite(&standard_suite()).await.unwrap();
-        runner.run_suite(&sql_suite()).await.unwrap();
-    });
-}
-
-#[test]
-fn test_local_sql_concurrent_inserts_case() {
-    run(async {
-        let runner = SingleNodeRunner::default();
-        let case = case_concurrent_user_inserts();
-        runner.run_case(&case).await.unwrap();
-    });
-}
+test_suite!(
+    standard_local,
+    standard_suite(),
+    SingleNodeRunner::default()
+);
+test_suite!(sql_surface_local, sql_suite(), SingleNodeRunner::default());
+test_suite!(
+    sql_limits_local,
+    sql_limits_suite(),
+    SingleNodeRunner::default()
+);
+test_case!(
+    concurrent_inserts_local,
+    case_concurrent_user_inserts(),
+    SingleNodeRunner::default()
+);

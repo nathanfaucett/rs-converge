@@ -224,3 +224,47 @@ impl Database {
             .await)
     }
 }
+
+#[cfg(all(feature = "automerge", feature = "in-memory", feature = "redb"))]
+mod tests {
+    use super::*;
+    use futures::executor::block_on;
+
+    #[test]
+    fn in_memory_database_uses_the_engine_api() {
+        block_on(async {
+            let database = Database::in_memory();
+            database
+                .translate_and_execute(
+                    "CREATE TABLE users (id UUID PRIMARY KEY, name TEXT)",
+                    &crate::SqlTranslator,
+                )
+                .await
+                .unwrap();
+            assert_eq!(database.table_schema("users").await.unwrap().name, "users");
+        });
+    }
+
+    #[test]
+    fn file_database_reopens_persisted_schema() {
+        block_on(async {
+            let database_path = std::path::Path::new("/tmp/ofdb-test-redb");
+            let _ = std::fs::remove_dir_all(database_path);
+
+            {
+                let database = Database::open(database_path).unwrap();
+                database
+                    .translate_and_execute(
+                        "CREATE TABLE users (id UUID PRIMARY KEY, name TEXT)",
+                        &crate::SqlTranslator,
+                    )
+                    .await
+                    .unwrap();
+            }
+
+            let database = Database::open(database_path).unwrap();
+            assert_eq!(database.table_schema("users").await.unwrap().name, "users");
+            let _ = std::fs::remove_dir_all(database_path);
+        });
+    }
+}

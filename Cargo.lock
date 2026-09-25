@@ -1380,8 +1380,11 @@ name = "sync"
 version = "0.1.0"
 dependencies = [
  "engine",
+ "engine-automerge",
+ "engine-redb",
  "futures",
  "postcard",
+ "redb",
  "schema",
  "serde",
  "sha2 0.10.9",

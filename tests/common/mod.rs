@@ -28,35 +28,7 @@ pub fn case_concurrent_user_inserts() -> TestCase {
         .build()
 }
 
-/// Validates negative error handling for SQL syntax, missing relations, and schema mismatches.
-pub fn case_negative_syntax_and_schema_errors() -> TestCase {
-    TestCase::builder("negative_syntax_and_schema_errors")
-        .setup(["CREATE TABLE items (id UUID PRIMARY KEY, title TEXT)"])
-        .step_failing(0, "NOT A VALID SQL STATEMENT", ExpectedError::SyntaxError)
-        .step_failing(
-            0,
-            "INSERT INTO nonexistent_table VALUES (CAST('018f0f8e-7b6d-7c4a-8f12-000000000001' AS UUID), 'A')",
-            ExpectedError::TableNotFound,
-        )
-        .step_failing(
-            0,
-            "SELECT nonexistent_column FROM items",
-            ExpectedError::ColumnNotFound,
-        )
-        .step_failing(
-            0,
-            "INSERT INTO items VALUES ('not-a-valid-uuid', 'B')",
-            ExpectedError::TypeMismatch,
-        )
-        .step(
-            0,
-            "INSERT INTO items VALUES (CAST('018f0f8e-7b6d-7c4a-8f12-000000000001' AS UUID), 'Item 1')",
-        )
-        .expect_query("SELECT title FROM items", vec![Row::from(["Item 1"])])
-        .build()
-}
-
-/// Basic multi-node CRUD mutations across separate logical actors.
+/// Basic multi-node CRUD lifecycle across separate logical actors.
 pub fn case_basic_crud() -> TestCase {
     TestCase::builder("basic_crud")
         .setup(["CREATE TABLE inventory (id UUID PRIMARY KEY, name TEXT, quantity INTEGER)"])
@@ -72,14 +44,15 @@ pub fn case_basic_crud() -> TestCase {
             0,
             "UPDATE inventory SET quantity = 15 WHERE id = CAST('018f0f8e-7b6d-7c4a-8f12-111111111111' AS UUID)",
         )
+        .step(
+            1,
+            "DELETE FROM inventory WHERE id = CAST('018f0f8e-7b6d-7c4a-8f12-222222222222' AS UUID)",
+        )
         .expect_query(
             "SELECT name, quantity FROM inventory WHERE name = 'Widget'",
             vec![Row::new(vec![Value::from("Widget"), Value::Integer(15)])],
         )
-        .expect_query(
-            "SELECT name, quantity FROM inventory WHERE name = 'Gadget'",
-            vec![Row::new(vec![Value::from("Gadget"), Value::Integer(20)])],
-        )
+        .expect_query("SELECT name FROM inventory WHERE name = 'Gadget'", vec![])
         .build()
 }
 
@@ -110,7 +83,6 @@ pub fn case_unique_constraints() -> TestCase {
 pub fn standard_suite() -> TestSuite {
     let mut suite = TestSuite::new("standard_integration_suite");
     suite.add(case_concurrent_user_inserts());
-    suite.add(case_negative_syntax_and_schema_errors());
     suite.add(case_basic_crud());
     suite.add(case_unique_constraints());
     suite

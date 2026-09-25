@@ -1,40 +1,25 @@
 mod common;
 
 use common::{case_concurrent_user_inserts, standard_suite};
-use ofdb_test::{ClusterOfflineRunner, ClusterRealtimeRunner, TestRunner, run};
+use ofdb_test::{ClusterOfflineRunner, ClusterRealtimeRunner, test_case, test_suite};
 
-#[test]
-fn test_cluster_offline_suite() {
-    run(async {
-        let runner = ClusterOfflineRunner::default();
-        let suite = standard_suite();
-        runner.run_suite(&suite).await.unwrap();
-    });
-}
-
-#[test]
-fn test_cluster_offline_concurrent_inserts_case() {
-    run(async {
-        let runner = ClusterOfflineRunner::default();
-        let case = case_concurrent_user_inserts();
-        runner.run_case(&case).await.unwrap();
-    });
-}
-
-#[test]
-fn test_cluster_realtime_suite() {
-    run(async {
-        let runner = ClusterRealtimeRunner::default();
-        let suite = standard_suite();
-        runner.run_suite(&suite).await.unwrap();
-    });
-}
-
-#[test]
-fn test_cluster_realtime_concurrent_inserts_case() {
-    run(async {
-        let runner = ClusterRealtimeRunner::default();
-        let case = case_concurrent_user_inserts();
-        runner.run_case(&case).await.unwrap();
-    });
-}
+test_suite!(
+    standard_offline,
+    standard_suite(),
+    ClusterOfflineRunner::default()
+);
+test_suite!(
+    standard_realtime,
+    standard_suite(),
+    ClusterRealtimeRunner::default()
+);
+test_case!(
+    concurrent_inserts_offline,
+    case_concurrent_user_inserts(),
+    ClusterOfflineRunner::default()
+);
+test_case!(
+    concurrent_inserts_realtime,
+    case_concurrent_user_inserts(),
+    ClusterRealtimeRunner::default()
+);
