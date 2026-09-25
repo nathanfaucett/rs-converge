@@ -225,10 +225,11 @@ impl Database {
     }
 }
 
-#[cfg(all(feature = "automerge", feature = "in-memory", feature = "redb"))]
+#[cfg(all(test, feature = "automerge", feature = "in-memory", feature = "redb"))]
 mod tests {
     use super::*;
     use futures::executor::block_on;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn in_memory_database_uses_the_engine_api() {
@@ -248,11 +249,15 @@ mod tests {
     #[test]
     fn file_database_reopens_persisted_schema() {
         block_on(async {
-            let database_path = std::path::Path::new("/tmp/ofdb-test-redb");
-            let _ = std::fs::remove_dir_all(database_path);
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let database_path = std::env::temp_dir()
+                .join(format!("ofdb-database-{}-{nanos}.redb", std::process::id()));
 
             {
-                let database = Database::open(database_path).unwrap();
+                let database = Database::open(&database_path).unwrap();
                 database
                     .translate_and_execute(
                         "CREATE TABLE users (id UUID PRIMARY KEY, name TEXT)",
@@ -262,9 +267,9 @@ mod tests {
                     .unwrap();
             }
 
-            let database = Database::open(database_path).unwrap();
+            let database = Database::open(&database_path).unwrap();
             assert_eq!(database.table_schema("users").await.unwrap().name, "users");
-            let _ = std::fs::remove_dir_all(database_path);
+            let _ = std::fs::remove_file(&database_path);
         });
     }
 }

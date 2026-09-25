@@ -27,8 +27,6 @@ value = { path = "../value", default-features = false, features = [] }
 [dev-dependencies]
 # internal dependencies
 engine = { path = "../engine", default-features = false, features = ["in-memory", "std"] }
-engine-automerge = { path = "../engine-automerge", default-features = false, features = [] }
-engine-redb = { path = "../engine-redb", default-features = false, features = [] }
 
 schema = { path = "../schema", default-features = false, features = [] }
 sql-translator = { path = "../sql-translator", default-features = false, features = [] }
@@ -36,4 +34,3 @@ value = { path = "../value", default-features = false, features = [] }
 
 # external dependencies
 futures = { version = "0.3", default-features = false, features = ["async-await", "executor", "std"] }
-redb = { version = "4.3", default-features = false, features = ["std", "uuid"] }
