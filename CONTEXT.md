@@ -39,3 +39,11 @@ A Sync Manifest maps each sync-owned state-unit identity to its digest. A Sync S
 ## Tombstone
 
 A Tombstone permanently marks a deleted Logical Row, Table, Column, or Index Generation. It removes active mappings and derived Index Records. Later changes to that Generation are Superseded; they are retained as replication facts but do not alter visible state. An explicit Restore creates a new Generation.
+
+## KV Key
+
+A KV Key is a UTF-8 label for a value. It may have multiple KV Generations; the generation with the greatest UUIDv7 determines the visible state.
+
+## KV Generation
+
+A KV Generation is an immutable UUIDv7 identity for one KV Key's Automerge value. A tombstone ends that generation; setting the same key again creates a new generation rather than restoring the old one.

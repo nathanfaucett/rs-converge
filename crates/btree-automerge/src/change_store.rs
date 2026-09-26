@@ -28,19 +28,6 @@ where
     (map(range.start_bound()), map(range.end_bound()))
 }
 
-fn contains(range: &(Bound<Vec<u8>>, Bound<Vec<u8>>), key: &[u8]) -> bool {
-    match &range.0 {
-        Bound::Included(start) if key < start => return false,
-        Bound::Excluded(start) if key <= start => return false,
-        _ => {}
-    }
-    match &range.1 {
-        Bound::Included(end) if key > end => false,
-        Bound::Excluded(end) if key >= end => false,
-        _ => true,
-    }
-}
-
 impl<T> BTreeRead<DocumentChangeKey, Vec<u8>> for AutomergeChangeStore<T>
 where
     T: BTreeRead<Vec<u8>, Vec<u8>>,
@@ -54,14 +41,12 @@ where
         R: RangeBounds<DocumentChangeKey>,
     {
         let range = bounds(range);
-        let entries = self.inner.range(..);
+        let entries = self.inner.range(range);
         stream! {
             pin_mut!(entries);
             while let Some(entry) = entries.next().await {
                 let (key, value) = entry?;
-                if contains(&range, &key) {
-                    yield Ok((DocumentChangeKey::decode_ordered(&key)?, value));
-                }
+                yield Ok((DocumentChangeKey::decode_ordered(&key)?, value));
             }
         }
     }

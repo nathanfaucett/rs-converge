@@ -1,6 +1,8 @@
 use automerge::{AutoCommit, ROOT, transaction::Transactable};
 use btree::{BTree, BTreeRead, BTreeTransaction, InMemoryBTree};
-use btree_automerge::{AutomergeBTree, DocumentChangeKey, DocumentId, DocumentType};
+use btree_automerge::{
+    AutomergeBTree, AutomergeChangeStore, DocumentChangeKey, DocumentId, DocumentType,
+};
 use futures::{StreamExt, executor::block_on, pin_mut};
 
 fn inner_tree() -> InMemoryBTree<DocumentChangeKey, Vec<u8>> {
@@ -63,6 +65,41 @@ fn metadatas_are_included_in_snapshot_and_incremental_ranges() {
             DocumentChangeKey::decode_ordered(&key.encode_ordered()).unwrap(),
             key
         );
+    });
+}
+
+#[test]
+fn change_store_range_honors_included_and_excluded_bounds() {
+    block_on(async {
+        let inner = InMemoryBTree::<Vec<u8>, Vec<u8>>::new();
+        let ids = [vec![1], vec![2], vec![3]];
+        let mut tx = inner.transaction().await.unwrap();
+        for id in &ids {
+            tx.insert(
+                DocumentChangeKey::new_snapshot(id.clone(), [0; 32]).encode_ordered(),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        }
+        tx.commit().await.unwrap();
+
+        let store = AutomergeChangeStore::new(inner);
+        let entries = store.range(
+            DocumentChangeKey::min_for_id(ids[1].clone())
+                ..=DocumentChangeKey::max_for_id(ids[1].clone()),
+        );
+        pin_mut!(entries);
+        assert_eq!(entries.next().await.unwrap().unwrap().0.id(), &ids[1]);
+        assert!(entries.next().await.is_none());
+
+        let entries = store.range((
+            std::ops::Bound::Excluded(DocumentChangeKey::max_for_id(ids[0].clone())),
+            std::ops::Bound::Excluded(DocumentChangeKey::min_for_id(ids[2].clone())),
+        ));
+        pin_mut!(entries);
+        assert_eq!(entries.next().await.unwrap().unwrap().0.id(), &ids[1]);
+        assert!(entries.next().await.is_none());
     });
 }
 
