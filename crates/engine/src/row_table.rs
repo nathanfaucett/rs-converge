@@ -2,7 +2,7 @@ use alloc::{string::ToString, vec::Vec};
 
 use async_stream::stream;
 use futures::{Stream, StreamExt, pin_mut};
-use uuid::Uuid;
+
 use value::{Row, Value};
 
 use crate::{EngineError, EngineResult, KernelTransaction};
@@ -10,7 +10,7 @@ use crate::{EngineError, EngineResult, KernelTransaction};
 pub trait RowTable: KernelTransaction {
     fn get_entry(
         &self,
-        table: Uuid,
+        table: &str,
         key: &Row,
     ) -> impl Future<Output = EngineResult<Option<Row>>> + Send {
         async move {
@@ -21,7 +21,7 @@ pub trait RowTable: KernelTransaction {
         }
     }
 
-    fn scan_entries(&self, table: Uuid) -> impl Stream<Item = EngineResult<(Row, Row)>> + Send {
+    fn scan_entries(&self, table: &str) -> impl Stream<Item = EngineResult<(Row, Row)>> + Send {
         self.scan_bytes(table).map(|entry| {
             let (key, value) = entry?;
             Ok((decode_key(&key)?, decode_value(value)?))
@@ -30,7 +30,7 @@ pub trait RowTable: KernelTransaction {
 
     fn scan_entries_owned(
         &self,
-        table: Uuid,
+        table: &str,
     ) -> impl Stream<Item = EngineResult<(Row, Row)>> + Send {
         stream! {
             let entries = self.scan_bytes(table);
@@ -44,7 +44,7 @@ pub trait RowTable: KernelTransaction {
 
     fn put_entry(
         &mut self,
-        table: Uuid,
+        table: &str,
         key: Row,
         value: Row,
     ) -> impl Future<Output = EngineResult<()>> + Send {
@@ -53,7 +53,7 @@ pub trait RowTable: KernelTransaction {
 
     fn remove_entry(
         &mut self,
-        table: Uuid,
+        table: &str,
         key: &Row,
     ) -> impl Future<Output = EngineResult<Option<Row>>> + Send {
         async move {

@@ -37,11 +37,11 @@ A Row Reconciler stores and resolves Logical Rows through an Engine Transaction.
 
 The Engine is the only path that applies local or replicated Automerge changes to an engine-managed row. Concurrent values for a column remain a Conflict. Automerge canonical ordering selects the visible value until an explicit Resolution settles the conflict.
 
-### Generations and Tombstones
+### Identity and Tombstones
 
-Tables, columns, and indexes have immutable Generation identities. A Logical Row is identified by its table generation and immutable UUID primary key. Names are reusable labels, not identities. When multiple active generations have the same label, deterministic canonical ordering selects the visible one.
+A table is identified by its name, a column by `(table name, column name)`, and an index by its name. A Logical Row is identified by its table name and immutable UUID primary key.
 
-A Tombstone permanently deletes a generation or UUID-keyed row from visible state, removes derived index records, and causes later changes to that identity to be retained as Superseded. A deleted UUID cannot be reused within a table generation; restore creates a row with a new UUID.
+A row Tombstone permanently removes the UUID-keyed row from visible state, removes derived index records, and causes later changes to that row to be retained as Superseded. A deleted row UUID cannot be reused; restoring a row creates it with a new UUID. Table, column, and index identity is name-based, not generation-based.
 
 ### Primary Keys and Indexes
 
@@ -74,4 +74,4 @@ The programmatic `Query` API and SQL translator produce statement batches for th
 
 ## Current Implementation Scope
 
-The repository has transactional in-memory and Redb kernels, an Automerge row codec, envelope logging/import, stable schema generation IDs, tombstones, explicit row-conflict resolution, compact checkpoints, and canonical unique-index contender handling. Broader query execution remains incremental; see `docs/uuid-primary-key-plan.md` for the UUID primary-key implementation checklist.
+The repository has transactional in-memory and Redb kernels, an Automerge row codec, envelope logging/import, name-based schema identity, row tombstones, explicit row-conflict resolution, compact checkpoints, and canonical unique-index contender handling. Broader query execution remains incremental; see `docs/uuid-primary-key-plan.md` for the UUID primary-key implementation checklist.

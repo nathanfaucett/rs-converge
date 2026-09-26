@@ -4,9 +4,7 @@ use alloc::{string::String, vec::Vec};
 
 #[cfg(feature = "in-memory")]
 use engine::InMemoryKernel;
-use engine::{
-    ColumnGenerationId, Engine, EngineError, EngineResult, IndexGenerationId, TableGenerationId,
-};
+use engine::{Engine, EngineError, EngineResult};
 use query::{QueryParams, QueryResult, Statement, Translator};
 use schema::{IndexSchema, TableSchema};
 #[cfg(feature = "sync")]
@@ -119,24 +117,6 @@ impl Database {
 
     pub async fn table_schema(&self, name: &str) -> EngineResult<TableSchema> {
         database_call!(self, |engine| engine.table_schema(name).await)
-    }
-
-    pub async fn table_generation_id(&self, name: &str) -> EngineResult<TableGenerationId> {
-        database_call!(self, |engine| engine.table_generation_id(name).await)
-    }
-
-    pub async fn column_generation_id(
-        &self,
-        table_name: &str,
-        column_name: &str,
-    ) -> EngineResult<ColumnGenerationId> {
-        database_call!(self, |engine| engine
-            .column_generation_id(table_name, column_name)
-            .await)
-    }
-
-    pub async fn index_generation_id(&self, name: &str) -> EngineResult<IndexGenerationId> {
-        database_call!(self, |engine| engine.index_generation_id(name).await)
     }
 
     pub async fn create_table(&self, table_schema: TableSchema) -> EngineResult<()> {

@@ -1,3 +1,4 @@
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::ops::{Bound, RangeBounds};
 
@@ -6,27 +7,32 @@ use btree::{BTreeError, BTreeRead, BTreeResult, BTreeTransaction};
 use futures::{Stream, StreamExt, pin_mut};
 
 use crate::KernelTransaction;
-use uuid::Uuid;
 
 pub struct BytesTable<'a, T> {
     transaction: &'a T,
-    table: Uuid,
+    table: String,
 }
 
 pub struct BytesTableTransaction<'a, T> {
     transaction: &'a mut T,
-    table: Uuid,
+    table: String,
 }
 
 impl<'a, T> BytesTable<'a, T> {
-    pub fn new(transaction: &'a T, table: Uuid) -> Self {
-        Self { transaction, table }
+    pub fn new(transaction: &'a T, table: &str) -> Self {
+        Self {
+            transaction,
+            table: table.into(),
+        }
     }
 }
 
 impl<'a, T> BytesTableTransaction<'a, T> {
-    pub fn new(transaction: &'a mut T, table: Uuid) -> Self {
-        Self { transaction, table }
+    pub fn new(transaction: &'a mut T, table: &str) -> Self {
+        Self {
+            transaction,
+            table: table.into(),
+        }
     }
 }
 
@@ -55,7 +61,7 @@ macro_rules! read {
             ) -> impl Future<Output = BTreeResult<Option<Vec<u8>>>> + Send {
                 async move {
                     self.transaction
-                        .get_bytes(self.table, key)
+                        .get_bytes(&self.table, key)
                         .await
                         .map_err(BTreeError::custom)
                 }
@@ -68,7 +74,7 @@ macro_rules! read {
             where
                 R: RangeBounds<Vec<u8>> + Send,
             {
-                let entries = self.transaction.scan_bytes(self.table);
+                let entries = self.transaction.scan_bytes(&self.table);
                 stream! {
                     pin_mut!(entries);
                     while let Some(entry) = entries.next().await {
@@ -91,7 +97,7 @@ impl<T: KernelTransaction + Send + Sync> BTreeTransaction<Vec<u8>, Vec<u8>>
 {
     async fn insert(&mut self, key: Vec<u8>, value: Vec<u8>) -> BTreeResult<()> {
         self.transaction
-            .put_bytes(self.table, key, value)
+            .put_bytes(&self.table, key, value)
             .await
             .map_err(BTreeError::custom)
     }
@@ -110,7 +116,7 @@ impl<T: KernelTransaction + Send + Sync> BTreeTransaction<Vec<u8>, Vec<u8>>
 
     async fn remove(&mut self, key: &Vec<u8>) -> BTreeResult<Option<Vec<u8>>> {
         self.transaction
-            .remove_bytes(self.table, key)
+            .remove_bytes(&self.table, key)
             .await
             .map_err(BTreeError::custom)
     }

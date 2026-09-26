@@ -1,6 +1,5 @@
 pub use engine::{
-    ColumnGenerationId, Engine, EngineError, EngineResult, IndexGenerationId, Kernel,
-    KernelTransaction, RowCodec, SchemaChange, TableGenerationId,
+    Engine, EngineError, EngineResult, Kernel, KernelTransaction, RowCodec, SchemaChange,
 };
 #[cfg(feature = "in-memory")]
 pub use engine::{InMemoryKernel, InMemoryKernelTransaction};

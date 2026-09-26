@@ -16,14 +16,13 @@ fn next_uuid(timestamp_provider: TimestampProvider) -> EngineResult<Uuid> {
 }
 
 use crate::{
-    Change, ColumnGenerationId, EngineError, EngineResult, IndexGenerationId, SchemaChange,
-    TableGenerationId,
+    Change, EngineError, EngineResult, SchemaChange,
     change::apply_local_change,
     codec::RowCodec,
     engine::{Engine, TimestampProvider},
     kernel::{Kernel, KernelTransaction},
     schema::{
-        column_id, columns as schema_columns, ensure as ensure_schema, table_id,
+        columns as schema_columns, ensure as ensure_schema, lookup_table_name,
         table_schema as schema_table_schema,
     },
 };
@@ -161,7 +160,7 @@ where
             schema,
             if_not_exists,
         } => {
-            if table_generation_id(transaction, &schema.name).await.is_ok() {
+            if lookup_table_name(transaction, &schema.name).await.is_ok() {
                 return if if_not_exists {
                     Ok(QueryResult::default())
                 } else {
@@ -176,7 +175,7 @@ where
             indexes,
             if_not_exists,
         } => {
-            if table_generation_id(transaction, &schema.name).await.is_ok() {
+            if lookup_table_name(transaction, &schema.name).await.is_ok() {
                 return if if_not_exists {
                     Ok(QueryResult::default())
                 } else {
@@ -193,7 +192,7 @@ where
             table_name,
             if_exists,
         } => {
-            let table = match table_generation_id(transaction, &table_name).await {
+            let table = match lookup_table_name(transaction, &table_name).await {
                 Ok(table) => table,
                 Err(_) if if_exists => return Ok(QueryResult::default()),
                 Err(error) => return Err(error),
@@ -297,9 +296,9 @@ async fn ensure_index_absent<T>(
 where
     T: KernelTransaction,
 {
-    if crate::index::index_generation_id(transaction, name)
-        .await
-        .is_ok()
+    if crate::index::index_schema(transaction, name)
+        .await?
+        .is_some()
         && !if_not_exists
     {
         return Err(EngineError::InvalidQuery("Index already exists"));
@@ -322,9 +321,9 @@ where
     T: KernelTransaction,
     R: RowCodec<T>,
 {
-    if crate::index::index_generation_id(transaction, &index_name)
-        .await
-        .is_ok()
+    if crate::index::index_schema(transaction, &index_name)
+        .await?
+        .is_some()
     {
         return if if_not_exists {
             Ok(QueryResult::default())
@@ -384,7 +383,7 @@ where
     T: KernelTransaction,
     R: RowCodec<T>,
 {
-    let table = match table_generation_id(transaction, &table_name).await {
+    let table = match lookup_table_name(transaction, &table_name).await {
         Ok(table) => table,
         Err(_) if if_exists => return Ok(QueryResult::default()),
         Err(error) => return Err(error),
@@ -412,7 +411,7 @@ where
             codec,
             timestamp_provider,
             changes,
-            table,
+            table.clone(),
             position,
             &column,
         )
@@ -434,18 +433,23 @@ where
     T: KernelTransaction,
     R: RowCodec<T>,
 {
-    let index = match crate::index::index_generation_id(transaction, name).await {
-        Ok(index) => index,
-        Err(_) if if_exists => return Ok(()),
-        Err(error) => return Err(error),
-    };
+    if crate::index::index_schema(transaction, name)
+        .await?
+        .is_none()
+    {
+        return if if_exists {
+            Ok(())
+        } else {
+            Err(EngineError::InvalidQuery("Index not found"))
+        };
+    }
     apply_local_change(
         transaction,
         codec,
         changes,
         Change::schema(
             next_uuid(timestamp_provider)?,
-            SchemaChange::TombstoneIndex(index),
+            SchemaChange::TombstoneIndex(name.into()),
         ),
     )
     .await
@@ -476,15 +480,15 @@ where
         return Err(EngineError::InvalidQuery("Index column is out of range"));
     }
 
-    let table = table_generation_id(transaction, &schema.table_name).await?;
-    let columns = schema_columns(transaction, table).await?;
+    let table = lookup_table_name(transaction, &schema.table_name).await?;
+    let columns = schema_columns(transaction, &table).await?;
     let index_columns = schema
         .column_indices
         .iter()
         .map(|position| {
             columns
                 .get(*position as usize)
-                .map(|(id, _)| *id)
+                .map(|(name, _)| name.clone())
                 .ok_or(EngineError::InvalidQuery("Index column is out of range"))
         })
         .collect::<EngineResult<Vec<_>>>()?;
@@ -495,9 +499,8 @@ where
         Change::schema(
             next_uuid(timestamp_provider)?,
             SchemaChange::CreateIndex {
-                index: IndexGenerationId(next_uuid(timestamp_provider)?),
-                label: schema.name,
-                table,
+                index: schema.name,
+                table: table.clone(),
                 unique: schema.unique,
                 columns: index_columns,
             },
@@ -520,7 +523,7 @@ where
     table_schema
         .validate_uuid_primary_key()
         .map_err(EngineError::InvalidQuery)?;
-    let table = TableGenerationId(next_uuid(timestamp_provider)?);
+    let table = table_schema.name.clone();
     apply_local_change(
         transaction,
         codec,
@@ -528,8 +531,7 @@ where
         Change::schema(
             next_uuid(timestamp_provider)?,
             SchemaChange::CreateTable {
-                table,
-                label: table_schema.name.clone(),
+                table: table.clone(),
             },
         ),
     )
@@ -540,7 +542,7 @@ where
             codec,
             timestamp_provider,
             changes,
-            table,
+            table.clone(),
             position,
             column,
         )
@@ -554,7 +556,7 @@ async fn add_column<T, R>(
     codec: &R,
     timestamp_provider: TimestampProvider,
     changes: &mut Vec<Change>,
-    table: TableGenerationId,
+    table: String,
     position: usize,
     column: &ColumnSchema,
 ) -> EngineResult<()>
@@ -572,8 +574,7 @@ where
             next_uuid(timestamp_provider)?,
             SchemaChange::AddColumn {
                 table,
-                column: ColumnGenerationId(next_uuid(timestamp_provider)?),
-                label: column.name.clone(),
+                column: column.name.clone(),
                 value_type: column.r#type,
                 default: column.default.clone(),
                 position,
@@ -598,12 +599,12 @@ where
     let schema = table_schema(transaction, &insert.table).await?;
     let row_value = materialize_insert(&schema, insert.row, timestamp_provider)?;
     let row = row_id(&schema, &row_value)?;
-    let table = table_generation_id(transaction, &insert.table).await?;
+    let table = lookup_table_name(transaction, &insert.table).await?;
     if row_is_deleted(reconciler, transaction, &table, row).await? {
         return Err(EngineError::InvalidQuery("Primary key was deleted"));
     }
     if reconciler
-        .get_row(transaction, table.0, &row)
+        .get_row(transaction, &table, &row)
         .await?
         .is_some()
     {
@@ -611,7 +612,7 @@ where
     }
     let changed_columns: Vec<_> = (0..row_value.values.len()).collect();
     let value = reconciler
-        .encode_row(transaction, table.0, &row, &row_value, &changed_columns)
+        .encode_row(transaction, &table, &row, &row_value, &changed_columns)
         .await?;
     apply_local_change(
         transaction,
@@ -657,14 +658,14 @@ where
 async fn row_is_deleted<T, R>(
     reconciler: &R,
     transaction: &T,
-    table: &TableGenerationId,
+    table: &str,
     row: Uuid,
 ) -> EngineResult<bool>
 where
     T: KernelTransaction,
     R: RowCodec<T>,
 {
-    reconciler.row_is_deleted(transaction, table.0, &row).await
+    reconciler.row_is_deleted(transaction, table, &row).await
 }
 
 async fn insert_values<T, R>(
@@ -769,7 +770,7 @@ where
     )
     .await?;
 
-    let table = table_generation_id(transaction, &update.from.table).await?;
+    let table = lookup_table_name(transaction, &update.from.table).await?;
     for (id, mut row) in rows {
         for (index, value) in &assignments {
             row.values[*index] = value.clone();
@@ -779,13 +780,18 @@ where
         }
         let changed_columns: Vec<_> = assignments.iter().map(|(index, _)| *index).collect();
         let value = reconciler
-            .encode_row(transaction, table.0, &id, &row, &changed_columns)
+            .encode_row(transaction, &table, &id, &row, &changed_columns)
             .await?;
         apply_local_change(
             transaction,
             reconciler,
             changes,
-            Change::row(next_uuid(timestamp_provider)?, table, id, Some(value)),
+            Change::row(
+                next_uuid(timestamp_provider)?,
+                table.clone(),
+                id,
+                Some(value),
+            ),
         )
         .await?;
     }
@@ -822,13 +828,13 @@ where
     )
     .await?;
 
-    let table = table_generation_id(transaction, &delete.from.table).await?;
+    let table = lookup_table_name(transaction, &delete.from.table).await?;
     for (row, _) in rows {
         apply_local_change(
             transaction,
             reconciler,
             changes,
-            Change::row(next_uuid(timestamp_provider)?, table, row, None),
+            Change::row(next_uuid(timestamp_provider)?, table.clone(), row, None),
         )
         .await?;
     }
@@ -846,11 +852,11 @@ where
     T: KernelTransaction,
     R: RowCodec<T>,
 {
-    let table = table_generation_id(transaction, table_name).await?;
+    let table = lookup_table_name(transaction, table_name).await?;
     let row = key_row_id(key)?;
     let schema = table_schema(transaction, table_name).await?;
     reconciler
-        .conflicted_columns(transaction, table.0, &row)
+        .conflicted_columns(transaction, &table, &row)
         .await?
         .into_iter()
         .map(|index| {
@@ -882,14 +888,14 @@ where
             "Resolution requires an assignment",
         ));
     }
-    let table = table_generation_id(transaction, table_name).await?;
+    let table = lookup_table_name(transaction, table_name).await?;
     let row_id = key_row_id(key)?;
     let schema = table_schema(transaction, table_name).await?;
     let conflicts = reconciler
-        .conflicted_columns(transaction, table.0, &row_id)
+        .conflicted_columns(transaction, &table, &row_id)
         .await?;
     let mut row = reconciler
-        .get_row(transaction, table.0, &row_id)
+        .get_row(transaction, &table, &row_id)
         .await?
         .ok_or(EngineError::InvalidQuery("Row not found"))?;
     let mut changed_columns = Vec::with_capacity(values.len());
@@ -914,7 +920,7 @@ where
         changed_columns.push(index);
     }
     let value = reconciler
-        .encode_resolution(transaction, table.0, &row_id, &row, &changed_columns)
+        .encode_resolution(transaction, &table, &row_id, &row, &changed_columns)
         .await?;
     let mut changes = Vec::new();
     apply_local_change(
@@ -938,8 +944,8 @@ where
     T: KernelTransaction,
     R: RowCodec<T>,
 {
-    let table = table_generation_id(transaction, table_name).await?;
-    let stream = reconciler.scan_rows(transaction, table.0);
+    let table = lookup_table_name(transaction, table_name).await?;
+    let stream = reconciler.scan_rows(transaction, &table);
     pin_mut!(stream);
     let mut rows = Vec::new();
 
@@ -1054,8 +1060,8 @@ where
 
     let schema = table_schema(transaction, &select.from.table).await?;
     let projection = projection(&schema, &select.from.table, &select.projection)?;
-    let table = table_generation_id(transaction, &select.from.table).await?;
-    let stream = reconciler.scan_rows(transaction, table.0);
+    let table = lookup_table_name(transaction, &select.from.table).await?;
+    let stream = reconciler.scan_rows(transaction, &table);
     pin_mut!(stream);
     let mut rows = Vec::new();
 
@@ -1156,32 +1162,6 @@ fn compare_expr(
     Ok(Value::Bool(
         !matches!(left, Value::Null) && !matches!(right, Value::Null) && compare(&left, &right),
     ))
-}
-
-pub(crate) async fn table_generation_id<T>(
-    transaction: &T,
-    name: &str,
-) -> EngineResult<TableGenerationId>
-where
-    T: KernelTransaction,
-{
-    table_id(transaction, name).await
-}
-
-pub(crate) async fn column_generation_id<T>(
-    transaction: &T,
-    table_name: &str,
-    column_name: &str,
-) -> EngineResult<ColumnGenerationId>
-where
-    T: KernelTransaction,
-{
-    column_id(
-        transaction,
-        table_generation_id(transaction, table_name).await?,
-        column_name,
-    )
-    .await
 }
 
 pub(crate) async fn table_schema<T>(transaction: &T, name: &str) -> EngineResult<TableSchema>

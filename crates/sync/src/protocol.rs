@@ -1,7 +1,5 @@
 use alloc::{string::String, vec::Vec};
 
-use engine::TableGenerationId;
-
 use crate::{SyncChangeId, SyncKey, SyncManifest, SyncStateUnit};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -16,14 +14,14 @@ pub struct SyncHello {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SyncRowInventory {
-    pub table: TableGenerationId,
+    pub table: String,
     pub row: Uuid,
     pub changes: Vec<SyncChangeId>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SyncIncrementalChange {
-    pub table: TableGenerationId,
+    pub table: String,
     pub row: Uuid,
     pub id: SyncChangeId,
     pub payload: Vec<u8>,
@@ -31,7 +29,7 @@ pub struct SyncIncrementalChange {
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct SyncSnapshotRequest {
-    pub table: TableGenerationId,
+    pub table: String,
     pub row: Uuid,
 }
 
@@ -50,7 +48,7 @@ pub enum SyncMessage {
 impl SyncRowInventory {
     pub fn key(&self) -> SyncKey {
         SyncKey::Row {
-            table: self.table,
+            table: self.table.clone(),
             row: self.row,
         }
     }

@@ -1,4 +1,4 @@
-use alloc::{boxed::Box, vec::Vec};
+use alloc::{boxed::Box, string::String, vec::Vec};
 use core::{future::Future, pin::Pin};
 
 use futures::{StreamExt, pin_mut};
@@ -9,12 +9,11 @@ use value::{Row, Value};
 
 use crate::{
     Engine, EngineError, EngineResult, Kernel, KernelTransaction, RowCodec, RowTable,
-    TableGenerationId,
     catalog::{
         ENGINE_INDEX_FIELDS_STORAGE, ENGINE_INDICES_STORAGE, ENGINE_TABLE_FIELDS_STORAGE,
         ENGINE_TABLES_STORAGE,
     },
-    schema::active_table_ids,
+    schema::active_table_names,
 };
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -34,7 +33,7 @@ pub struct CatalogEntry {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RowMutation {
-    pub table: TableGenerationId,
+    pub table: String,
     pub row: Uuid,
     pub old: Option<Row>,
     pub new: Option<Row>,
@@ -88,12 +87,11 @@ where
                     .key
                     .values
                     .first()
-                    .and_then(Value::as_uuid)
-                    .copied()
+                    .and_then(Value::to_text)
                     .ok_or(EngineError::custom("Invalid catalog key"))?;
-                transaction.ensure_table(id).await?;
+                transaction.ensure_table(&id).await?;
                 if matches!(entry.kind, CatalogEntryKind::Table) {
-                    self.reconciler.ensure_table(&mut transaction, id).await?;
+                    self.reconciler.ensure_table(&mut transaction, &id).await?;
                 }
             }
             Ok::<_, EngineError>(())
@@ -123,7 +121,7 @@ where
 
     pub async fn mutate_transaction<F, O>(
         &self,
-        table: TableGenerationId,
+        table: &str,
         row: Uuid,
         operation: F,
     ) -> EngineResult<O>
@@ -139,11 +137,11 @@ where
         let mut transaction = self.kernel.transaction().await?;
         let result: EngineResult<O> = async {
             crate::schema::ensure(&mut transaction).await?;
-            transaction.ensure_table(table.0).await?;
+            transaction.ensure_table(table).await?;
             self.reconciler
-                .ensure_table(&mut transaction, table.0)
+                .ensure_table(&mut transaction, table)
                 .await?;
-            let old = self.reconciler.get_row(&transaction, table.0, &row).await?;
+            let old = self.reconciler.get_row(&transaction, table, &row).await?;
             let (output, new) =
                 operation(self.reconciler.as_ref(), &mut transaction, old.clone()).await?;
             crate::index::update_row(&mut transaction, table, old.as_ref(), new.as_ref(), false)
@@ -163,11 +161,7 @@ where
         }
     }
 
-    pub async fn mutate_rows<F, O>(
-        &self,
-        rows: &[(TableGenerationId, Uuid)],
-        operation: F,
-    ) -> EngineResult<O>
+    pub async fn mutate_rows<F, O>(&self, rows: &[(String, Uuid)], operation: F) -> EngineResult<O>
     where
         F: for<'a> FnOnce(
             &'a R,
@@ -180,16 +174,16 @@ where
         let result: EngineResult<O> = async {
             crate::schema::ensure(&mut transaction).await?;
             for (table, _) in rows {
-                transaction.ensure_table(table.0).await?;
+                transaction.ensure_table(table).await?;
                 self.reconciler
-                    .ensure_table(&mut transaction, table.0)
+                    .ensure_table(&mut transaction, table)
                     .await?;
             }
             let (output, mutations) = operation(self.reconciler.as_ref(), &mut transaction).await?;
             for mutation in mutations {
                 crate::index::update_row(
                     &mut transaction,
-                    mutation.table,
+                    &mutation.table,
                     mutation.old.as_ref(),
                     mutation.new.as_ref(),
                     false,
@@ -211,10 +205,10 @@ where
         }
     }
 
-    pub async fn table_generations(&self) -> EngineResult<Vec<TableGenerationId>> {
+    pub async fn table_names(&self) -> EngineResult<Vec<String>> {
         let mut transaction = self.kernel.transaction().await?;
         transaction.ensure_table(ENGINE_TABLES_STORAGE).await?;
-        let result = active_table_ids(&transaction).await;
+        let result = active_table_names(&transaction).await;
         transaction.rollback().await?;
         result
     }

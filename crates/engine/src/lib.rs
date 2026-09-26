@@ -9,7 +9,7 @@ mod codec;
 mod engine;
 
 mod executor;
-mod id;
+
 #[cfg(feature = "in-memory")]
 mod in_memory;
 mod index;
@@ -28,7 +28,6 @@ pub use change::{Change, ChangeKey};
 pub use codec::RowCodec;
 pub use engine::{Engine, EngineError, EngineResult, TimestampProvider};
 
-pub use id::{ColumnGenerationId, IndexGenerationId, TableGenerationId};
 #[cfg(feature = "in-memory")]
 pub use in_memory::{InMemoryKernel, InMemoryKernelTransaction};
 pub use kernel::{Kernel, KernelTransaction};

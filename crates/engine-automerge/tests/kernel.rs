@@ -7,14 +7,15 @@ use std::{
 };
 
 use btree_automerge::DocumentChangeKey;
-use engine::{Engine, Kernel, KernelTransaction, RowCodec, RowTable, TableGenerationId};
+use engine::{Engine, Kernel, KernelTransaction, RowCodec, RowTable};
 use engine_automerge::{AutomergeRowCodec, RowMetadata};
 use engine_redb::RedbKernel;
 
 use futures::executor::block_on;
 use query::{
-    AlterTableOperation, DataDefinition, Query, QueryColumn, QueryExpr, QueryExprValue, QueryFrom,
-    QueryInsert, QuerySelect, QueryUpdate, QueryUpdateAssignment, Statement,
+    AlterTableOperation, DataDefinition, Query, QueryColumn, QueryDelete, QueryExpr,
+    QueryExprValue, QueryFrom, QueryInsert, QuerySelect, QueryUpdate, QueryUpdateAssignment,
+    Statement,
 };
 use schema::{ColumnSchema, IndexSchema, TableSchema};
 use sync::{
@@ -78,16 +79,20 @@ fn id(value: u128) -> Option<QueryExpr> {
     ))
 }
 
-async fn people_rows(engine: &Engine<RedbKernel, AutomergeRowCodec>, columns: &[&str]) -> Vec<Row> {
+async fn table_rows(
+    engine: &Engine<RedbKernel, AutomergeRowCodec>,
+    table: &str,
+    columns: &[&str],
+) -> Vec<Row> {
     engine
         .execute(vec![Statement::Query(Query::Select(QuerySelect {
             from: QueryFrom {
-                table: "people".into(),
+                table: table.into(),
                 joins: vec![],
             },
             projection: columns
                 .iter()
-                .map(|column| QueryColumn::new("people".into(), (*column).into()))
+                .map(|column| QueryColumn::new(table.into(), (*column).into()))
                 .collect(),
             ..Default::default()
         }))])
@@ -95,6 +100,10 @@ async fn people_rows(engine: &Engine<RedbKernel, AutomergeRowCodec>, columns: &[
         .unwrap()[0]
         .rows
         .clone()
+}
+
+async fn people_rows(engine: &Engine<RedbKernel, AutomergeRowCodec>, columns: &[&str]) -> Vec<Row> {
+    table_rows(engine, "people", columns).await
 }
 
 async fn sync(
@@ -167,11 +176,11 @@ fn malformed_incremental_batch_does_not_partially_mutate_state() {
 
         update(&source, "city", Value::from("Paris")).await;
         update(&source, "name", Value::from("Grace")).await;
-        let table = source.table_generation_id("people").await.unwrap();
+        let table = "people";
         let row = Uuid::from_u128(1);
         let keys = source
             .read_transaction(|codec, transaction| {
-                Box::pin(codec.change_inventory(transaction, table.0, row))
+                Box::pin(codec.change_inventory(transaction, &table, row))
             })
             .await
             .unwrap();
@@ -179,7 +188,7 @@ fn malformed_incremental_batch_does_not_partially_mutate_state() {
         let key = keys[0].clone();
         let first_payload = source
             .read_transaction(move |codec, transaction| {
-                Box::pin(async move { codec.export_change(transaction, table.0, row, &key).await })
+                Box::pin(async move { codec.export_change(transaction, &table, row, &key).await })
             })
             .await
             .unwrap()
@@ -190,13 +199,13 @@ fn malformed_incremental_batch_does_not_partially_mutate_state() {
             &destination,
             &[
                 SyncIncrementalChange {
-                    table,
+                    table: table.into(),
                     row,
                     id: keys[0].clone(),
                     payload: first_payload,
                 },
                 SyncIncrementalChange {
-                    table,
+                    table: table.into(),
                     row,
                     id: keys[1].clone(),
                     payload: vec![1, 2, 3],
@@ -233,12 +242,12 @@ fn realtime_row_updates_export_one_incremental_change_after_bootstrap() {
             .unwrap();
 
         sync(&source, &destination).await.unwrap();
-        let table = source.table_generation_id("people").await.unwrap();
+        let table = "people";
         let row = Uuid::from_u128(1);
         assert!(
             source
                 .read_transaction(|codec, transaction| {
-                    Box::pin(codec.change_inventory(transaction, table.0, row))
+                    Box::pin(codec.change_inventory(transaction, &table, row))
                 })
                 .await
                 .unwrap()
@@ -248,7 +257,7 @@ fn realtime_row_updates_export_one_incremental_change_after_bootstrap() {
         update(&source, "city", Value::from("Paris")).await;
         let inventory = source
             .read_transaction(|codec, transaction| {
-                Box::pin(codec.change_inventory(transaction, table.0, row))
+                Box::pin(codec.change_inventory(transaction, &table, row))
             })
             .await
             .unwrap();
@@ -259,7 +268,7 @@ fn realtime_row_updates_export_one_incremental_change_after_bootstrap() {
             .read_transaction(move |codec, transaction| {
                 Box::pin(async move {
                     codec
-                        .export_change(transaction, table.0, row, &export_key)
+                        .export_change(transaction, &table, row, &export_key)
                         .await
                 })
             })
@@ -281,7 +290,7 @@ fn realtime_row_updates_export_one_incremental_change_after_bootstrap() {
         assert_ne!(payload, full_state);
 
         let change = SyncIncrementalChange {
-            table,
+            table: table.into(),
             row,
             id: key,
             payload,
@@ -307,17 +316,17 @@ fn logical_rows_persist_in_one_kernel_transaction() {
     let kernel = RedbKernel::new(Arc::new(redb::Database::create(&path).unwrap()));
     block_on(async {
         let reconciler = AutomergeRowCodec::new();
-        let table = TableGenerationId(Uuid::from_u128(100));
+        let table = "table-100";
         let row_id = Uuid::now_v7();
         let mut transaction = kernel.transaction().await.unwrap();
         reconciler
-            .ensure_table(&mut transaction, table.0)
+            .ensure_table(&mut transaction, &table)
             .await
             .unwrap();
         reconciler
             .put_row(
                 &mut transaction,
-                table.0,
+                &table,
                 row_id,
                 Row::new(vec![uuid_value(1), Value::from("Ada")]),
             )
@@ -328,7 +337,7 @@ fn logical_rows_persist_in_one_kernel_transaction() {
         let transaction = kernel.transaction().await.unwrap();
         assert_eq!(
             reconciler
-                .get_row(&transaction, table.0, &row_id)
+                .get_row(&transaction, &table, &row_id)
                 .await
                 .unwrap(),
             Some(Row::new(vec![uuid_value(1), Value::from("Ada")]))
@@ -344,16 +353,16 @@ fn redb_kernel_pairs_with_a_non_automerge_reconciler() {
     let kernel = RedbKernel::new(Arc::new(redb::Database::create(&path).unwrap()));
     block_on(async {
         let reconciler = AutomergeRowCodec::new();
-        let table = TableGenerationId(Uuid::from_u128(101));
+        let table = "table-101";
         let row_id = Uuid::now_v7();
         let row = Row::new(vec![uuid_value(1), Value::from("Ada")]);
         let mut transaction = kernel.transaction().await.unwrap();
         reconciler
-            .ensure_table(&mut transaction, table.0)
+            .ensure_table(&mut transaction, &table)
             .await
             .unwrap();
         reconciler
-            .put_row(&mut transaction, table.0, row_id, row.clone())
+            .put_row(&mut transaction, &table, row_id, row.clone())
             .await
             .unwrap();
         transaction.commit().await.unwrap();
@@ -361,7 +370,7 @@ fn redb_kernel_pairs_with_a_non_automerge_reconciler() {
         let transaction = kernel.transaction().await.unwrap();
         assert_eq!(
             reconciler
-                .get_row(&transaction, table.0, &row_id)
+                .get_row(&transaction, &table, &row_id)
                 .await
                 .unwrap(),
             Some(row)
@@ -377,17 +386,17 @@ fn removing_a_logical_row_writes_a_tombstone() {
     let kernel = RedbKernel::new(Arc::new(redb::Database::create(&path).unwrap()));
     block_on(async {
         let reconciler = AutomergeRowCodec::new();
-        let table = TableGenerationId(Uuid::from_u128(102));
+        let table = "table-102";
         let row_id = Uuid::now_v7();
         let mut transaction = kernel.transaction().await.unwrap();
         reconciler
-            .ensure_table(&mut transaction, table.0)
+            .ensure_table(&mut transaction, &table)
             .await
             .unwrap();
         reconciler
             .put_row(
                 &mut transaction,
-                table.0,
+                &table,
                 row_id,
                 Row::new(vec![uuid_value(1), Value::from("Ada")]),
             )
@@ -395,7 +404,7 @@ fn removing_a_logical_row_writes_a_tombstone() {
             .unwrap();
         assert!(
             reconciler
-                .remove_row(&mut transaction, table.0, &row_id)
+                .remove_row(&mut transaction, &table, &row_id)
                 .await
                 .unwrap()
                 .is_some()
@@ -404,7 +413,7 @@ fn removing_a_logical_row_writes_a_tombstone() {
             reconciler
                 .put_row(
                     &mut transaction,
-                    table.0,
+                    &table,
                     row_id,
                     Row::new(vec![uuid_value(2), Value::from("Grace")]),
                 )
@@ -416,7 +425,7 @@ fn removing_a_logical_row_writes_a_tombstone() {
         let transaction = kernel.transaction().await.unwrap();
         assert!(
             reconciler
-                .get_row(&transaction, table.0, &row_id)
+                .get_row(&transaction, &table, &row_id)
                 .await
                 .unwrap()
                 .is_none()
@@ -424,7 +433,7 @@ fn removing_a_logical_row_writes_a_tombstone() {
         let metadata_key =
             DocumentChangeKey::new_metadata(row_id.as_bytes().to_vec()).encode_ordered();
         let metadata = transaction
-            .get_bytes(table.0, &metadata_key)
+            .get_bytes(&table, &metadata_key)
             .await
             .unwrap()
             .map(|bytes| postcard::from_bytes::<RowMetadata>(&bytes).unwrap())
@@ -560,7 +569,7 @@ fn rollback_discards_catalog_and_logical_row_changes() {
     let kernel = RedbKernel::new(Arc::new(redb::Database::create(&path).unwrap()));
     block_on(async {
         let reconciler = AutomergeRowCodec::new();
-        let table = TableGenerationId(Uuid::from_u128(103));
+        let table = "table-103";
         let row_id = Uuid::now_v7();
         let mut transaction = kernel.transaction().await.unwrap();
         transaction
@@ -568,7 +577,7 @@ fn rollback_discards_catalog_and_logical_row_changes() {
             .await
             .unwrap();
         reconciler
-            .ensure_table(&mut transaction, table.0)
+            .ensure_table(&mut transaction, &table)
             .await
             .unwrap();
         transaction
@@ -582,7 +591,7 @@ fn rollback_discards_catalog_and_logical_row_changes() {
         reconciler
             .put_row(
                 &mut transaction,
-                table.0,
+                &table,
                 row_id,
                 Row::new(vec![uuid_value(1), Value::from("Ada")]),
             )
@@ -781,6 +790,231 @@ fn concurrent_same_column_updates_converge_to_the_automerge_winner() {
             people_rows(&destination, &["name"]).await,
             vec![Row::new(vec![Value::from("Margaret")])]
         );
+    });
+    std::fs::remove_file(source_path).unwrap();
+    std::fs::remove_file(destination_path).unwrap();
+}
+
+#[test]
+fn codec_routes_rows_by_table_name_across_instances_and_reopen() {
+    let path = database_path();
+    block_on(async {
+        {
+            let engine = replica(&path);
+            engine.create_table(people_schema()).await.unwrap();
+            let mut other_schema = people_schema();
+            other_schema.name = "other_people".into();
+            engine.create_table(other_schema).await.unwrap();
+            for (table, name) in [("people", "Ada"), ("other_people", "Grace")] {
+                engine
+                    .execute(vec![Statement::Query(Query::Insert(QueryInsert {
+                        table: table.into(),
+                        row: Row::new(vec![uuid_value(1), Value::from(name), Value::Null]),
+                        returning: None,
+                    }))])
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(
+                table_rows(&engine, "people", &["name"]).await,
+                vec![Row::new(vec![Value::from("Ada")])]
+            );
+            assert_eq!(
+                table_rows(&engine, "other_people", &["name"]).await,
+                vec![Row::new(vec![Value::from("Grace")])]
+            );
+        }
+
+        let database = Arc::new(redb::Database::open(&path).unwrap());
+        let reopened = Engine::new(RedbKernel::new(database), AutomergeRowCodec::new());
+        assert_eq!(
+            table_rows(&reopened, "people", &["name"]).await,
+            vec![Row::new(vec![Value::from("Ada")])]
+        );
+        assert_eq!(
+            table_rows(&reopened, "other_people", &["name"]).await,
+            vec![Row::new(vec![Value::from("Grace")])]
+        );
+    });
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn dropping_and_recreating_a_table_name_retains_rows_and_rebuilds_indexes() {
+    let path = database_path();
+    block_on(async {
+        let engine = replica(&path);
+        let schema = people_schema();
+        engine.create_table(schema.clone()).await.unwrap();
+        engine
+            .execute(vec![Statement::DataDefinition(
+                DataDefinition::CreateIndex {
+                    schema: IndexSchema {
+                        name: "people_by_name".into(),
+                        table_name: "people".into(),
+                        column_indices: vec![1],
+                        unique: true,
+                    },
+                    if_not_exists: false,
+                },
+            )])
+            .await
+            .unwrap();
+        for (id, name, city) in [(1, "Ada", "London"), (2, "Grace", "Paris")] {
+            engine
+                .execute(vec![Statement::Query(Query::Insert(QueryInsert {
+                    table: "people".into(),
+                    row: Row::new(vec![uuid_value(id), Value::from(name), Value::from(city)]),
+                    returning: None,
+                }))])
+                .await
+                .unwrap();
+        }
+        engine
+            .execute(vec![Statement::Query(Query::Delete(QueryDelete {
+                from: QueryFrom {
+                    table: "people".into(),
+                    joins: vec![],
+                },
+                predicate: id(1),
+                returning: None,
+            }))])
+            .await
+            .unwrap();
+
+        engine.drop_table("people").await.unwrap();
+        assert!(engine.table_schema("people").await.is_err());
+        assert!(engine.index_schema("people_by_name").await.is_err());
+        engine.create_table(schema.clone()).await.unwrap();
+
+        assert_eq!(engine.table_schema("people").await.unwrap(), schema);
+        assert_eq!(
+            table_rows(&engine, "people", &["id", "name", "city"]).await,
+            vec![Row::new(vec![
+                uuid_value(2),
+                Value::from("Grace"),
+                Value::from("Paris")
+            ])]
+        );
+        assert_eq!(
+            engine
+                .index_lookup("people_by_name", &Row::new(vec![Value::from("Ada")]))
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            engine
+                .index_lookup("people_by_name", &Row::new(vec![Value::from("Grace")]))
+                .await
+                .unwrap(),
+            Some(Row::new(vec![
+                uuid_value(2),
+                Value::from("Grace"),
+                Value::from("Paris")
+            ]))
+        );
+    });
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn unique_index_rejects_duplicate_values() {
+    let path = database_path();
+    block_on(async {
+        let engine = replica(&path);
+        engine.create_table(people_schema()).await.unwrap();
+        engine
+            .execute(vec![Statement::DataDefinition(
+                DataDefinition::CreateIndex {
+                    schema: IndexSchema {
+                        name: "people_by_name".into(),
+                        table_name: "people".into(),
+                        column_indices: vec![1],
+                        unique: true,
+                    },
+                    if_not_exists: false,
+                },
+            )])
+            .await
+            .unwrap();
+        for id in [1, 2] {
+            let result = engine
+                .execute(vec![Statement::Query(Query::Insert(QueryInsert {
+                    table: "people".into(),
+                    row: Row::new(vec![uuid_value(id), Value::from("Ada"), Value::Null]),
+                    returning: None,
+                }))])
+                .await;
+            if id == 1 {
+                result.unwrap();
+            } else {
+                assert!(result.is_err(), "duplicate unique-index value was accepted");
+            }
+        }
+    });
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn inserting_an_existing_primary_key_is_rejected() {
+    let path = database_path();
+    block_on(async {
+        let engine = replica(&path);
+        engine.create_table(people_schema()).await.unwrap();
+        for name in ["Ada", "Duplicate"] {
+            let result = engine
+                .execute(vec![Statement::Query(Query::Insert(QueryInsert {
+                    table: "people".into(),
+                    row: Row::new(vec![uuid_value(1), Value::from(name), Value::Null]),
+                    returning: None,
+                }))])
+                .await;
+            if name == "Ada" {
+                result.unwrap();
+            } else {
+                assert!(result.is_err(), "duplicate primary key was accepted");
+            }
+        }
+    });
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn dropping_and_recreating_a_table_name_restores_schema_visibility() {
+    let path = database_path();
+    block_on(async {
+        let engine = replica(&path);
+        let schema = people_schema();
+        engine.create_table(schema.clone()).await.unwrap();
+        engine.drop_table("people").await.unwrap();
+        assert!(engine.table_schema("people").await.is_err());
+        engine.create_table(schema.clone()).await.unwrap();
+        assert_eq!(engine.table_schema("people").await.unwrap(), schema);
+    });
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn concurrent_table_drop_and_recreate_converge_between_replicas() {
+    let source_path = database_path();
+    let destination_path = database_path();
+    block_on(async {
+        let source = replica(&source_path);
+        let destination = replica(&destination_path);
+        let schema = people_schema();
+        source.create_table(schema.clone()).await.unwrap();
+        sync(&source, &destination).await.unwrap();
+
+        source.drop_table("people").await.unwrap();
+        destination.drop_table("people").await.unwrap();
+        destination.create_table(schema.clone()).await.unwrap();
+
+        sync(&source, &destination).await.unwrap();
+        sync(&destination, &source).await.unwrap();
+
+        assert!(source.table_schema("people").await.is_err());
+        assert!(destination.table_schema("people").await.is_err());
     });
     std::fs::remove_file(source_path).unwrap();
     std::fs::remove_file(destination_path).unwrap();

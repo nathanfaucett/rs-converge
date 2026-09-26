@@ -16,13 +16,12 @@ use thiserror::Error;
 use query::{QueryParams, QueryResult, Statement, TranslateError, Translator};
 
 use crate::{
-    ColumnGenerationId, IndexGenerationId, TableGenerationId,
     codec::RowCodec,
     executor::{
         execute_statement, resolve_row as resolve_conflicted_row,
         row_conflicts as conflicted_row_columns,
     },
-    index::{index_generation_id, index_schema, lookup as index_lookup},
+    index::{index_schema, lookup as index_lookup},
     kernel::{Kernel, KernelTransaction},
 };
 
@@ -129,32 +128,6 @@ where
         let schema = crate::executor::table_schema(&transaction, name).await?;
         transaction.rollback().await?;
         Ok(schema)
-    }
-
-    pub async fn table_generation_id(&self, name: &str) -> EngineResult<TableGenerationId> {
-        let transaction = self.kernel.transaction().await?;
-        let id = crate::executor::table_generation_id(&transaction, name).await?;
-        transaction.rollback().await?;
-        Ok(id)
-    }
-
-    pub async fn column_generation_id(
-        &self,
-        table_name: &str,
-        column_name: &str,
-    ) -> EngineResult<ColumnGenerationId> {
-        let transaction = self.kernel.transaction().await?;
-        let id =
-            crate::executor::column_generation_id(&transaction, table_name, column_name).await?;
-        transaction.rollback().await?;
-        Ok(id)
-    }
-
-    pub async fn index_generation_id(&self, name: &str) -> EngineResult<IndexGenerationId> {
-        let transaction = self.kernel.transaction().await?;
-        let id = index_generation_id(&transaction, name).await?;
-        transaction.rollback().await?;
-        Ok(id)
     }
 
     pub async fn create_table(&self, table_schema: TableSchema) -> EngineResult<()> {

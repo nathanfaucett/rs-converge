@@ -284,11 +284,12 @@ fn duplicate_incremental_frames_are_idempotent() {
         let row = change.row;
         let id = change.id;
         let payload = change.payload;
+        let table_for_apply = table.clone();
         right
-            .mutate_transaction(table, row, move |codec, transaction, _| {
+            .mutate_transaction(&table, row, move |codec, transaction, _| {
                 Box::pin(async move {
                     let value = codec
-                        .apply_change(transaction, table.0, row, &id, &payload)
+                        .apply_change(transaction, &table_for_apply, row, &id, &payload)
                         .await?;
                     Ok(((), value))
                 })

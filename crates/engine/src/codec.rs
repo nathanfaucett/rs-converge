@@ -13,41 +13,41 @@ where
     fn ensure_table(
         &self,
         transaction: &mut T,
-        table: Uuid,
+        table: &str,
     ) -> impl Future<Output = EngineResult<()>> + Send;
     fn drop_table(
         &self,
         transaction: &mut T,
-        table: Uuid,
+        table: &str,
     ) -> impl Future<Output = EngineResult<()>> + Send;
     fn get_row(
         &self,
         transaction: &T,
-        table: Uuid,
+        table: &str,
         row: &Uuid,
     ) -> impl Future<Output = EngineResult<Option<Row>>> + Send;
     fn scan_rows(
         &self,
         transaction: &T,
-        table: Uuid,
+        table: &str,
     ) -> impl Stream<Item = EngineResult<(Uuid, Row)>> + Send;
     fn put_row(
         &self,
         transaction: &mut T,
-        table: Uuid,
+        table: &str,
         row: Uuid,
         value: Row,
     ) -> impl Future<Output = EngineResult<()>> + Send;
     fn remove_row(
         &self,
         transaction: &mut T,
-        table: Uuid,
+        table: &str,
         row: &Uuid,
     ) -> impl Future<Output = EngineResult<Option<Row>>> + Send;
     fn encode_row(
         &self,
         transaction: &T,
-        table: Uuid,
+        table: &str,
         row: &Uuid,
         value: &Row,
         changed_columns: &[usize],
@@ -55,13 +55,13 @@ where
     fn conflicted_columns(
         &self,
         transaction: &T,
-        table: Uuid,
+        table: &str,
         row: &Uuid,
     ) -> impl Future<Output = EngineResult<Vec<usize>>> + Send;
     fn encode_resolution(
         &self,
         transaction: &T,
-        table: Uuid,
+        table: &str,
         row: &Uuid,
         value: &Row,
         changed_columns: &[usize],
@@ -69,21 +69,20 @@ where
     fn merge_row(
         &self,
         transaction: &mut T,
-        table: Uuid,
+        table: &str,
         row: Uuid,
         value: &[u8],
     ) -> impl Future<Output = EngineResult<Option<Row>>> + Send;
-
     fn delete_row(
         &self,
         transaction: &mut T,
-        table: Uuid,
+        table: &str,
         row: &Uuid,
     ) -> impl Future<Output = EngineResult<Option<Row>>> + Send;
     fn row_is_deleted(
         &self,
         transaction: &T,
-        table: Uuid,
+        table: &str,
         row: &Uuid,
     ) -> impl Future<Output = EngineResult<bool>> + Send;
 }

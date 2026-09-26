@@ -182,36 +182,47 @@ where
     for entry in engine.export_catalog_entries().await? {
         let key = match entry.kind {
             CatalogEntryKind::Table => SyncKey::Table {
-                id: *entry
+                name: entry
                     .key
                     .values
                     .first()
-                    .and_then(value::Value::as_uuid)
-                    .ok_or(EngineError::custom("Invalid catalog key"))?,
+                    .and_then(value::Value::to_text)
+                    .ok_or(EngineError::custom("Invalid catalog key"))?
+                    .into(),
             },
             CatalogEntryKind::TableField => SyncKey::TableField {
-                id: *entry
+                table: entry
                     .key
                     .values
                     .first()
-                    .and_then(value::Value::as_uuid)
-                    .ok_or(EngineError::custom("Invalid catalog key"))?,
+                    .and_then(value::Value::to_text)
+                    .ok_or(EngineError::custom("Invalid catalog key"))?
+                    .into(),
+                column: entry
+                    .key
+                    .values
+                    .get(1)
+                    .and_then(value::Value::to_text)
+                    .ok_or(EngineError::custom("Invalid catalog key"))?
+                    .into(),
             },
             CatalogEntryKind::Index => SyncKey::Index {
-                id: *entry
+                name: entry
                     .key
                     .values
                     .first()
-                    .and_then(value::Value::as_uuid)
-                    .ok_or(EngineError::custom("Invalid catalog key"))?,
+                    .and_then(value::Value::to_text)
+                    .ok_or(EngineError::custom("Invalid catalog key"))?
+                    .into(),
             },
             CatalogEntryKind::IndexField => SyncKey::IndexField {
-                index: *entry
+                index: entry
                     .key
                     .values
                     .first()
-                    .and_then(value::Value::as_uuid)
-                    .ok_or(EngineError::custom("Invalid catalog key"))?,
+                    .and_then(value::Value::to_text)
+                    .ok_or(EngineError::custom("Invalid catalog key"))?
+                    .into(),
                 position: u32::try_from(
                     entry
                         .key
@@ -226,27 +237,36 @@ where
         let state = postcard::to_allocvec(&entry.value).map_err(EngineError::custom)?;
         units.push(SyncStateUnit::new(key, state, Vec::new()));
     }
-    for table in engine.table_generations().await? {
+    for table in engine.table_names().await? {
+        let table_for_rows = table.clone();
         let rows = engine
-            .read_transaction(|codec, transaction| Box::pin(codec.row_ids(transaction, table.0)))
+            .read_transaction(|codec, transaction| {
+                Box::pin(async move { codec.row_ids(transaction, &table_for_rows).await })
+            })
             .await?;
         for row in rows {
+            let table_for_row = table.clone();
             let (state, metadata) = engine
                 .read_transaction(|codec, transaction| {
                     Box::pin(async move {
                         Ok((
                             codec
-                                .export_state(transaction, table.0, row)
+                                .export_state(transaction, &table_for_row, row)
                                 .await?
                                 .unwrap_or_default(),
-                            codec.export_metadata(transaction, table.0, row).await?,
+                            codec
+                                .export_metadata(transaction, &table_for_row, row)
+                                .await?,
                         ))
                     })
                 })
                 .await?;
             if !state.is_empty() || !metadata.is_empty() {
                 units.push(SyncStateUnit::new(
-                    SyncKey::Row { table, row },
+                    SyncKey::Row {
+                        table: table.clone(),
+                        row,
+                    },
                     state,
                     metadata,
                 ));
@@ -270,19 +290,20 @@ where
     }
     match unit.key {
         SyncKey::Row { table, row } => {
+            let table_for_merge = table.clone();
             engine
-                .mutate_transaction(table, row, |codec, transaction, _| {
+                .mutate_transaction(&table, row, |codec, transaction, _| {
                     Box::pin(async move {
                         if !unit.metadata.is_empty() {
                             codec
-                                .merge_metadata(transaction, table.0, row, &unit.metadata)
+                                .merge_metadata(transaction, &table_for_merge, row, &unit.metadata)
                                 .await?;
                         }
                         let value = if unit.state.is_empty() {
                             None
                         } else {
                             codec
-                                .merge_state(transaction, table.0, row, &unit.state)
+                                .merge_state(transaction, &table_for_merge, row, &unit.state)
                                 .await?
                         };
                         Ok(((), value))
@@ -292,22 +313,22 @@ where
         }
         key => {
             let (kind, entry_key) = match key {
-                SyncKey::Table { id } => (
+                SyncKey::Table { name } => (
                     CatalogEntryKind::Table,
-                    value::Row::new(vec![value::Value::Uuid(id)]),
+                    value::Row::new(vec![value::Value::from(name)]),
                 ),
-                SyncKey::TableField { id } => (
+                SyncKey::TableField { table, column } => (
                     CatalogEntryKind::TableField,
-                    value::Row::new(vec![value::Value::Uuid(id)]),
+                    value::Row::new(vec![value::Value::from(table), value::Value::from(column)]),
                 ),
-                SyncKey::Index { id } => (
+                SyncKey::Index { name } => (
                     CatalogEntryKind::Index,
-                    value::Row::new(vec![value::Value::Uuid(id)]),
+                    value::Row::new(vec![value::Value::from(name)]),
                 ),
                 SyncKey::IndexField { index, position } => (
                     CatalogEntryKind::IndexField,
                     value::Row::new(vec![
-                        value::Value::Uuid(index),
+                        value::Value::from(index),
                         value::Value::Integer(i64::from(position)),
                     ]),
                 ),
@@ -344,7 +365,7 @@ where
     validate_change_batch(batch)?;
     let rows = batch
         .iter()
-        .map(|change| (change.table, change.row))
+        .map(|change| (change.table.clone(), change.row))
         .collect::<Vec<_>>();
     let changes = batch.to_vec();
     engine
@@ -353,19 +374,19 @@ where
                 let mut mutations = Vec::with_capacity(changes.len());
                 for change in &changes {
                     let old = codec
-                        .get_row(transaction, change.table.0, &change.row)
+                        .get_row(transaction, &change.table, &change.row)
                         .await?;
                     let new = codec
                         .apply_change(
                             transaction,
-                            change.table.0,
+                            &change.table,
                             change.row,
                             &change.id,
                             &change.payload,
                         )
                         .await?;
                     mutations.push(engine::RowMutation {
-                        table: change.table,
+                        table: change.table.clone(),
                         row: change.row,
                         old,
                         new,
@@ -396,15 +417,15 @@ where
 {
     let mut result = Vec::new();
     for unit in units {
-        let SyncKey::Row { table, row } = unit.key else {
+        let SyncKey::Row { table, row } = unit.key.clone() else {
             continue;
         };
         result.push(SyncRowInventory {
-            table,
+            table: table.clone(),
             row,
             changes: engine
                 .read_transaction(|codec, transaction| {
-                    Box::pin(codec.change_inventory(transaction, table.0, row))
+                    Box::pin(async move { codec.change_inventory(transaction, &table, row).await })
                 })
                 .await?,
         });
@@ -475,9 +496,14 @@ where
             outbound.snapshots.push(unit);
             continue;
         };
+        let table_for_inventory = table.clone();
         let local = engine
             .read_transaction(|codec, transaction| {
-                Box::pin(codec.change_inventory(transaction, table.0, row))
+                Box::pin(async move {
+                    codec
+                        .change_inventory(transaction, &table_for_inventory, row)
+                        .await
+                })
             })
             .await?;
         let mut exported = 0;
@@ -486,18 +512,19 @@ where
                 continue;
             }
             let export_id = key.clone();
+            let table_for_export = table.clone();
             if let Some(payload) = engine
                 .read_transaction(move |codec, transaction| {
                     Box::pin(async move {
                         codec
-                            .export_change(transaction, table.0, row, &export_id)
+                            .export_change(transaction, &table_for_export, row, &export_id)
                             .await
                     })
                 })
                 .await?
             {
                 outbound.changes.push(SyncIncrementalChange {
-                    table,
+                    table: table.clone(),
                     row,
                     id: key,
                     payload,
@@ -590,11 +617,11 @@ where
             .read_transaction(|codec, transaction| {
                 Box::pin(async move {
                     let state = codec
-                        .export_state(transaction, request.table.0, request.row)
+                        .export_state(transaction, &request.table, request.row)
                         .await?
                         .unwrap_or_default();
                     let metadata = codec
-                        .export_metadata(transaction, request.table.0, request.row)
+                        .export_metadata(transaction, &request.table, request.row)
                         .await?;
                     Ok(if state.is_empty() && metadata.is_empty() {
                         None
@@ -716,7 +743,7 @@ where
                     if matches!(error, EngineError::SyncDependencyUnavailable) {
                         for change in batch {
                             count.requests.push(SyncSnapshotRequest {
-                                table: change.table,
+                                table: change.table.clone(),
                                 row: change.row,
                             });
                             count.pending.push(change);

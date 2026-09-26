@@ -1,4 +1,8 @@
-use alloc::{string::String, vec, vec::Vec};
+use alloc::{
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
 
 use futures::{StreamExt, pin_mut};
 use schema::{ColumnSchema, TableSchema};
@@ -6,8 +10,7 @@ use serde::{Deserialize, Serialize};
 use value::{Row, Value, ValueType};
 
 use crate::{
-    ColumnGenerationId, EngineError, EngineResult, IndexGenerationId, KernelTransaction, RowTable,
-    TableGenerationId,
+    EngineError, EngineResult, KernelTransaction, RowTable,
     catalog::{
         ENGINE_INDEX_FIELDS_STORAGE, ENGINE_INDICES_STORAGE, ENGINE_TABLE_FIELDS_STORAGE,
         ENGINE_TABLES_STORAGE,
@@ -17,34 +20,31 @@ use crate::{
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum SchemaChange {
     CreateTable {
-        table: TableGenerationId,
-        label: String,
+        table: String,
     },
     AddColumn {
-        table: TableGenerationId,
-        column: ColumnGenerationId,
-        label: String,
+        table: String,
+        column: String,
         value_type: ValueType,
         default: Value,
         position: u32,
         primary_key: bool,
     },
     CreateIndex {
-        index: IndexGenerationId,
-        label: String,
-        table: TableGenerationId,
+        index: String,
+        table: String,
         unique: bool,
-        columns: Vec<ColumnGenerationId>,
+        columns: Vec<String>,
     },
-    TombstoneTable(TableGenerationId),
-    TombstoneColumn(ColumnGenerationId),
-    TombstoneIndex(IndexGenerationId),
+    TombstoneTable(String),
+    TombstoneColumn {
+        table: String,
+        column: String,
+    },
+    TombstoneIndex(String),
 }
 
-pub(crate) async fn ensure<T>(transaction: &mut T) -> EngineResult<()>
-where
-    T: KernelTransaction,
-{
+pub(crate) async fn ensure<T: KernelTransaction>(transaction: &mut T) -> EngineResult<()> {
     for table in [
         ENGINE_TABLES_STORAGE,
         ENGINE_TABLE_FIELDS_STORAGE,
@@ -56,8 +56,16 @@ where
     Ok(())
 }
 
-fn key(id: uuid::Uuid) -> Row {
-    Row::new(vec![Value::Uuid(id)])
+fn text(value: &str) -> Value {
+    Value::from(value)
+}
+
+fn table_key(table: &str) -> Row {
+    Row::new(vec![text(table)])
+}
+
+fn column_key(table: &str, column: &str) -> Row {
+    Row::new(vec![text(table), text(column)])
 }
 
 fn deleted(value: &Row, position: usize) -> EngineResult<bool> {
@@ -69,41 +77,55 @@ fn deleted(value: &Row, position: usize) -> EngineResult<bool> {
     }
 }
 
-async fn table_deleted<T>(transaction: &T, id: uuid::Uuid) -> EngineResult<bool>
-where
-    T: KernelTransaction,
-{
+async fn set_deleted<T: KernelTransaction>(
+    transaction: &mut T,
+    catalog: &str,
+    key: Row,
+    position: usize,
+) -> EngineResult<bool> {
+    let mut value = transaction
+        .get_entry(catalog, &key)
+        .await?
+        .ok_or(EngineError::InvalidQuery("Schema name not found"))?;
+    if deleted(&value, position)? {
+        return Ok(false);
+    }
+    value.values.resize(position + 1, Value::Bool(false));
+    value.values[position] = Value::Bool(true);
+    transaction.put_entry(catalog, key, value).await?;
+    Ok(false)
+}
+
+async fn table_deleted<T: KernelTransaction>(transaction: &T, table: &str) -> EngineResult<bool> {
     let Some(value) = transaction
-        .get_entry(ENGINE_TABLES_STORAGE, &key(id))
+        .get_entry(ENGINE_TABLES_STORAGE, &table_key(table))
         .await?
     else {
         return Ok(false);
     };
-    deleted(&value, 1)
+    deleted(&value, 0)
 }
 
-async fn column_deleted<T>(transaction: &T, id: uuid::Uuid) -> EngineResult<bool>
-where
-    T: KernelTransaction,
-{
-    let Some(value) = transaction
-        .get_entry(ENGINE_TABLE_FIELDS_STORAGE, &key(id))
-        .await?
-    else {
-        return Ok(false);
-    };
-    deleted(&value, 6)
-}
-
-pub(crate) async fn index_field_deleted<T>(
+async fn column_deleted<T: KernelTransaction>(
     transaction: &T,
-    index: uuid::Uuid,
+    table: &str,
+    column: &str,
+) -> EngineResult<bool> {
+    let Some(value) = transaction
+        .get_entry(ENGINE_TABLE_FIELDS_STORAGE, &column_key(table, column))
+        .await?
+    else {
+        return Ok(false);
+    };
+    deleted(&value, 4)
+}
+
+pub(crate) async fn index_field_deleted<T: KernelTransaction>(
+    transaction: &T,
+    index: &str,
     position: i64,
-) -> EngineResult<bool>
-where
-    T: KernelTransaction,
-{
-    let key = Row::new(vec![Value::Uuid(index), Value::Integer(position)]);
+) -> EngineResult<bool> {
+    let key = Row::new(vec![text(index), Value::Integer(position)]);
     let Some(value) = transaction
         .get_entry(ENGINE_INDEX_FIELDS_STORAGE, &key)
         .await?
@@ -113,143 +135,126 @@ where
     deleted(&value, 1)
 }
 
-pub(crate) async fn index_deleted<T>(transaction: &T, id: uuid::Uuid) -> EngineResult<bool>
-where
-    T: KernelTransaction,
-{
+pub(crate) async fn index_deleted<T: KernelTransaction>(
+    transaction: &T,
+    index: &str,
+) -> EngineResult<bool> {
     let Some(value) = transaction
-        .get_entry(ENGINE_INDICES_STORAGE, &key(id))
+        .get_entry(ENGINE_INDICES_STORAGE, &table_key(index))
         .await?
     else {
         return Ok(false);
     };
-    deleted(&value, 3)
+    deleted(&value, 2)
 }
 
-pub(crate) async fn materialize<T>(transaction: &mut T, change: &SchemaChange) -> EngineResult<bool>
-where
-    T: KernelTransaction,
-{
+pub(crate) async fn materialize<T: KernelTransaction>(
+    transaction: &mut T,
+    change: &SchemaChange,
+) -> EngineResult<bool> {
     match change {
-        SchemaChange::CreateTable { table, label } => {
-            let key = key(table.0);
-            let value = Row::new(vec![Value::from(label.as_str()), Value::Bool(false)]);
-            match transaction.get_entry(ENGINE_TABLES_STORAGE, &key).await? {
-                Some(existing)
-                    if existing.values.first() != value.values.first()
-                        || table_deleted(transaction, table.0).await? =>
-                {
-                    if existing.values.first() != value.values.first() {
-                        Err(EngineError::custom("Conflicting table generation fact"))
-                    } else {
-                        Ok(false)
-                    }
-                }
-                Some(_) => Ok(false),
-                None => transaction
+        SchemaChange::CreateTable { table } => {
+            let key = table_key(table);
+            if let Some(mut value) = transaction.get_entry(ENGINE_TABLES_STORAGE, &key).await? {
+                value.values.resize(1, Value::Bool(false));
+                value.values[0] = Value::Bool(false);
+                transaction
                     .put_entry(ENGINE_TABLES_STORAGE, key, value)
-                    .await
-                    .map(|_| false),
+                    .await?;
+            } else {
+                transaction
+                    .put_entry(
+                        ENGINE_TABLES_STORAGE,
+                        key,
+                        Row::new(vec![Value::Bool(false)]),
+                    )
+                    .await?;
             }
+            Ok(false)
         }
         SchemaChange::AddColumn {
             table,
             column,
-            label,
             value_type,
             default,
             position,
             primary_key,
         } => {
-            let key = key(column.0);
-            let value = Row::new(vec![
-                Value::Uuid(table.0),
-                Value::from(label.as_str()),
-                (*value_type).into(),
-                default.clone(),
-                Value::Integer(i64::from(*position)),
-                Value::Bool(*primary_key),
-                Value::Bool(false),
-            ]);
-            match transaction
+            let key = column_key(table, column);
+            if transaction
                 .get_entry(ENGINE_TABLE_FIELDS_STORAGE, &key)
                 .await?
+                .is_some()
             {
-                Some(existing)
-                    if existing.values.len() < 6
-                        || existing.values[..6] != value.values[..6]
-                        || column_deleted(transaction, column.0).await? =>
-                {
-                    if existing.values.len() < 6 || existing.values[..6] != value.values[..6] {
-                        Err(EngineError::custom("Conflicting column generation fact"))
-                    } else {
-                        Ok(false)
-                    }
-                }
-                Some(_) => Ok(false),
-                None => transaction
-                    .put_entry(ENGINE_TABLE_FIELDS_STORAGE, key, value)
-                    .await
-                    .map(|_| false),
+                return Ok(false);
             }
+            transaction
+                .put_entry(
+                    ENGINE_TABLE_FIELDS_STORAGE,
+                    key,
+                    Row::new(vec![
+                        (*value_type).into(),
+                        default.clone(),
+                        Value::Integer(i64::from(*position)),
+                        Value::Bool(*primary_key),
+                        Value::Bool(false),
+                    ]),
+                )
+                .await?;
+            Ok(false)
         }
         SchemaChange::CreateIndex {
             index,
-            label,
             table,
             unique,
             columns,
         } => {
-            let key = key(index.0);
-            let value = Row::new(vec![
-                Value::from(label.as_str()),
-                Value::Uuid(table.0),
-                Value::Bool(*unique),
-                Value::Bool(false),
-            ]);
-            match transaction.get_entry(ENGINE_INDICES_STORAGE, &key).await? {
-                Some(existing) if existing != value => {
-                    Err(EngineError::custom("Conflicting index generation fact"))
-                }
-                Some(_) => Ok(false),
-                None => {
-                    transaction.ensure_table(index.0).await?;
-                    transaction
-                        .put_entry(ENGINE_INDICES_STORAGE, key, value)
-                        .await?;
-                    for (position, column) in columns.iter().enumerate() {
-                        transaction
-                            .put_entry(
-                                ENGINE_INDEX_FIELDS_STORAGE,
-                                Row::new(vec![
-                                    Value::Uuid(index.0),
-                                    Value::Integer(i64::try_from(position).map_err(|_| {
-                                        EngineError::custom("Index column position overflow")
-                                    })?),
-                                ]),
-                                Row::new(vec![Value::Uuid(column.0), Value::Bool(false)]),
-                            )
-                            .await?;
-                    }
-                    Ok(false)
-                }
+            let key = table_key(index);
+            transaction.ensure_table(index).await?;
+            transaction
+                .put_entry(
+                    ENGINE_INDICES_STORAGE,
+                    key,
+                    Row::new(vec![text(table), Value::Bool(*unique), Value::Bool(false)]),
+                )
+                .await?;
+            for (position, column) in columns.iter().enumerate() {
+                transaction
+                    .put_entry(
+                        ENGINE_INDEX_FIELDS_STORAGE,
+                        Row::new(vec![
+                            text(index),
+                            Value::Integer(i64::try_from(position).map_err(|_| {
+                                EngineError::custom("Index column position overflow")
+                            })?),
+                        ]),
+                        Row::new(vec![text(column), Value::Bool(false)]),
+                    )
+                    .await?;
             }
+            Ok(false)
         }
         SchemaChange::TombstoneTable(table) => {
-            update_deleted(transaction, ENGINE_TABLES_STORAGE, table.0, 1).await
+            set_deleted(transaction, ENGINE_TABLES_STORAGE, table_key(table), 0).await
         }
-        SchemaChange::TombstoneColumn(column) => {
-            update_deleted(transaction, ENGINE_TABLE_FIELDS_STORAGE, column.0, 6).await
+        SchemaChange::TombstoneColumn { table, column } => {
+            set_deleted(
+                transaction,
+                ENGINE_TABLE_FIELDS_STORAGE,
+                column_key(table, column),
+                4,
+            )
+            .await
         }
         SchemaChange::TombstoneIndex(index) => {
-            update_deleted(transaction, ENGINE_INDICES_STORAGE, index.0, 3).await?;
+            set_deleted(transaction, ENGINE_INDICES_STORAGE, table_key(index), 2).await?;
             let keys = {
-                let fields = transaction.scan_entries_owned(ENGINE_INDEX_FIELDS_STORAGE);
-                pin_mut!(fields);
+                let entries = transaction.scan_entries_owned(ENGINE_INDEX_FIELDS_STORAGE);
+                pin_mut!(entries);
                 let mut keys = Vec::new();
-                while let Some(entry) = fields.next().await {
+                while let Some(entry) = entries.next().await {
                     let (key, _) = entry?;
-                    if key.values.first().and_then(Value::as_uuid) == Some(&index.0) {
+                    if key.values.first().and_then(Value::as_text) == Some(index.as_str()) {
                         keys.push(key);
                     }
                 }
@@ -260,185 +265,106 @@ where
                     .get_entry(ENGINE_INDEX_FIELDS_STORAGE, &key)
                     .await?
                     .ok_or(EngineError::InvalidQuery("Index field not found"))?;
-                if value.values.len() <= 1 {
-                    value.values.resize(2, Value::Bool(false));
-                }
+                value.values.resize(2, Value::Bool(false));
                 value.values[1] = Value::Bool(true);
                 transaction
                     .put_entry(ENGINE_INDEX_FIELDS_STORAGE, key, value)
                     .await?;
             }
-            transaction.drop_table(index.0).await?;
+            transaction.drop_table(index).await?;
             Ok(false)
         }
     }
 }
 
-async fn update_deleted<T>(
-    transaction: &mut T,
-    table: uuid::Uuid,
-    id: uuid::Uuid,
-    position: usize,
-) -> EngineResult<bool>
-where
-    T: KernelTransaction,
-{
-    let key = key(id);
-    let mut value = transaction
-        .get_entry(table, &key)
-        .await?
-        .ok_or(EngineError::InvalidQuery("Schema generation not found"))?;
-    if deleted(&value, position)? {
-        return Ok(false);
-    }
-    if value.values.len() <= position {
-        value.values.resize(position + 1, Value::Bool(false));
-    }
-    value.values[position] = Value::Bool(true);
-    transaction
-        .put_entry(table, key, value)
-        .await
-        .map(|_| false)
-}
-
-pub(crate) async fn table_id<T>(transaction: &T, label: &str) -> EngineResult<TableGenerationId>
-where
-    T: KernelTransaction,
-{
-    let entries = transaction.scan_entries(ENGINE_TABLES_STORAGE);
-    pin_mut!(entries);
-    let mut winner = None;
-    while let Some(entry) = entries.next().await {
-        let (key, value) = entry?;
-        let Some(id) = key.values.first().and_then(Value::as_uuid).copied() else {
-            return Err(EngineError::custom("Invalid table generation"));
-        };
-        if value.values.first().and_then(Value::as_text) == Some(label)
-            && !table_deleted(transaction, id).await?
-        {
-            winner = Some(winner.map_or(id, |current: uuid::Uuid| current.min(id)));
-        }
-    }
-    winner
-        .map(TableGenerationId)
-        .ok_or(EngineError::InvalidQuery("Table not found"))
-}
-
-pub(crate) async fn columns<T>(
+pub(crate) async fn lookup_table_name<T: KernelTransaction>(
     transaction: &T,
-    table: TableGenerationId,
-) -> EngineResult<Vec<(ColumnGenerationId, ColumnSchema)>>
-where
-    T: KernelTransaction,
-{
-    if table_deleted(transaction, table.0).await? {
+    name: &str,
+) -> EngineResult<String> {
+    let Some(_) = transaction
+        .get_entry(ENGINE_TABLES_STORAGE, &table_key(name))
+        .await?
+    else {
+        return Err(EngineError::InvalidQuery("Table not found"));
+    };
+    if table_deleted(transaction, name).await? {
+        return Err(EngineError::InvalidQuery("Table not found"));
+    }
+    Ok(name.to_string())
+}
+
+pub(crate) async fn columns<T: KernelTransaction>(
+    transaction: &T,
+    table: &str,
+) -> EngineResult<Vec<(String, ColumnSchema)>> {
+    if table_deleted(transaction, table).await? {
         return Err(EngineError::InvalidQuery("Table not found"));
     }
     let entries = transaction.scan_entries(ENGINE_TABLE_FIELDS_STORAGE);
     pin_mut!(entries);
-    let mut all = Vec::new();
+    let mut result = Vec::new();
     while let Some(entry) = entries.next().await {
         let (key, value) = entry?;
-        let Some(id) = key.values.first().and_then(Value::as_uuid).copied() else {
-            return Err(EngineError::custom("Invalid column generation"));
-        };
-        if value.values.first().and_then(Value::as_uuid) != Some(&table.0)
-            || column_deleted(transaction, id).await?
-        {
+        if key.values.first().and_then(Value::as_text) != Some(table) {
             continue;
         }
-        let label = value
-            .values
-            .get(1)
-            .and_then(Value::to_text)
-            .ok_or(EngineError::custom("Invalid column label"))?;
+        let Some(name) = key.values.get(1).and_then(Value::to_text) else {
+            return Err(EngineError::custom("Invalid column name"));
+        };
+        if column_deleted(transaction, table, &name).await? {
+            continue;
+        }
         let value_type = value
             .values
-            .get(2)
+            .first()
             .and_then(Value::to_type)
             .ok_or(EngineError::custom("Invalid column type"))?;
         let default = value
             .values
-            .get(3)
+            .get(1)
             .cloned()
             .ok_or(EngineError::custom("Invalid column default"))?;
         let position = value
             .values
-            .get(4)
+            .get(2)
             .and_then(Value::to_integer)
             .ok_or(EngineError::custom("Invalid column position"))?;
         let primary_key = value
             .values
-            .get(5)
+            .get(3)
             .and_then(Value::to_bool)
             .ok_or(EngineError::custom("Invalid column primary key"))?;
-        all.push((
+        result.push((
             position,
-            id,
-            label,
+            name.clone(),
             ColumnSchema {
-                name: String::new(),
+                name,
                 r#type: value_type,
                 default,
                 primary_key,
             },
         ));
     }
-    all.sort_by_key(|(_, id, _, _)| *id);
-    let mut winners = Vec::new();
-    for field in all {
-        if winners.iter().any(|(_, _, label, _)| *label == field.2) {
-            continue;
-        }
-        winners.push(field);
-    }
-    winners.sort_by_key(|(position, id, _, _)| (*position, *id));
-    Ok(winners
+    result.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+    Ok(result
         .into_iter()
-        .map(|(_, id, label, mut column)| {
-            column.name = label;
-            (ColumnGenerationId(id), column)
-        })
+        .map(|(_, name, schema)| (name, schema))
         .collect())
 }
 
-pub(crate) async fn table_schema<T>(transaction: &T, label: &str) -> EngineResult<TableSchema>
-where
-    T: KernelTransaction,
-{
-    let table = table_id(transaction, label).await?;
-    table_schema_for(transaction, table, String::from(label)).await
+pub(crate) async fn table_schema<T: KernelTransaction>(
+    transaction: &T,
+    name: &str,
+) -> EngineResult<TableSchema> {
+    lookup_table_name(transaction, name).await?;
+    table_schema_for(transaction, name, name.to_string()).await
 }
 
-pub(crate) async fn table_label<T>(
+pub(crate) async fn table_schema_for<T: KernelTransaction>(
     transaction: &T,
-    table: TableGenerationId,
-) -> EngineResult<String>
-where
-    T: KernelTransaction,
-{
-    let value = transaction
-        .get_entry(ENGINE_TABLES_STORAGE, &key(table.0))
-        .await?
-        .ok_or(EngineError::InvalidQuery("Table not found"))?;
-    if table_deleted(transaction, table.0).await? {
-        return Err(EngineError::InvalidQuery("Table not found"));
-    }
-    value
-        .values
-        .first()
-        .and_then(Value::to_text)
-        .ok_or(EngineError::custom("Invalid table label"))
-}
-
-pub(crate) async fn table_schema_for<T>(
-    transaction: &T,
-    table: TableGenerationId,
+    table: &str,
     name: String,
-) -> EngineResult<TableSchema>
-where
-    T: KernelTransaction,
-{
+) -> EngineResult<TableSchema> {
     Ok(TableSchema {
         name,
         columns: columns(transaction, table)
@@ -449,39 +375,162 @@ where
     })
 }
 
-pub(crate) async fn column_id<T>(
+pub(crate) async fn active_table_names<T: KernelTransaction>(
     transaction: &T,
-    table: TableGenerationId,
-    label: &str,
-) -> EngineResult<ColumnGenerationId>
-where
-    T: KernelTransaction,
-{
-    columns(transaction, table)
-        .await?
-        .into_iter()
-        .find_map(|(id, column)| (column.name == label).then_some(id))
-        .ok_or(EngineError::InvalidQuery("Column not found"))
-}
-
-pub(crate) async fn active_table_ids<T>(transaction: &T) -> EngineResult<Vec<TableGenerationId>>
-where
-    T: KernelTransaction,
-{
+) -> EngineResult<Vec<String>> {
     let entries = transaction.scan_entries(ENGINE_TABLES_STORAGE);
     pin_mut!(entries);
     let mut tables = Vec::new();
     while let Some(entry) = entries.next().await {
         let (key, _) = entry?;
-        let id = key
+        let name = key
             .values
             .first()
-            .and_then(Value::as_uuid)
-            .copied()
-            .ok_or(EngineError::custom("Invalid table generation"))?;
-        if !table_deleted(transaction, id).await? {
-            tables.push(TableGenerationId(id));
+            .and_then(Value::to_text)
+            .ok_or(EngineError::custom("Invalid table name"))?;
+        if !table_deleted(transaction, &name).await? {
+            tables.push(name);
         }
     }
     Ok(tables)
+}
+
+#[cfg(all(test, feature = "in-memory"))]
+mod tests {
+    use futures::executor::block_on;
+    use value::ValueType;
+
+    use super::{
+        SchemaChange, active_table_names, columns, index_deleted, materialize, table_schema,
+    };
+    use crate::{InMemoryKernel, Kernel, KernelTransaction, index::index_schema};
+
+    #[test]
+    fn dropped_schema_names_are_hidden_and_can_be_recreated() {
+        block_on(async {
+            let kernel = InMemoryKernel::new();
+            let mut transaction = kernel.transaction().await.unwrap();
+            super::ensure(&mut transaction).await.unwrap();
+            assert!(table_schema(&transaction, "missing").await.is_err());
+            materialize(
+                &mut transaction,
+                &SchemaChange::CreateTable {
+                    table: "items".into(),
+                },
+            )
+            .await
+            .unwrap();
+            materialize(
+                &mut transaction,
+                &SchemaChange::AddColumn {
+                    table: "items".into(),
+                    column: "id".into(),
+                    value_type: ValueType::Uuid,
+                    default: value::Value::Null,
+                    position: 0,
+                    primary_key: true,
+                },
+            )
+            .await
+            .unwrap();
+            materialize(
+                &mut transaction,
+                &SchemaChange::TombstoneColumn {
+                    table: "items".into(),
+                    column: "id".into(),
+                },
+            )
+            .await
+            .unwrap();
+            materialize(
+                &mut transaction,
+                &SchemaChange::TombstoneTable("items".into()),
+            )
+            .await
+            .unwrap();
+
+            assert!(table_schema(&transaction, "items").await.is_err());
+            assert!(columns(&transaction, "items").await.is_err());
+            assert!(active_table_names(&transaction).await.unwrap().is_empty());
+
+            materialize(
+                &mut transaction,
+                &SchemaChange::CreateTable {
+                    table: "items".into(),
+                },
+            )
+            .await
+            .unwrap();
+            assert!(table_schema(&transaction, "items").await.is_ok());
+            assert!(columns(&transaction, "items").await.unwrap().is_empty());
+            assert_eq!(active_table_names(&transaction).await.unwrap(), ["items"]);
+            transaction.rollback().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn dropped_index_is_hidden_and_recreation_resets_its_schema() {
+        block_on(async {
+            let kernel = InMemoryKernel::new();
+            let mut transaction = kernel.transaction().await.unwrap();
+            super::ensure(&mut transaction).await.unwrap();
+            assert!(
+                index_schema(&transaction, "missing")
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            materialize(
+                &mut transaction,
+                &SchemaChange::CreateTable {
+                    table: "items".into(),
+                },
+            )
+            .await
+            .unwrap();
+            materialize(
+                &mut transaction,
+                &SchemaChange::AddColumn {
+                    table: "items".into(),
+                    column: "id".into(),
+                    value_type: ValueType::Uuid,
+                    default: value::Value::Null,
+                    position: 0,
+                    primary_key: true,
+                },
+            )
+            .await
+            .unwrap();
+            let index = SchemaChange::CreateIndex {
+                index: "items_by_id".into(),
+                table: "items".into(),
+                unique: true,
+                columns: vec!["id".into()],
+            };
+            materialize(&mut transaction, &index).await.unwrap();
+            materialize(
+                &mut transaction,
+                &SchemaChange::TombstoneIndex("items_by_id".into()),
+            )
+            .await
+            .unwrap();
+            assert!(index_deleted(&transaction, "items_by_id").await.unwrap());
+            assert!(
+                index_schema(&transaction, "items_by_id")
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+
+            materialize(&mut transaction, &index).await.unwrap();
+            let schema = index_schema(&transaction, "items_by_id")
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(schema.table_name, "items");
+            assert_eq!(schema.column_indices, [0]);
+            assert!(!index_deleted(&transaction, "items_by_id").await.unwrap());
+            transaction.rollback().await.unwrap();
+        });
+    }
 }

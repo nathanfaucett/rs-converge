@@ -231,15 +231,15 @@ maps parsed endpoints to `Client::lazy_tcp` / `Client::lazy_unix`; when
 `remote` is disabled, remote schemes return a feature-disabled error naming
 the feature.
 
-| `Database` method                                                                                                    | Remote behavior                                    |
-| -------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
-| `execute`                                                                                                            | `Client::execute(statements)`                      |
-| `translate_and_execute`, `translate_and_execute_with_params`                                                         | translate locally, then `Client::execute`          |
-| `translate_and_select`                                                                                               | translate + execute remotely, then `rows_as`       |
-| `create_table`, `drop_table`                                                                                         | build the `DataDefinition` statement, then execute |
-| `index_schema`, `index_lookup`, `table_schema`, `table_generation_id`, `column_generation_id`, `index_generation_id` | unsupported-operation error                        |
-| `sync_manifest`, `export_sync_state`, `apply_sync_state` (`sync` feature)                                            | unsupported-operation error                        |
-| `row_conflicts`, `resolve_row`                                                                                       | unsupported-operation error                        |
+| `Database` method                                                         | Remote behavior                                    |
+| ------------------------------------------------------------------------- | -------------------------------------------------- |
+| `execute`                                                                 | `Client::execute(statements)`                      |
+| `translate_and_execute`, `translate_and_execute_with_params`              | translate locally, then `Client::execute`          |
+| `translate_and_select`                                                    | translate + execute remotely, then `rows_as`       |
+| `create_table`, `drop_table`                                              | build the `DataDefinition` statement, then execute |
+| `index_schema`, `index_lookup`, `table_schema`                            | unsupported-operation error                        |
+| `sync_manifest`, `export_sync_state`, `apply_sync_state` (`sync` feature) | unsupported-operation error                        |
+| `row_conflicts`, `resolve_row`                                            | unsupported-operation error                        |
 
 ## Implementation Checklist
 

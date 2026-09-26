@@ -61,35 +61,41 @@ impl AutomergeRowCodec {
 
     async fn columns<T>(
         transaction: &T,
-        table: uuid::Uuid,
+        table: &str,
         fallback_count: usize,
     ) -> EngineResult<Vec<Column>>
     where
         T: KernelTransaction,
     {
-        let table_id = table;
         let fields = transaction.scan_entries(ENGINE_TABLE_FIELDS_STORAGE);
         pin_mut!(fields);
         let mut columns = Vec::new();
         while let Some(field) = fields.next().await {
             let (key, field) = field.map_err(EngineError::custom)?;
-            if field.values.first().and_then(Value::as_uuid) != Some(&table_id) {
+            if key.values.first().and_then(Value::as_text) != Some(table) {
                 continue;
             }
             let index = field
                 .values
-                .get(4)
+                .get(2)
                 .and_then(Value::to_integer)
                 .ok_or(EngineError::custom("Invalid table field column index"))?;
+            if field
+                .values
+                .get(4)
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                continue;
+            }
             let id = key
                 .values
-                .first()
-                .and_then(Value::as_uuid)
-                .ok_or(EngineError::custom(ENGINE_TABLE_FIELDS_FIELD_COLUMN_ID))?
-                .to_string();
+                .get(1)
+                .and_then(Value::to_text)
+                .ok_or(EngineError::custom(ENGINE_TABLE_FIELDS_FIELD_COLUMN_ID))?;
             let default = field
                 .values
-                .get(3)
+                .get(1)
                 .cloned()
                 .ok_or(EngineError::custom("Invalid table field default"))?;
             columns.push((index, Column { id, default }));
@@ -112,7 +118,7 @@ impl AutomergeRowCodec {
 
     async fn document<T>(
         transaction: &T,
-        table: uuid::Uuid,
+        table: &str,
         id: &DocumentId,
     ) -> EngineResult<Option<AutoCommit>>
     where
@@ -128,7 +134,7 @@ impl AutomergeRowCodec {
 
     fn changes<'a, T>(
         transaction: &'a mut T,
-        table: uuid::Uuid,
+        table: &str,
     ) -> AutomergeBTreeTransaction<AutomergeChangeStore<BytesTableTransaction<'a, T>>>
     where
         T: KernelTransaction + Send,
@@ -141,7 +147,7 @@ impl AutomergeRowCodec {
 
     async fn metadata_deleted<T>(
         transaction: &T,
-        table: uuid::Uuid,
+        table: &str,
         row: &uuid::Uuid,
     ) -> EngineResult<bool>
     where
@@ -281,7 +287,7 @@ impl AutomergeRowCodec {
 
     async fn document_columns<T>(
         transaction: &T,
-        table: uuid::Uuid,
+        table: &str,
         document: &AutoCommit,
     ) -> EngineResult<Vec<Column>>
     where
@@ -302,7 +308,7 @@ impl AutomergeRowCodec {
     async fn store_row<T>(
         &self,
         transaction: &mut T,
-        table: uuid::Uuid,
+        table: &str,
         id: DocumentId,
         columns: &[Column],
         value: &Row,
@@ -339,18 +345,18 @@ impl<T> RowCodec<T> for AutomergeRowCodec
 where
     T: KernelTransaction + Send,
 {
-    async fn ensure_table(&self, transaction: &mut T, table: uuid::Uuid) -> EngineResult<()> {
+    async fn ensure_table(&self, transaction: &mut T, table: &str) -> EngineResult<()> {
         transaction.ensure_table(table).await
     }
 
-    async fn drop_table(&self, transaction: &mut T, table: uuid::Uuid) -> EngineResult<()> {
+    async fn drop_table(&self, transaction: &mut T, table: &str) -> EngineResult<()> {
         transaction.drop_table(table).await
     }
 
     async fn get_row(
         &self,
         transaction: &T,
-        table: uuid::Uuid,
+        table: &str,
         row: &uuid::Uuid,
     ) -> EngineResult<Option<Row>> {
         if Self::metadata_deleted(transaction, table, row).await? {
@@ -368,11 +374,10 @@ where
     fn scan_rows(
         &self,
         transaction: &T,
-        table: uuid::Uuid,
+        table: &str,
     ) -> impl Stream<Item = EngineResult<(uuid::Uuid, Row)>> {
-        let table_id = table;
         stream! {
-            let storage = table_id;
+            let storage = table;
             let changes = AutomergeChangeStore::new(BytesTable::new(transaction, storage));
             let documents = reconstruct_document_values(changes.range(..));
             pin_mut!(documents);
@@ -380,7 +385,6 @@ where
             while let Some(document) = documents.next().await {
                 let (id, document) = document.map_err(EngineError::custom)?;
                 let row = Self::row_id(&id)?;
-                let table = table_id;
                 let columns = Self::document_columns(transaction, table, &document).await?;
                 yield Self::decode_row(&document, &columns).map(|value| (row, value));
             }
@@ -390,7 +394,7 @@ where
     async fn encode_row(
         &self,
         transaction: &T,
-        table: uuid::Uuid,
+        table: &str,
         row_id: &uuid::Uuid,
         row: &Row,
         changed_columns: &[usize],
@@ -414,7 +418,7 @@ where
     async fn conflicted_columns(
         &self,
         transaction: &T,
-        table: uuid::Uuid,
+        table: &str,
         row: &uuid::Uuid,
     ) -> EngineResult<Vec<usize>> {
         let table_name = table;
@@ -431,7 +435,7 @@ where
     async fn encode_resolution(
         &self,
         transaction: &T,
-        table: uuid::Uuid,
+        table: &str,
         row_id: &uuid::Uuid,
         row: &Row,
         changed_columns: &[usize],
@@ -450,7 +454,7 @@ where
     async fn merge_row(
         &self,
         transaction: &mut T,
-        table: uuid::Uuid,
+        table: &str,
         row: uuid::Uuid,
         value: &[u8],
     ) -> EngineResult<Option<Row>> {
@@ -506,7 +510,7 @@ where
     async fn delete_row(
         &self,
         transaction: &mut T,
-        table: uuid::Uuid,
+        table: &str,
         row: &uuid::Uuid,
     ) -> EngineResult<Option<Row>> {
         let value = self.get_row(transaction, table, row).await?;
@@ -528,7 +532,7 @@ where
     async fn row_is_deleted(
         &self,
         transaction: &T,
-        table: uuid::Uuid,
+        table: &str,
         row: &uuid::Uuid,
     ) -> EngineResult<bool> {
         Self::metadata_deleted(transaction, table, row).await
@@ -537,7 +541,7 @@ where
     async fn put_row(
         &self,
         transaction: &mut T,
-        table: uuid::Uuid,
+        table: &str,
         row: uuid::Uuid,
         value: Row,
     ) -> EngineResult<()> {
@@ -554,7 +558,7 @@ where
     async fn remove_row(
         &self,
         transaction: &mut T,
-        table: uuid::Uuid,
+        table: &str,
         row: &uuid::Uuid,
     ) -> EngineResult<Option<Row>> {
         self.delete_row(transaction, table, row).await
@@ -565,7 +569,7 @@ impl<T> SyncRowCodec<T> for AutomergeRowCodec
 where
     T: KernelTransaction + Send,
 {
-    async fn row_ids(&self, transaction: &T, table: uuid::Uuid) -> EngineResult<Vec<uuid::Uuid>> {
+    async fn row_ids(&self, transaction: &T, table: &str) -> EngineResult<Vec<uuid::Uuid>> {
         let mut ids = BTreeMap::new();
         let rows = self.scan_rows(transaction, table);
         pin_mut!(rows);
@@ -583,7 +587,7 @@ where
     async fn export_state(
         &self,
         transaction: &T,
-        table: uuid::Uuid,
+        table: &str,
         row: uuid::Uuid,
     ) -> EngineResult<Option<Vec<u8>>> {
         let id = Self::document_id(&row);
@@ -596,7 +600,7 @@ where
     async fn merge_state(
         &self,
         transaction: &mut T,
-        table: uuid::Uuid,
+        table: &str,
         row: uuid::Uuid,
         state: &[u8],
     ) -> EngineResult<Option<Row>> {
@@ -628,7 +632,7 @@ where
     async fn export_metadata(
         &self,
         transaction: &T,
-        table: uuid::Uuid,
+        table: &str,
         row: uuid::Uuid,
     ) -> EngineResult<Vec<u8>> {
         let key = DocumentChangeKey::new_metadata(Self::document_id(&row)).encode_ordered();
@@ -641,7 +645,7 @@ where
     async fn merge_metadata(
         &self,
         transaction: &mut T,
-        table: uuid::Uuid,
+        table: &str,
         row: uuid::Uuid,
         metadata: &[u8],
     ) -> EngineResult<()> {
@@ -652,7 +656,7 @@ where
     async fn change_inventory(
         &self,
         transaction: &T,
-        table: uuid::Uuid,
+        table: &str,
         row: uuid::Uuid,
     ) -> EngineResult<Vec<SyncChangeId>> {
         let id = Self::document_id(&row);
@@ -679,7 +683,7 @@ where
     async fn export_change(
         &self,
         transaction: &T,
-        table: uuid::Uuid,
+        table: &str,
         row: uuid::Uuid,
         id: &SyncChangeId,
     ) -> EngineResult<Option<Vec<u8>>> {
@@ -697,7 +701,7 @@ where
     async fn apply_change(
         &self,
         transaction: &mut T,
-        table: uuid::Uuid,
+        table: &str,
         row: uuid::Uuid,
         id: &SyncChangeId,
         payload: &[u8],
@@ -746,7 +750,7 @@ impl AutomergeRowCodec {
     fn export_metadata_rows<T>(
         &self,
         transaction: &T,
-        table: uuid::Uuid,
+        table: &str,
     ) -> impl Stream<Item = EngineResult<(uuid::Uuid, Vec<u8>)>> + Send
     where
         T: KernelTransaction,
